@@ -1,6 +1,63 @@
 ---
 title: MongoDB — From Zero to Hero
-description: Learn MongoDB from the document model through CRUD, querying, indexing, the aggregation pipeline, data modeling, transactions, and scaling — with mongosh and driver examples.
+description: Learn MongoDB from first principles — the document model, CRUD, querying, indexing, the aggregation pipeline, data modeling, transactions, and scaling — with mongosh, Compass, and Node.js / Python / Go / Rust driver examples.
 template: splash
+hero:
+  tagline: A standalone, beginner→advanced course on MongoDB. From the document model and CRUD through querying, indexing, the aggregation pipeline, data modeling, transactions, and production scaling — every operation shown in mongosh, Node.js, Python, Go, and Rust, with MongoDB Compass tours and a Docker setup.
+  actions:
+    - text: Start here
+      link: /mongodb-from-zero-to-hero/en/intro-and-documents/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to CRUD
+      link: /mongodb-from-zero-to-hero/en/crud/
+      icon: open-book
 ---
-Coming soon.
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll learn
+
+<CardGrid>
+  <Card title="Intro & Documents" icon="rocket">
+    The document model, run MongoDB with Docker, mongosh + Compass, BSON, document vs relational. [Start →](/mongodb-from-zero-to-hero/en/intro-and-documents/)
+  </Card>
+  <Card title="CRUD" icon="pencil">
+    insertOne/Many, find, update operators ($set/$inc/$push), delete, upsert & bulkWrite. [Create & read →](/mongodb-from-zero-to-hero/en/crud/)
+  </Card>
+  <Card title="Querying" icon="magnifier">
+    Comparison & logical operators, querying arrays and nested documents, projection, sort, pagination. [Query →](/mongodb-from-zero-to-hero/en/querying/)
+  </Card>
+  <Card title="Indexes" icon="list-format">
+    Single & compound indexes, the ESR rule, explain() & query plans, multikey/text/TTL/partial/unique. [Speed up →](/mongodb-from-zero-to-hero/en/indexes/)
+  </Card>
+  <Card title="Aggregation" icon="random">
+    The pipeline — $match/$project, $group, $lookup joins, $unwind, $facet & $bucket. [Aggregate →](/mongodb-from-zero-to-hero/en/aggregation/)
+  </Card>
+  <Card title="Data Modeling" icon="puzzle">
+    Embedding vs referencing, relationships, schema-design patterns, $jsonSchema validation, anti-patterns. [Model →](/mongodb-from-zero-to-hero/en/data-modeling/)
+  </Card>
+  <Card title="Transactions & Consistency" icon="approve-check">
+    Single-document atomicity, multi-document transactions, read/write concerns, change streams. [Stay consistent →](/mongodb-from-zero-to-hero/en/transactions-and-consistency/)
+  </Card>
+  <Card title="Operations & Scaling" icon="seti:config">
+    Replica sets, sharding, performance & profiling, security & Atlas. [Run it →](/mongodb-from-zero-to-hero/en/operations-and-scaling/)
+  </Card>
+</CardGrid>
+
+## How this course works
+
+<CardGrid>
+  <Card title="Five ways to run every query" icon="seti:default">
+    Each operation is shown in mongosh, Node.js, Python, Go, and Rust — synced tabs, so pick your driver once and follow it through.
+  </Card>
+  <Card title="See the documents" icon="open-book">
+    Reads show the actual result documents as JSON, so you always know the shape of what comes back.
+  </Card>
+  <Card title="Diagrams + Compass + Docker" icon="puzzle">
+    Theme-aware Mermaid diagrams (pipelines, replica sets, sharding, the ESR rule), MongoDB Compass GUI tours, and a Docker setup to run it locally.
+  </Card>
+  <Card title="Bilingual + read mode" icon="translate">
+    English and ไทย, quizzes with saved progress, and a distraction-free read mode.
+  </Card>
+</CardGrid>
