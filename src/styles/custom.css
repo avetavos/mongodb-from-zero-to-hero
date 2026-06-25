@@ -1,4 +1,4 @@
-:root { --sl-color-accent: #2563EB; --sl-color-accent-low: #0b1f4d; --sl-color-accent-high: #c7d8fe; }
+:root { --sl-color-accent: #00ED64; --sl-color-accent-low: #06301c; --sl-color-accent-high: #b6f7d2; }
 
 .tsgo { display: grid; gap: 1rem; grid-template-columns: 1fr; margin: 1rem 0; }
 .tsgo__col header { display:flex; justify-content:space-between; align-items:center; font-weight:600; font-size:.85rem; padding:.25rem .5rem; background:var(--sl-color-gray-6); border-radius:6px 6px 0 0; }

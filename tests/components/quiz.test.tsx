@@ -11,6 +11,6 @@ describe('Quiz', () => {
     fireEvent.click(getByText('4'));
     fireEvent.click(getByText('Submit'));
     expect(getByText(/1 \/ 1/)).toBeTruthy();
-    expect(JSON.parse(localStorage.getItem('msdz2h:v1')!).quizzes['t/1']).toEqual({ correct: 1, total: 1 });
+    expect(JSON.parse(localStorage.getItem('mdbz2h:v1')!).quizzes['t/1']).toEqual({ correct: 1, total: 1 });
   });
 });
