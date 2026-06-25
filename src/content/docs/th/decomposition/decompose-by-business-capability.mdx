@@ -1,0 +1,197 @@
+---
+title: Decompose by Business Capability
+description: 'นิยาม service รอบ ๆ สิ่งที่ธุรกิจทำ — Order Management, Billing, Shipping — แทนที่จะรอบ ๆ ชั้นทางเทคนิค เพื่อให้เส้นแบ่งของ service อิงตาม business capability ที่มั่นคงขององค์กรและแทบไม่ต้องขยับ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท (Context)
+
+คุณกำลังจะแกะระบบออกเป็น service และคุณต้องการหลักการแรกมาชี้นำการตัดแบ่ง คุณต้องการเส้นแบ่งที่ยังคงมีเหตุผลในอีกสามปีข้างหน้า มีทีมเป็นเจ้าของที่สามารถส่งมอบงานได้โดยไม่ต้องเจรจาข้ามทีมตลอดเวลา สัญชาตญาณของวิศวกรหลายคนคือการหั่นตามเทคโนโลยี — service หนึ่งสำหรับ API, หนึ่งสำหรับ workflow engine, หนึ่งสำหรับ reporting jobs — เพราะนั่นคือวิธีที่ codebase ถูกจัดเรียงอยู่แล้วในหัวของพวกเขา
+
+## ปัญหา (Problem)
+
+เทคโนโลยีเปลี่ยนเร็วกว่าสิ่งที่ธุรกิจทำจริงมาก framework มาแล้วก็ไป, data store ถูกสับเปลี่ยน, API ย้ายจาก REST ไป gRPC — แต่ผู้ค้าปลีกก็ยังรับ order, เก็บเงินลูกค้า, และจัดส่งสินค้าอยู่ดี ถ้าคุณวาดเส้นแบ่งของ service รอบ ๆ เทคโนโลยีของวันนี้ ทุกครั้งที่เทคโนโลยีเหล่านั้นเปลี่ยนก็จะบังคับให้คุณต้อง decompose ใหม่ ที่แย่กว่านั้นคือ การหั่นตามชั้นรับประกันได้เลยว่าการเปลี่ยนแปลงทางธุรกิจที่ง่ายที่สุด — เช่น เพิ่มกฎส่วนลด — จะไปแตะ web service, logic service, และ data service พร้อมกัน เส้นที่คุณวาดไม่ตรงกับเส้นที่ระบบเปลี่ยนแปลงจริง
+
+ดังนั้นแรงต่าง ๆ คือ คุณต้องการเส้นแบ่งที่ *มั่นคง* ที่ให้ *cohesion สูง* (ทุกอย่างที่เปลี่ยนพร้อมกันอยู่ด้วยกัน) และ *coupling ต่ำ* (service แทบไม่ต้องเปลี่ยนพร้อม ๆ กัน) และที่แมปลงไปบนโครงสร้างขององค์กรได้อย่างหมดจด
+
+## วิธีแก้ (Solution)
+
+**business capability** คือสิ่งที่องค์กรทำเพื่อสร้างคุณค่า มันตอบคำถามว่า "ธุรกิจนี้ *ทำ* อะไร?" โดยจงใจมองข้ามว่า *ทำอย่างไร* ในปัจจุบัน capability มั่นคงก็เพราะมันถูกนิยามด้วยวัตถุประสงค์ ไม่ใช่ implementation สำหรับบริษัท e-commerce capability อาจรวมถึง Order Management, Product Catalog, Inventory, Billing, Shipping, และ Customer Accounts
+
+pattern นี้คือการ **นิยามหนึ่ง service ต่อหนึ่ง business capability** (หรือต่อหนึ่งกลุ่ม capability ที่เกี่ยวข้องกันอย่างใกล้ชิด) คุณระบุ capability ได้ด้วยการศึกษาองค์กร คือ วัตถุประสงค์, โครงสร้าง, และ value stream ที่มันดำเนินการ capability มักเป็นลำดับชั้น — Order Management อาจประกอบด้วย Order Capture, Order Fulfilment, และ Returns — ซึ่งให้คันโยกตามธรรมชาติแก่คุณในการเลือกว่าจะทำให้แต่ละ service หยาบหรือละเอียดแค่ไหน
+
+เพราะ capability สะท้อนว่าธุรกิจ *ทำอะไร* มากกว่า *ทำอย่างไร* เส้นแบ่งที่ได้จึงทนทาน คุณสามารถเขียนภายในของ service ใหม่ สับเปลี่ยน database หรือเปลี่ยน API ของมัน แล้วเส้นแบ่งก็ยังคงอยู่ เพราะ capability ที่มันเป็นตัวแทนนั้นไม่ได้เปลี่ยน
+
+export const capabilityDiagram = `flowchart LR
+  subgraph Org[Business capabilities]
+    direction TB
+    OM[Order Management]
+    PC[Product Catalog]
+    INV[Inventory]
+    BIL[Billing]
+    SHP[Shipping]
+    ACC[Customer Accounts]
+  end
+  OM --> SOM[Order Service]
+  PC --> SPC[Catalog Service]
+  INV --> SINV[Inventory Service]
+  BIL --> SBIL[Billing Service]
+  SHP --> SSHP[Shipping Service]
+  ACC --> SACC[Account Service]`;
+
+<Mermaid code={capabilityDiagram} title="แต่ละ business capability กลายเป็น service หนึ่งตัว เส้นแบ่งอิงตามสิ่งที่ธุรกิจทำ ไม่ใช่วิธีที่มันถูกสร้าง" />
+
+## ตัวอย่าง
+
+capability เป็นเรื่องเชิงแนวคิด แต่มันปรากฏออกมาอย่างเป็นรูปธรรมในรูปของ module ที่คุณใช้จัดระเบียบ code และความเป็นเจ้าของ snippet ด้านล่างไม่ใช่ algorithm มันเพียงบันทึก capability map เป็น manifest เล็ก ๆ ซึ่งเป็น artefact ประเภทที่ทีมเก็บไว้เพื่อทำให้เส้นแบ่งชัดเจนและตรวจทานได้
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type Capability = {
+      name: string;
+      service: string;
+      // Sub-capabilities help decide how coarse the service should be.
+      subCapabilities: string[];
+    };
+
+    const capabilityMap: Capability[] = [
+      { name: 'Order Management', service: 'order-service',
+        subCapabilities: ['Order Capture', 'Order Fulfilment', 'Returns'] },
+      { name: 'Billing', service: 'billing-service',
+        subCapabilities: ['Invoicing', 'Payments', 'Refunds'] },
+      { name: 'Shipping', service: 'shipping-service',
+        subCapabilities: ['Carrier Selection', 'Tracking'] },
+    ];
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class Capability:
+        name: str
+        service: str
+        # Sub-capabilities help decide how coarse the service should be.
+        sub_capabilities: list[str] = field(default_factory=list)
+
+    capability_map = [
+        Capability("Order Management", "order-service",
+                   ["Order Capture", "Order Fulfilment", "Returns"]),
+        Capability("Billing", "billing-service",
+                   ["Invoicing", "Payments", "Refunds"]),
+        Capability("Shipping", "shipping-service",
+                   ["Carrier Selection", "Tracking"]),
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type Capability struct {
+        Name    string
+        Service string
+        // SubCapabilities help decide how coarse the service should be.
+        SubCapabilities []string
+    }
+
+    var capabilityMap = []Capability{
+        {"Order Management", "order-service",
+            []string{"Order Capture", "Order Fulfilment", "Returns"}},
+        {"Billing", "billing-service",
+            []string{"Invoicing", "Payments", "Refunds"}},
+        {"Shipping", "shipping-service",
+            []string{"Carrier Selection", "Tracking"}},
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    struct Capability {
+        name: &'static str,
+        service: &'static str,
+        // Sub-capabilities help decide how coarse the service should be.
+        sub_capabilities: Vec<&'static str>,
+    }
+
+    fn capability_map() -> Vec<Capability> {
+        vec![
+            Capability { name: "Order Management", service: "order-service",
+                sub_capabilities: vec!["Order Capture", "Order Fulfilment", "Returns"] },
+            Capability { name: "Billing", service: "billing-service",
+                sub_capabilities: vec!["Invoicing", "Payments", "Refunds"] },
+            Capability { name: "Shipping", service: "shipping-service",
+                sub_capabilities: vec!["Carrier Selection", "Tracking"] },
+        ]
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่ได้ตามมา (Resulting context)
+
+สิ่งที่คุณได้:
+
+- **เส้นแบ่งที่มั่นคง** capability เปลี่ยนช้ากว่าเทคโนโลยีมาก service ที่วาดรอบ ๆ มันจึงแทบไม่ต้องถูกตัดใหม่ การเขียนใหม่ยังคงอยู่ภายใน service เดียว
+- **cohesion สูง, coupling ต่ำ** ทุกอย่างที่จำเป็นต่อการทำ capability หนึ่งอยู่ในที่เดียว ดังนั้นการเปลี่ยนแปลงทางธุรกิจส่วนใหญ่จึงตกลงใน service เดียวแทนที่จะกระเพื่อมข้ามหลาย service
+- **การแมปลงองค์กรอย่างหมดจด** capability มักเรียงตรงกับวิธีที่ธุรกิจคิดเกี่ยวกับตัวเองอยู่แล้ว ซึ่งทำให้การกำหนดความเป็นเจ้าของและความรับผิดชอบเป็นเรื่องง่าย
+
+สิ่งที่คุณต้องจ่าย:
+
+- **คุณต้องเข้าใจธุรกิจจริง ๆ** นี่คือส่วนที่ยาก การระบุ capability ได้ดีต้องอาศัยความรู้เรื่อง domain และการพูดคุยกับคนนอกฝ่ายวิศวกรรม map ที่ตื้นเขินจะให้เส้นแบ่งที่ตื้นเขิน
+- **ความหยาบ-ละเอียดเป็นเรื่องของวิจารณญาณ** capability ซ้อนกันได้ การตัดสินว่า Order Capture และ Returns เป็นหนึ่ง service หรือสองนั้นไม่ใช่เรื่องกลไก หยาบเกินไปคุณก็สร้าง mini-monolith ขึ้นมาใหม่ ละเอียดเกินไปคุณก็จมอยู่กับการคุยกันข้าม service
+- **มันไม่ได้ให้โมเดลร่วมแก่คุณด้วยตัวมันเอง** สอง service อาจใช้คำว่า "order" เพื่อหมายถึงสิ่งที่ต่างกันเล็กน้อย การ decompose ด้วย capability หยุดก่อนจะแก้ปัญหานั้น ซึ่งเป็นจุดที่การ decompose ด้วย subdomain เข้ามารับช่วงพอดี
+
+## pattern ที่เกี่ยวข้อง
+
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/th/decomposition/decompose-by-subdomain/) — วิธีที่เสริมกันและขับเคลื่อนด้วยโมเดล ในการค้นหาและทำให้เส้นแบ่งเดียวกันคมชัดขึ้น
+- [Service per Team](/microservices-design-from-zero-to-hero/th/decomposition/service-per-team/) — เพราะ capability แมปลงทีมได้ มันจึงทำให้ความเป็นเจ้าของเป็นเรื่องธรรมชาติ
+- [ภาพรวมการ decompose](/microservices-design-from-zero-to-hero/th/decomposition/) — กลยุทธ์นี้เข้ากันกับกลยุทธ์อื่น ๆ อย่างไร
+
+<Callout title="อะไร ไม่ใช่ อย่างไร">
+กลเม็ดทั้งหมดของ pattern นี้คือการถามว่า "ธุรกิจทำอะไร?" และดื้อรั้นปฏิเสธที่จะตอบว่า "ปัจจุบันมันถูกสร้างอย่างไร" ทันทีที่ชื่อ service บรรยายถึงเทคโนโลยีหรือชั้นหนึ่ง — `gateway-service`, `database-service` — คุณก็คงหั่นผิดแกนไปแล้ว ชื่อ capability อ่านได้เหมือนบทต่าง ๆ ในเรื่องราวของบริษัทเอง คือ Order Management, Billing, Shipping
+</Callout>
+
+export const quizCapability = [
+  {
+    q: 'What is a business capability?',
+    options: [
+      'เทคโนโลยีเฉพาะอย่างที่ระบบใช้',
+      'สิ่งที่องค์กรทำเพื่อสร้างคุณค่า ซึ่งถูกนิยามด้วยวัตถุประสงค์มากกว่า implementation',
+      'ชั้นหนึ่งในสถาปัตยกรรมของแอปพลิเคชัน',
+      'การจัดกลุ่มของตารางใน database',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why are boundaries drawn around business capabilities considered stable?',
+    options: [
+      'เพราะกฎหมายกำหนดให้มันต้องคงที่',
+      'เพราะ capability สะท้อน *สิ่งที่* ธุรกิจทำ ซึ่งเปลี่ยนช้ากว่าเทคโนโลยีที่ใช้ทำมันมาก',
+      'เพราะ service ไม่สามารถ redeploy ได้อีกเลยเมื่อสร้างแล้ว',
+      'เพราะ capability ถูกเลือกโดยผู้ขาย database',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine drawback of decomposing by business capability?',
+    options: [
+      'มันบังคับให้ทุก service ใช้ database ร่วมกันเพียงตัวเดียว',
+      'มันต้องอาศัยความเข้าใจ domain อย่างแท้จริง และการเลือกความหยาบ-ละเอียดที่ถูกต้องเป็นเรื่องของวิจารณญาณ',
+      'มันทำให้ service ไม่สามารถ deploy ได้อย่างอิสระ',
+      'มันใช้ได้กับภาษาโปรแกรมเดียวเท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/decompose-by-business-capability" questions={quizCapability} />
+
+<ProgressTracker client:visible id="decomposition/decompose-by-business-capability" />

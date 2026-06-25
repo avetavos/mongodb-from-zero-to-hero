@@ -1,0 +1,197 @@
+---
+title: Decompose by Business Capability
+description: 'Define services around what the business does — Order Management, Billing, Shipping — rather than around technical layers, so service boundaries follow the organization''s stable capabilities and rarely need to move.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You are about to carve a system into services and you need a first principle to guide the cuts. You want boundaries that will still make sense in three years, owned by teams that can ship without constant cross-team negotiation. The instinct of many engineers is to slice by technology — a service for the API, a service for the workflow engine, a service for the reporting jobs — because that is how the codebase is already arranged in their heads.
+
+## Problem
+
+Technology changes far faster than what the business actually does. Frameworks come and go, data stores get swapped, an API moves from REST to gRPC — but a retailer still takes orders, charges customers, and ships goods. If you draw service boundaries around today's technology, every one of those technology shifts forces a re-decomposition. Worse, slicing by layer guarantees that the simplest business change — say, adding a discount rule — touches the web service, the logic service, and the data service at once. The lines you drew do not match the lines along which the system actually changes.
+
+So the forces are: you want boundaries that are *stable*, that produce *high cohesion* (everything that changes together lives together) and *low coupling* (services rarely have to change in lockstep), and that map cleanly onto how the organization is structured.
+
+## Solution
+
+A **business capability** is something an organization does in order to generate value — it answers "*what* does this business do?", deliberately ignoring *how* it is currently done. A capability is stable precisely because it is defined by purpose, not implementation. For an e-commerce company the capabilities might include Order Management, Product Catalog, Inventory, Billing, Shipping, and Customer Accounts.
+
+The pattern is to **define one service per business capability** (or per closely related group of capabilities). You identify the capabilities by studying the organization: its purpose, its structure, and the value streams it operates. Capabilities are often hierarchical — Order Management might contain Order Capture, Order Fulfilment, and Returns — which gives you a natural lever for choosing how coarse or fine to make each service.
+
+Because capabilities reflect *what* the business does rather than *how*, the resulting boundaries are durable. You can rewrite a service's internals, swap its database, or change its API and the boundary still holds, because the capability it represents has not changed.
+
+export const capabilityDiagram = `flowchart LR
+  subgraph Org[Business capabilities]
+    direction TB
+    OM[Order Management]
+    PC[Product Catalog]
+    INV[Inventory]
+    BIL[Billing]
+    SHP[Shipping]
+    ACC[Customer Accounts]
+  end
+  OM --> SOM[Order Service]
+  PC --> SPC[Catalog Service]
+  INV --> SINV[Inventory Service]
+  BIL --> SBIL[Billing Service]
+  SHP --> SSHP[Shipping Service]
+  ACC --> SACC[Account Service]`;
+
+<Mermaid code={capabilityDiagram} title="Each business capability becomes a service; the boundary follows what the business does, not how it is built" />
+
+## Example
+
+Capabilities are conceptual, but they show up concretely as the modules you organize code and ownership around. The snippet below is not an algorithm — it simply records the capability map as a small manifest, the kind of artefact a team keeps to make the boundaries explicit and reviewable.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type Capability = {
+      name: string;
+      service: string;
+      // Sub-capabilities help decide how coarse the service should be.
+      subCapabilities: string[];
+    };
+
+    const capabilityMap: Capability[] = [
+      { name: 'Order Management', service: 'order-service',
+        subCapabilities: ['Order Capture', 'Order Fulfilment', 'Returns'] },
+      { name: 'Billing', service: 'billing-service',
+        subCapabilities: ['Invoicing', 'Payments', 'Refunds'] },
+      { name: 'Shipping', service: 'shipping-service',
+        subCapabilities: ['Carrier Selection', 'Tracking'] },
+    ];
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class Capability:
+        name: str
+        service: str
+        # Sub-capabilities help decide how coarse the service should be.
+        sub_capabilities: list[str] = field(default_factory=list)
+
+    capability_map = [
+        Capability("Order Management", "order-service",
+                   ["Order Capture", "Order Fulfilment", "Returns"]),
+        Capability("Billing", "billing-service",
+                   ["Invoicing", "Payments", "Refunds"]),
+        Capability("Shipping", "shipping-service",
+                   ["Carrier Selection", "Tracking"]),
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type Capability struct {
+        Name    string
+        Service string
+        // SubCapabilities help decide how coarse the service should be.
+        SubCapabilities []string
+    }
+
+    var capabilityMap = []Capability{
+        {"Order Management", "order-service",
+            []string{"Order Capture", "Order Fulfilment", "Returns"}},
+        {"Billing", "billing-service",
+            []string{"Invoicing", "Payments", "Refunds"}},
+        {"Shipping", "shipping-service",
+            []string{"Carrier Selection", "Tracking"}},
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    struct Capability {
+        name: &'static str,
+        service: &'static str,
+        // Sub-capabilities help decide how coarse the service should be.
+        sub_capabilities: Vec<&'static str>,
+    }
+
+    fn capability_map() -> Vec<Capability> {
+        vec![
+            Capability { name: "Order Management", service: "order-service",
+                sub_capabilities: vec!["Order Capture", "Order Fulfilment", "Returns"] },
+            Capability { name: "Billing", service: "billing-service",
+                sub_capabilities: vec!["Invoicing", "Payments", "Refunds"] },
+            Capability { name: "Shipping", service: "shipping-service",
+                sub_capabilities: vec!["Carrier Selection", "Tracking"] },
+        ]
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Stable boundaries.** Capabilities change far more slowly than technology, so services drawn around them rarely need to be re-cut. A rewrite stays inside one service.
+- **High cohesion, low coupling.** Everything needed to perform a capability lives in one place, so most business changes land in a single service rather than rippling across several.
+- **A clean map to the organization.** Capabilities tend to line up with how the business already thinks about itself, which makes ownership and accountability easy to assign.
+
+What it costs you:
+
+- **You must actually understand the business.** This is the hard part. Identifying capabilities well requires domain knowledge and conversations with people outside engineering; a superficial map produces superficial boundaries.
+- **Granularity is a judgement call.** Capabilities nest, so deciding whether Order Capture and Returns are one service or two is not mechanical — get it too coarse and you rebuild a mini-monolith, too fine and you drown in inter-service chatter.
+- **It does not, by itself, give you a shared model.** Two services may use the word "order" to mean subtly different things; capability decomposition stops short of resolving that, which is exactly where decomposing by subdomain picks up.
+
+## Related patterns
+
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-subdomain/) — a complementary, model-driven way to find and sharpen the same boundaries.
+- [Service per Team](/microservices-design-from-zero-to-hero/en/decomposition/service-per-team/) — because capabilities map onto teams, they make ownership natural.
+- [Decomposition overview](/microservices-design-from-zero-to-hero/en/decomposition/) — how this strategy fits with the others.
+
+<Callout title="What, not how">
+The whole trick of this pattern is to ask "what does the business do?" and stubbornly refuse to answer with "how it is currently built". The moment a service name describes a technology or a layer — a `gateway-service`, a `database-service` — you have probably sliced along the wrong axis. Capability names read like the chapters of the company's own story: Order Management, Billing, Shipping.
+</Callout>
+
+export const quizCapability = [
+  {
+    q: 'What is a business capability?',
+    options: [
+      'A specific technology the system uses',
+      'Something the organization does to generate value, defined by purpose rather than implementation',
+      'A layer in the application architecture',
+      'A database table grouping',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why are boundaries drawn around business capabilities considered stable?',
+    options: [
+      'Because the law requires them to stay fixed',
+      'Because capabilities reflect *what* the business does, which changes far more slowly than the technology used to do it',
+      'Because services can never be redeployed once created',
+      'Because capabilities are chosen by the database vendor',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine drawback of decomposing by business capability?',
+    options: [
+      'It forces every service to share one database',
+      'It requires real domain understanding, and choosing the right granularity is a judgement call',
+      'It makes services impossible to deploy independently',
+      'It only works for a single programming language',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/decompose-by-business-capability" questions={quizCapability} />
+
+<ProgressTracker client:visible id="decomposition/decompose-by-business-capability" />

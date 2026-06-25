@@ -1,0 +1,219 @@
+---
+title: Messaging
+description: 'Let services communicate through a broker instead of calling each other directly: producers publish messages, consumers process them on their own schedule, and the two sides never have to be up at the same time.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+When a customer places an order, several things must happen: billing must charge the card, the warehouse must prepare a shipment, and a confirmation email must go out. None of these needs to finish before the buyer sees "order placed". If the Order service called each downstream service synchronously, a slow email provider could stall the checkout, and any one of those services being down would fail the sale outright.
+
+## Problem
+
+You want one service to trigger work in others without waiting for them and without being coupled to whether they are currently available. Some of that work should fan out — one order event should drive billing, shipping, and notifications independently, and you would like to add a fourth reaction later without touching the Order service at all. A direct synchronous call gives you none of this: it blocks, it couples the two services in time, and it knows about exactly one recipient. How do you let services collaborate while staying decoupled in both time and identity?
+
+## Solution
+
+**Messaging** is the asynchronous style. Instead of calling a service, a **producer** hands a message to a **message broker** — infrastructure that stores the message durably and delivers it to **consumers**. The producer does not wait for the work to be done and does not even need to know who the consumers are. The broker decouples the two sides in time: a consumer that is down simply processes its backlog when it returns.
+
+Brokers offer two delivery shapes:
+
+- **Queues (point-to-point)** — each message is delivered to exactly one consumer. This carries **commands**: "charge this order". Multiple instances of a consumer compete for messages, which load-balances the work.
+- **Topics (publish/subscribe)** — each message is delivered to every subscriber. This carries **events**: "an order was placed". Billing, shipping, and notifications each subscribe independently, and a new subscriber can be added without changing the producer.
+
+export const messagingFlow = `flowchart LR
+  P[Order Service<br/>producer] -->|OrderPlaced| Broker[(Message Broker<br/>topic)]
+  Broker --> B[Billing Service]
+  Broker --> S[Shipping Service]
+  Broker --> N[Notification Service]
+  B -.->|buffered if down| Broker`;
+
+<Mermaid code={messagingFlow} title="Messaging — a producer publishes one event to a broker, which fans it out to independent consumers" />
+
+## Example
+
+A small wrapper over a broker that publishes an `OrderPlaced` event and consumes it on the other side. The publish call returns as soon as the broker has the message; the consumer acknowledges only after it has finished its work, so an unprocessed message is redelivered. Each example is self-contained and idiomatic to its language.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type OrderPlaced = { orderId: string; customerId: string; total: number };
+
+    // Publish: hand the event to the broker and return immediately.
+    async function publishOrderPlaced(broker: Broker, event: OrderPlaced): Promise<void> {
+      await broker.publish('orders.placed', JSON.stringify(event));
+    }
+
+    // Consume: process each message, then acknowledge it.
+    function consumeOrders(broker: Broker): void {
+      broker.subscribe('orders.placed', async (raw, ack) => {
+        const event = JSON.parse(raw) as OrderPlaced;
+        await chargeCustomer(event.customerId, event.total);
+        await ack(); // ack only after the work succeeded
+      });
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import json
+    from dataclasses import dataclass, asdict
+
+    @dataclass
+    class OrderPlaced:
+        order_id: str
+        customer_id: str
+        total: float
+
+    # Publish: hand the event to the broker and return immediately.
+    async def publish_order_placed(broker, event: OrderPlaced) -> None:
+        await broker.publish("orders.placed", json.dumps(asdict(event)))
+
+    # Consume: process each message, then acknowledge it.
+    def consume_orders(broker) -> None:
+        async def handler(raw: str, ack) -> None:
+            data = json.loads(raw)
+            await charge_customer(data["customer_id"], data["total"])
+            await ack()  # ack only after the work succeeded
+
+        broker.subscribe("orders.placed", handler)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type OrderPlaced struct {
+        OrderID    string  `json:"orderId"`
+        CustomerID string  `json:"customerId"`
+        Total      float64 `json:"total"`
+    }
+
+    // Publish: hand the event to the broker and return immediately.
+    func PublishOrderPlaced(broker Broker, e OrderPlaced) error {
+        payload, err := json.Marshal(e)
+        if err != nil {
+            return err
+        }
+        return broker.Publish("orders.placed", payload)
+    }
+
+    // Consume: process each message, then acknowledge it.
+    func ConsumeOrders(broker Broker) {
+        broker.Subscribe("orders.placed", func(raw []byte, ack func() error) {
+            var e OrderPlaced
+            _ = json.Unmarshal(raw, &e)
+            if err := ChargeCustomer(e.CustomerID, e.Total); err != nil {
+                return // not acked -> redelivered later
+            }
+            _ = ack()
+        })
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use serde::{Serialize, Deserialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct OrderPlaced {
+        order_id: String,
+        customer_id: String,
+        total: f64,
+    }
+
+    // Publish: hand the event to the broker and return immediately.
+    async fn publish_order_placed(broker: &Broker, event: &OrderPlaced) -> anyhow::Result<()> {
+        let payload = serde_json::to_vec(event)?;
+        broker.publish("orders.placed", payload).await?;
+        Ok(())
+    }
+
+    // Consume: process each message, then acknowledge it.
+    async fn consume_orders(broker: &Broker) -> anyhow::Result<()> {
+        broker.subscribe("orders.placed", |raw, ack| async move {
+            let event: OrderPlaced = serde_json::from_slice(&raw)?;
+            charge_customer(&event.customer_id, event.total).await?;
+            ack().await?; // ack only after the work succeeded
+            Ok(())
+        }).await
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Loose coupling.** The producer does not block, does not know its consumers, and does not depend on them being up. New consumers subscribe without any change to the producer, so the system grows by addition rather than modification.
+- **Buffering and resilience.** The broker absorbs traffic spikes and holds messages while a consumer is down or deploying. Slowness in one consumer never propagates back to the producer.
+- **Natural fan-out.** A single published event drives many independent reactions, which is exactly what one-to-many interactions need.
+
+What it costs you:
+
+- **The broker is critical infrastructure.** Everything now depends on the broker being available, durable, and correctly operated. It must be clustered and monitored, and it becomes a new thing that can fail.
+- **Eventual consistency.** Because work happens later, there is a window where the order exists but the email has not been sent. Callers cannot read a result back immediately the way a synchronous call returns one.
+- **Operational complexity.** You must handle duplicate delivery (most brokers are at-least-once, so consumers must be **idempotent**), out-of-order messages, and poison messages that need a dead-letter queue. Debugging a flow spread across publishers and subscribers is harder than following a single call stack.
+
+## Related patterns
+
+- [Remote Procedure Invocation](/microservices-design-from-zero-to-hero/en/communication/remote-procedure-invocation/) — the synchronous alternative, when the caller truly needs an immediate answer.
+- [Saga](/microservices-design-from-zero-to-hero/en/data-management/saga/) — uses messaging to coordinate a multi-service transaction.
+- [Event Sourcing](/microservices-design-from-zero-to-hero/en/data-management/event-sourcing/) — a reliable way to produce the events you publish.
+
+<Callout title="Idempotent consumers are not optional">
+Most brokers guarantee at-least-once delivery, which means your consumer will eventually see the same message twice. If processing "charge order 17" is not idempotent, a redelivery double-charges the customer. Make consumers safe to repeat — deduplicate on a message id, or design the operation so applying it twice has the same effect as applying it once.
+</Callout>
+
+export const quizMessaging = [
+  {
+    q: 'How does messaging decouple two services in time?',
+    options: [
+      'It compresses messages so they transmit faster',
+      'The producer hands the message to a broker and moves on, so the consumer can process it whenever it is ready — even if it was down when the message was sent',
+      'It forces both services to share a clock',
+      'It calls the consumer synchronously but with a long timeout',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the difference between a queue and a topic?',
+    options: [
+      'A queue is faster; a topic is slower',
+      'A queue delivers each message to exactly one consumer (commands); a topic delivers each message to every subscriber (events)',
+      'A queue is durable; a topic is always in memory',
+      'There is no difference; they are two names for the same thing',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must messaging consumers usually be idempotent?',
+    options: [
+      'Because the broker encrypts messages',
+      'Because at-least-once delivery means the same message can arrive more than once, and reprocessing must not cause harm',
+      'Because topics reorder messages alphabetically',
+      'Because producers retry only on Tuesdays',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a real cost of adopting messaging?',
+    options: [
+      'It makes every call synchronous',
+      'The broker becomes critical infrastructure that must be highly available and operated carefully',
+      'It prevents adding new consumers',
+      'It eliminates eventual consistency',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/messaging" questions={quizMessaging} />
+
+<ProgressTracker client:visible id="communication/messaging" />

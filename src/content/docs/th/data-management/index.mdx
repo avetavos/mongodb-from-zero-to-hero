@@ -1,0 +1,106 @@
+---
+title: การจัดการข้อมูลใน Microservices
+description: 'ทำไมข้อมูลจึงเป็นส่วนที่ยากที่สุดของ microservices: แต่ละ service เป็นเจ้าของข้อมูลของตัวเอง ทำให้ transaction และ join ข้ามหลาย service หายไป — และมีห้า pattern ที่นำความสอดคล้องกลับคืนมา'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## บริบท (Context)
+
+คุณได้แยก monolith ออกเป็นหลาย service แล้ว ตอนนี้แต่ละ service ทำงานเป็น deployable ของตัวเอง มีทีมของตัวเอง และมีจังหวะการ release ของตัวเอง การแยกส่วนแบบนี้ดูสะอาดตาบนกระดานไวท์บอร์ด — จนกระทั่งคุณไปถึงเรื่องฐานข้อมูล ใน monolith มี schema เดียว connection pool เดียว และขอบเขต transaction เดียว คำสั่ง `BEGIN ... COMMIT` ตัวเดียวสามารถแตะตาราง orders ตาราง inventory และบัญชีแยกประเภทของลูกค้าได้แบบ atomic และคำสั่ง `SELECT` ตัวเดียวที่มี join สามารถเย็บข้อมูลเหล่านั้นกลับเข้าด้วยกันเพื่อทำรายงานได้
+
+ในวินาทีที่ตารางเหล่านั้นไปอยู่หลัง service ที่แยกกัน รากฐานร่วมนั้นก็หายไป โมดูลนี้พูดถึงสิ่งที่จะมาแทนที่มัน
+
+## ปัญหา (Problem)
+
+ถ้าทุก service เป็นอิสระอย่างแท้จริง ก็ไม่มี service ใดที่จะเอื้อมเข้าไปในตารางของ service อื่นได้ แต่การดำเนินงานทางธุรกิจจริง ๆ มักไม่เคารพขอบเขตของ service การสั่งซื้อหนึ่งครั้งแตะทั้ง orders, inventory และ payments หน้า dashboard ของลูกค้าต้องการข้อมูลที่กระจายอยู่ตามครึ่งโหลของ service ดังนั้นคำถามหลักของโมดูลนี้คือ:
+
+คุณจะรักษาข้อมูลให้สอดคล้องและ query ได้ข้าม service ได้อย่างไร เมื่อไม่มีฐานข้อมูลร่วม ไม่มี distributed join และไม่มี global transaction?
+
+## วิธีแก้ (Solution)
+
+คำตอบไม่ใช่กลไกเดียว แต่เป็นกลุ่มเล็ก ๆ ของ pattern ที่ทำงานร่วมกัน ตัวแรกสร้างขอบเขตขึ้นมา ส่วนที่เหลือคืนความสามารถที่ขอบเขตนั้นพรากไป
+
+แต่ละ service เก็บที่จัดเก็บข้อมูลส่วนตัวของตัวเอง service อื่นจะโต้ตอบกับข้อมูลนั้นได้ผ่าน API ของ service ที่เป็นเจ้าของ หรือผ่าน event ที่มัน publish ออกมาเท่านั้น
+
+export const overviewDiagram = `flowchart TB
+  Client[Client / Gateway] --> OAPI
+  Client --> IAPI
+  Client --> PAPI
+  subgraph Orders[Order Service]
+    OAPI[API]
+    ODB[(Orders DB)]
+    OAPI --> ODB
+  end
+  subgraph Inventory[Inventory Service]
+    IAPI[API]
+    IDB[(Inventory DB)]
+    IAPI --> IDB
+  end
+  subgraph Payments[Payment Service]
+    PAPI[API]
+    PDB[(Payments DB)]
+    PAPI --> PDB
+  end
+  OAPI -. events .-> IAPI
+  OAPI -. events .-> PAPI`;
+
+<Mermaid code={overviewDiagram} title="แต่ละ service เป็นเจ้าของฐานข้อมูลส่วนตัว การทำงานร่วมกันเกิดขึ้นผ่าน API และ event" />
+
+ห้า pattern ในโมดูลนี้ประกอบเข้าด้วยกันแบบนี้:
+
+- **Database per Service** — ทุก service เป็นเจ้าของฐานข้อมูลส่วนตัวที่มีเพียงมันเท่านั้นที่แตะได้โดยตรง นี่คือรากฐานที่ทำให้ส่วนที่เหลือจำเป็น
+- **Saga** — รักษาข้อมูลให้สอดคล้องข้าม service โดยไม่ต้องใช้ distributed transaction ด้วยการร้อย local transaction เข้าด้วยกัน และยกเลิกมันด้วย compensating action เมื่อมีบางอย่างล้มเหลว
+- **API Composition** — ตอบ query ที่พาดข้ามหลาย service โดยเรียกแต่ละ service แล้ว join ผลลัพธ์เข้าด้วยกันใน memory
+- **CQRS** — แยกฝั่งเขียนออกจาก read model ที่สร้างมาเพื่อจุดประสงค์เฉพาะหนึ่งหรือหลายตัว ซึ่งถูกซิงค์ให้ตรงกันด้วย event ทำให้ query ข้าม service กลายเป็นการ lookup ในเครื่องที่รวดเร็ว
+- **Event Sourcing** — เก็บ state เป็น log ของ event แบบ append-only เล่น log ซ้ำเพื่อสร้าง state ขึ้นใหม่ และ publish event เดียวกันนั้นไปยังทุกคนอื่นอย่างน่าเชื่อถือ
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+เราเริ่มต้นด้วยขอบเขต (Database per Service) จากนั้นจัดการกับการเขียนที่พาดข้าม service (Saga) และการอ่านที่พาดข้าม service (API Composition และ CQRS) และจบด้วยโมเดลการจัดเก็บที่ทำให้การ publish event อย่างน่าเชื่อถือเป็นเรื่องธรรมชาติ (Event Sourcing) แต่ละบทเรียนมีรูปแบบเดียวกัน: สถานการณ์ที่นำไปสู่ pattern แรงที่ขัดแย้งกัน สิ่งที่ pattern ทำ ไดอะแกรม โค้ดตัวอย่างที่รันได้ และมุมมองตรงไปตรงมาว่า pattern นั้นมีต้นทุนอะไรกับคุณบ้าง
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Database per Service](/microservices-design-from-zero-to-hero/th/data-management/database-per-service/) — เริ่มที่นี่ เพราะมันคือรากฐาน
+- [Saga](/microservices-design-from-zero-to-hero/th/data-management/saga/) — pattern ตัวเด่นสำหรับการเขียนข้าม service
+
+<Callout title="การเปลี่ยนกรอบความคิด">
+ใน monolith ความสอดคล้อง (consistency) เป็นคุณสมบัติของฐานข้อมูล ใน microservices ความสอดคล้องกลายเป็นคุณสมบัติของการออกแบบของคุณ คุณแลกการรับประกันแบบอัตโนมัติ ทันที และ strongly consistent กับแบบที่ชัดเจน eventual และจัดวางอย่างระมัดระวัง — และเพื่อแลกเปลี่ยน คุณจะได้ service ที่ scale, deploy และล้มเหลวได้อย่างอิสระ
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ทำไม transaction และ join ข้าม service จึงหายไปเมื่อคุณนำ microservices มาใช้?',
+    options: [
+      'เพราะ SQL ไม่ได้รับอนุญาตให้ใช้ใน microservices',
+      'เพราะแต่ละ service เป็นเจ้าของฐานข้อมูลส่วนตัวที่ไม่มี service อื่นเข้าถึงได้โดยตรง',
+      'เพราะ microservices ห้ามใช้ฐานข้อมูลเชิงสัมพันธ์',
+      'เพราะทุก service ต้องใช้ภาษาโปรแกรมที่แตกต่างกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'pattern ใดเป็นรากฐานที่ทำให้อีกสี่ตัวจำเป็น?',
+    options: ['Saga', 'CQRS', 'Database per Service', 'Event Sourcing'],
+    answer: 2,
+  },
+  {
+    q: 'การแลกเปลี่ยน (trade-off) หลักที่โมดูลนี้พูดถึงคืออะไร?',
+    options: [
+      'โค้ดที่เร็วขึ้นแลกกับฐานข้อมูลที่ช้าลง',
+      'strong consistency แบบอัตโนมัติแลกกับ consistency ที่ชัดเจน และมักเป็น eventual ซึ่งคุณออกแบบเอง',
+      'เซิร์ฟเวอร์น้อยลงแลกกับโค้ดที่มากขึ้น',
+      'ความปลอดภัยที่ดีขึ้นแลกกับประสิทธิภาพที่แย่ลง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="data-management/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="data-management/index" />

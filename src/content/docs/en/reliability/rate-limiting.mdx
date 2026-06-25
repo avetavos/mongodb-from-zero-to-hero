@@ -1,0 +1,261 @@
+---
+title: Rate Limiting and Throttling
+description: 'Protect a service from overload by capping the rate of incoming requests, typically with a token bucket. Excess traffic is shed (rejected with a 429) or queued, so a spike or a misbehaving client cannot push the service past the capacity it can actually serve.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Every service has a ceiling. A given instance can serve only so many requests per second before its CPU saturates, its connection pool fills, or its memory climbs. Most of the time you run comfortably below that ceiling. But traffic is not smooth: a marketing email goes out, a popular client deploys a tight retry loop, a scraper discovers your API, or an upstream outage suddenly redirects a flood of requests your way.
+
+The previous patterns in this module protect you from *your dependencies* failing. Rate limiting protects you from *your callers* — and from your own success.
+
+## Problem
+
+When demand exceeds capacity, a service does not fail gracefully on its own. It tips over. As requests arrive faster than they complete, queues grow, latency climbs, timeouts fire, and clients retry — adding *more* load to an already overloaded service. Past the tipping point, throughput does not just plateau; it collapses, because the server spends its time managing a backlog it can never clear. A service that could comfortably serve 1,000 requests per second can end up serving *zero* under a flood of 5,000, because every request times out before it completes.
+
+So the forces are: you have a finite capacity, demand can spike unpredictably above it, and serving *everything badly* is worse than serving *most things well* — you need to keep the service operating inside its safe envelope even when more work arrives than it can handle.
+
+## Solution
+
+**Rate limiting** caps how much work a service accepts over time, holding it inside its safe envelope. When requests arrive faster than the configured limit, the excess is either **shed** (rejected immediately, conventionally with HTTP `429 Too Many Requests`) or briefly **queued** to smooth out short bursts. Either way, the work that *is* admitted is served well.
+
+The most common mechanism is the **token bucket**. A bucket holds up to `capacity` tokens and refills at a steady rate of `refillPerSecond` tokens. Each request must take one token to proceed; if the bucket is empty, the request is rejected. Because the bucket can hold a reserve of tokens, it permits short **bursts** (spend the accumulated tokens) while still enforcing the long-run average rate (the refill rate). That combination — bursty in the small, bounded in the large — matches how real traffic actually behaves.
+
+export const tokenBucket = `flowchart LR
+  REF["Refill: +r tokens / second"] --> B
+  subgraph B[Token bucket • capacity C]
+    T[(tokens)]
+  end
+  REQ[Incoming request] --> CHK{token<br/>available?}
+  B --> CHK
+  CHK -- yes --> TAKE[take 1 token → allow]
+  CHK -- no --> DROP[shed → HTTP 429]`;
+
+<Mermaid code={tokenBucket} title="Token bucket — steady refill allows a sustained rate; the stored capacity absorbs short bursts; empty means shed" />
+
+## Example
+
+Here is a token-bucket limiter. It lazily refills based on elapsed time, then admits a request only if a token is available. Each example is self-contained and idiomatic to its language.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    class TokenBucket {
+      private tokens: number;
+      private last: number = Date.now();
+
+      constructor(
+        private readonly capacity: number,
+        private readonly refillPerSec: number,
+      ) {
+        this.tokens = capacity;
+      }
+
+      private refill(): void {
+        const now = Date.now();
+        const elapsed = (now - this.last) / 1000;
+        this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerSec);
+        this.last = now;
+      }
+
+      tryAcquire(): boolean {
+        this.refill();
+        if (this.tokens >= 1) {
+          this.tokens -= 1;
+          return true;
+        }
+        return false;
+      }
+    }
+
+    const limiter = new TokenBucket(100, 50); // burst 100, sustain 50/s
+    if (!limiter.tryAcquire()) {
+      return new Response('Too Many Requests', { status: 429 });
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import time
+
+    class TokenBucket:
+        def __init__(self, capacity: int, refill_per_sec: float):
+            self.capacity = capacity
+            self.refill_per_sec = refill_per_sec
+            self.tokens = float(capacity)
+            self.last = time.monotonic()
+
+        def _refill(self) -> None:
+            now = time.monotonic()
+            elapsed = now - self.last
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_sec)
+            self.last = now
+
+        def try_acquire(self) -> bool:
+            self._refill()
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True
+            return False
+
+    limiter = TokenBucket(capacity=100, refill_per_sec=50)  # burst 100, sustain 50/s
+    if not limiter.try_acquire():
+        return Response(status_code=429, content="Too Many Requests")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type TokenBucket struct {
+        mu           sync.Mutex
+        capacity     float64
+        refillPerSec float64
+        tokens       float64
+        last         time.Time
+    }
+
+    func NewTokenBucket(capacity, refillPerSec float64) *TokenBucket {
+        return &TokenBucket{
+            capacity:     capacity,
+            refillPerSec: refillPerSec,
+            tokens:       capacity,
+            last:         time.Now(),
+        }
+    }
+
+    func (b *TokenBucket) TryAcquire() bool {
+        b.mu.Lock()
+        defer b.mu.Unlock()
+        now := time.Now()
+        elapsed := now.Sub(b.last).Seconds()
+        b.tokens = math.Min(b.capacity, b.tokens+elapsed*b.refillPerSec)
+        b.last = now
+        if b.tokens >= 1 {
+            b.tokens--
+            return true
+        }
+        return false
+    }
+
+    // limiter := NewTokenBucket(100, 50) // burst 100, sustain 50/s
+    // if !limiter.TryAcquire() { http.Error(w, "Too Many Requests", 429) }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Instant;
+
+    pub struct TokenBucket {
+        capacity: f64,
+        refill_per_sec: f64,
+        tokens: f64,
+        last: Instant,
+    }
+
+    impl TokenBucket {
+        pub fn new(capacity: f64, refill_per_sec: f64) -> Self {
+            Self {
+                capacity,
+                refill_per_sec,
+                tokens: capacity,
+                last: Instant::now(),
+            }
+        }
+
+        pub fn try_acquire(&mut self) -> bool {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.last).as_secs_f64();
+            self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+            self.last = now;
+            if self.tokens >= 1.0 {
+                self.tokens -= 1.0;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    // let mut limiter = TokenBucket::new(100.0, 50.0); // burst 100, sustain 50/s
+    // if !limiter.try_acquire() { return StatusCode::TOO_MANY_REQUESTS; }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Protected capacity.** The service never accepts more work than it can serve, so it degrades by *rejecting some* requests instead of *failing all* of them. Throughput stays on the plateau instead of collapsing past the tipping point.
+- **Fairness and abuse control.** Limiting per client (per API key, per IP) stops one noisy or malicious caller from starving everyone else, and gives you a lever against runaway retry loops and scrapers.
+- **Burst tolerance.** A token bucket absorbs short, legitimate spikes using its stored capacity while still bounding the sustained rate — you do not have to choose between "smooth only" and "no limit".
+
+What it costs you:
+
+- **Choosing the limits.** Set the rate too low and you reject traffic the service could have served; too high and the limiter does not protect you. The numbers come from load tests against real capacity, not guesses, and they drift as the service changes.
+- **Returning the right signal.** Rejected requests should return `429 Too Many Requests`, ideally with a `Retry-After` header, so well-behaved clients back off instead of hammering. A bare error invites immediate retries that defeat the limiter.
+- **Distributed coordination.** A limiter in one instance only sees that instance's traffic. Enforcing a global limit across many instances needs shared state (a central store such as Redis), which adds a dependency and some latency to the hot path.
+
+## Related patterns
+
+- [Circuit Breaker](/microservices-design-from-zero-to-hero/en/reliability/circuit-breaker/) — protects *you* from a failing dependency; rate limiting protects a service from *its callers*.
+- [Bulkhead](/microservices-design-from-zero-to-hero/en/reliability/bulkhead/) — caps concurrency where rate limiting caps throughput; the two compose well.
+- [Retry and Timeout](/microservices-design-from-zero-to-hero/en/reliability/retry-and-timeout/) — a `429` with `Retry-After` tells a client's retry logic exactly how long to back off.
+
+<Callout title="Shedding load is a feature, not a failure">
+Rejecting a request feels like giving up, but at the edge of capacity it is the responsible choice. A service that admits everything and then times out on everything serves *no one*; a service that sheds the overflow and returns a clear `429` keeps serving the majority well and tells the rest to come back shortly. Deciding *what* to shed first — low-priority traffic, anonymous users, the noisiest client — turns load shedding from a blunt instrument into a deliberate degradation strategy.
+</Callout>
+
+export const quizRateLimiting = [
+  {
+    q: 'What does rate limiting protect a service from?',
+    options: [
+      'Its own dependencies failing',
+      'Accepting more requests than it has the capacity to serve',
+      'Data corruption in its database',
+      'Slow disk reads',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does a token bucket allow short bursts while still bounding the long-run rate?',
+    options: [
+      'It speeds up the server temporarily',
+      'It stores up to a capacity of tokens that a burst can spend, while the steady refill rate caps the sustained average',
+      'It queues every request indefinitely',
+      'It doubles the rate during a spike',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What status code should a service return when it sheds a request due to rate limiting?',
+    options: [
+      '500 Internal Server Error',
+      '404 Not Found',
+      '429 Too Many Requests',
+      '503 Service Unavailable only',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why can throughput collapse when demand exceeds capacity without a rate limiter?',
+    options: [
+      'The database runs out of disk space',
+      'Queues grow, latency climbs, timeouts fire, and clients retry — adding more load until requests time out before completing',
+      'The network physically disconnects',
+      'The CPU permanently overheats',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="reliability/rate-limiting" questions={quizRateLimiting} />
+
+<ProgressTracker client:visible id="reliability/rate-limiting" />

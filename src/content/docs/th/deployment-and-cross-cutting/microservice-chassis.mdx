@@ -1,0 +1,206 @@
+---
+title: Microservice Chassis
+description: 'มอบ baseline ในตัวชุดเดียวกันให้ทุก service ใหม่ — configuration, structured logging, metric, health check และ service discovery — ด้วยการเริ่มมันบน framework หรือ chassis ร่วม เพื่อให้ทีมเขียน business logic แทนที่จะประดิษฐ์ plumbing แบบเดิมใหม่ในแต่ละ service'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+ทุก service ที่คุณ build ต้องการเครื่องจักรไม่หรูหราชุดเดียวกันก่อนที่มันจะทำอะไรที่มีประโยชน์ได้ มันต้องโหลด configuration ของมัน ตั้งค่า structured logging พร้อม request correlation เปิดเผย metric ในรูปแบบที่ระบบ monitoring ของคุณคาดหวัง ตอบ health และ readiness probe ให้ orchestrator และ register ตัวเองเพื่อให้ถูกค้นพบ ไม่มีอะไรในนี้เป็น business logic แต่มันเป็นเงื่อนไขเบื้องต้นให้ business logic รันได้อย่างปลอดภัย
+
+ตอนคุณเขียน service เดียว คุณประกอบ plumbing นี้ครั้งเดียว พอถึง service ที่สิบ คุณสังเกตว่า code หลายร้อยบรรทัดเดียวกันถูก copy, paste และค่อย ๆ แตกต่างไปเงียบ ๆ: service หนึ่งเปิดเผย `/healthz` อีกตัว `/health` ตัวหนึ่ง log เป็น JSON อีกตัวเป็น plain text metric ถูกตั้งชื่อไม่สอดคล้องกัน cross-cutting baseline ถูก implement ใหม่ ต่างกันเล็กน้อย ในทุก service
+
+## ปัญหา
+
+คุณต้องการให้ทุก service ใหม่เริ่มต้นชีวิตด้วย configuration, logging, metric, health check และ discovery ที่เดินสายไว้แล้วและสอดคล้องกันทั้งกองทัพ — เพื่อให้ service เปิดเผย health endpoint เดียวกัน ปล่อย log ในรูปทรงเดียวกัน และรายงาน metric ด้วยชื่อเดียวกันกับทุก service อื่น คุณต้องการให้ developer ที่สร้าง service ใหม่เขียน business logic ตั้งแต่วันแรก ไม่ใช่ใช้เวลาหนึ่งสัปดาห์ประกอบ boilerplate ใหม่ และคุณต้องการ upgrade baseline นั้นในที่เดียวแทนที่จะใน repository ยี่สิบแห่ง
+
+ดังนั้นแรงที่ขัดแย้งกันคือ: operational baseline ที่สอดคล้องกันและสำเร็จรูปในทุก service โดยใช้แรงต่อ service น้อยที่สุดและมีที่เดียวให้พัฒนามัน
+
+## ทางออก
+
+build **microservice chassis**: framework, library หรือฐานที่รวม cross-cutting concerns เข้าด้วยกันเพื่อให้ service ใหม่สืบทอดมัน chassis เป็นเจ้าของ plumbing — มันอ่าน configuration, ตั้งค่า structured logging, register metric endpoint, ติดตั้ง health และ readiness probe และจัดการ discovery registration — และเปิดเผยผิวสัมผัสเล็ก ๆ ที่คุณเสียบ business logic เข้าไป
+
+งานของ developer หดเหลือ: เริ่มจาก chassis เพิ่ม route และ domain logic แล้วส่งมอบ ทุกอย่างด้าน operation มีอยู่แล้วและเหมือนกับทุก service อื่นที่ build บน chassis chassis มักจับคู่กับ **service template** — repository ตั้งต้น, generator หรือโครงร่าง — เพื่อให้การสร้าง service ใหม่หมายถึงการ generate จาก template และเติม business code
+
+เพราะ baseline อยู่ใน component ร่วมเดียว การปรับปรุงมัน (metric field ใหม่, log format ที่เข้มขึ้น, health check ที่ดีกว่า) เป็นการเปลี่ยนครั้งเดียวที่คุณ roll out ด้วยการเลื่อนเวอร์ชัน chassis ข้าม service ต่าง ๆ แทนที่จะแก้แต่ละ repository ด้วยมือ
+
+export const chassisDiagram = `flowchart TB
+  subgraph Service[A service built on the chassis]
+    direction TB
+    Biz[Business logic: routes and domain rules]
+    subgraph Chassis[Microservice chassis]
+      Cfg[Config loading]
+      Log[Structured logging]
+      Met[Metrics endpoint]
+      Health[Health and readiness probes]
+      Disc[Service discovery registration]
+    end
+    Biz --> Chassis
+  end
+  Chassis --> Plat[Platform: orchestrator, monitoring, registry]`;
+
+<Mermaid code={chassisDiagram} title="chassis ห่อหุ้ม business logic โดยให้ config, logging, metric, health และ discovery; developer เพิ่มเพียง domain code" />
+
+## ตัวอย่าง
+
+ที่นี่ service ถูกสร้างบน chassis การเรียก bootstrap ครั้งเดียวเดินสาย config, logging, metric, health และ discovery สิ่งเดียวที่ developer เพิ่มคือ route ที่มีความหมายเชิงธุรกิจ แต่ละตัวอย่างเป็นแบบ idiomatic ตามภาษาของมัน
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { createService } from '@acme/chassis';
+
+    // The chassis loads config, sets up logging, metrics,
+    // /health, /ready, and registers the service for discovery.
+    const app = createService({ name: 'order-service' });
+
+    // Developer adds only the business logic.
+    app.get('/orders/:id', async (req, res) => {
+      const order = await orderRepo.find(req.params.id);
+      res.json(order);
+    });
+
+    app.start();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from acme_chassis import create_service
+
+    # The chassis wires config, logging, metrics,
+    # /health, /ready, and discovery registration.
+    app = create_service(name="order-service")
+
+    # Developer adds only the business logic.
+    @app.get("/orders/{order_id}")
+    async def get_order(order_id: str):
+        return await order_repo.find(order_id)
+
+    app.start()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    package main
+
+    import "github.com/acme/chassis"
+
+    func main() {
+        // The chassis sets up config, logging, metrics,
+        // /health, /ready, and discovery registration.
+        app := chassis.NewService("order-service")
+
+        // Developer adds only the business logic.
+        app.Get("/orders/{id}", func(c *chassis.Ctx) error {
+            order, err := orderRepo.Find(c.Param("id"))
+            if err != nil {
+                return err
+            }
+            return c.JSON(order)
+        })
+
+        app.Start()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use acme_chassis::Service;
+
+    #[tokio::main]
+    async fn main() {
+        // The chassis wires config, logging, metrics,
+        // /health, /ready, and discovery registration.
+        let mut app = Service::new("order-service");
+
+        // Developer adds only the business logic.
+        app.get("/orders/:id", |ctx| async move {
+            let order = order_repo.find(ctx.param("id")).await?;
+            ctx.json(order)
+        });
+
+        app.start().await;
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่ได้
+
+สิ่งที่คุณได้:
+
+- **ความสอดคล้องแบบฟรี ๆ** ทุก service เปิดเผย health endpoint, รูปทรง log และชื่อ metric เดียวกัน เพราะ component ร่วมเดียวให้มัน observability และ operability เลิกเป็นการเดาแบบต่างทีมต่างทำ
+- **สร้าง service ได้เร็วขึ้น** service ใหม่เริ่มต้นด้วย operational baseline ที่มีอยู่แล้ว ดังนั้น developer จึงเขียน domain code แทนการประกอบ plumbing ใหม่
+- **ที่เดียวให้พัฒนา baseline** การปรับปรุง logging, metric หรือ health ลงใน chassis และ roll out ด้วยการเลื่อนเวอร์ชัน ไม่ใช่การแก้ทุก repository
+
+สิ่งที่คุณต้องเสีย:
+
+- **แรงต่อภาษา** กองทัพแบบ polyglot ต้องการ chassis ต่อภาษา และการรักษาให้พวกมันมี feature เทียบเท่ากันเป็นงานจริงที่ทำต่อเนื่อง
+- **การ coupling และแรงเสียดทานด้านการทำเวอร์ชัน** ทุก service พึ่งพา chassis การเปลี่ยนแบบ breaking บังคับให้ต้อง upgrade แบบประสานงานกัน และ chassis ที่เก่าค้างสามารถรั้ง service ไว้ได้
+- **ความเสี่ยงของการบวม** chassis ที่พยายามทำทุกอย่างจะหนักและมีความเห็นมากเกินไป จงให้มันโฟกัสที่ cross-cutting concerns จริง ๆ ไม่ใช่ helper เชิงธุรกิจ
+
+ข้อสังเกตที่ใช้ได้จริง: chassis จัดการเรื่อง *in-process* (config, logging, metric, health) ในขณะที่ [Service Mesh](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/service-mesh/) จัดการ networking *between-process* หลายทีมใช้ทั้งสองอย่าง
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/externalized-configuration/) — chassis มักเป็นตัวที่อ่านและใช้ externalized config
+- [Service Mesh](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/service-mesh/) — จัดการ networking cross-cutting concerns ที่ chassis ปล่อยให้ sidecar ทำ
+- [Service per Container](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/service-per-container/) — service ที่ build บน chassis ก็ยังถูก package และรันแบบหนึ่ง service ต่อหนึ่ง container
+
+<Callout title="chassis เป็นจุดเริ่มต้น ไม่ใช่กรงขัง">
+เป้าหมายคือการกำจัด plumbing ที่ไม่สร้างความแตกต่าง ไม่ใช่การกำหนดว่าทุก service ต้อง build อย่างไร จงให้ chassis โฟกัสที่ cross-cutting concerns จริง ๆ — config, logging, metric, health, discovery — และปล่อยให้ service มีอิสระเหนือการออกแบบ domain วันที่ chassis เริ่มสั่งว่าคุณต้อง model order อย่างไร มันก็ล้ำเส้นไปแล้ว
+</Callout>
+
+export const quizChassis = [
+  {
+    q: 'microservice chassis คืออะไร?',
+    options: [
+      'แร็ค server ทางกายภาพที่บรรจุเครื่อง service',
+      'framework หรือฐานร่วมที่รวม cross-cutting concerns — config, logging, metric, health, discovery — เพื่อให้แต่ละ service ใหม่สืบทอดมัน',
+      'ฐานข้อมูลที่แชร์โดยทุก service',
+      'เครื่องมือที่ compile service เป็น container',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'chassis แก้ปัญหาอะไรเป็นหลัก?',
+    options: [
+      'มันกำจัดความจำเป็นในการมีฐานข้อมูล',
+      'มันหยุด plumbing ด้าน logging, metric, health และ config ตัวเดียวกันจากการถูก implement ใหม่ ไม่สอดคล้องกัน ในทุก service',
+      'มันเข้ารหัส traffic ระหว่าง service',
+      'มันแทนที่ orchestrator',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'chassis ต่างจาก service mesh อย่างไร?',
+    options: [
+      'มันเป็นสิ่งเดียวกันภายใต้ชื่อต่างกัน',
+      'chassis จัดการเรื่อง in-process เช่น config และ logging; mesh จัดการ networking between-process เช่น mTLS และ retry',
+      'chassis รันใน control plane และ mesh รันในฐานข้อมูล',
+      'chassis ทำงานได้เฉพาะกับ serverless function',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อใดคือต้นทุนจริงของ pattern chassis?',
+    options: [
+      'service ไม่สามารถเปิดเผย health check ได้อีกต่อไป',
+      'กองทัพแบบ polyglot ต้องการ chassis หนึ่งตัวต่อภาษา และทุก service ถูก couple กับเวอร์ชันของ chassis',
+      'มันบังคับให้ทุก service เข้าสู่ฐานข้อมูลร่วมเดียว',
+      'มันป้องกันไม่ให้ service ถูก deploy อย่างอิสระ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/microservice-chassis" questions={quizChassis} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/microservice-chassis" />

@@ -1,0 +1,246 @@
+---
+title: Remote Procedure Invocation
+description: 'Make a service call look like a local function call: send a request over REST or gRPC and block for the response. Simple to reason about, but it couples services in time and can cascade failures.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+The Order service needs the buyer's shipping address, which lives in the Customer service. The most natural thing in the world is to ask for it and wait for the answer, exactly as the old monolith called a `getAddress` method. The caller wants a single, immediate response so it can keep building the order.
+
+## Problem
+
+You need one service to invoke an operation on another and receive a result, with as little ceremony as possible. The team already thinks in terms of methods that take arguments and return values, and the operation is genuinely a question that needs an answer before the caller can continue. How do you make a network call feel like the function call it replaced, while still being explicit about the things a function call never had to worry about — serialization, timeouts, and a contract that both sides agree on?
+
+## Solution
+
+**Remote Procedure Invocation (RPI)** is the synchronous, one-to-one style. The client sends a request to a single service instance and blocks until the response arrives. A proxy or client library hides the mechanics: it serializes the arguments, sends them over the wire, waits, and deserializes the result back into an ordinary return value.
+
+Two transports dominate:
+
+- **REST over HTTP** — resources addressed by URL, operations expressed with HTTP verbs, payloads usually in JSON. Human-readable, ubiquitous, easy to test with a browser or `curl`.
+- **gRPC** — a contract defined in a `.proto` file, binary Protobuf payloads over HTTP/2, with generated client and server stubs. More compact and faster, with a strict, versioned schema and first-class streaming.
+
+Whatever the transport, the interaction is the same shape: one request, one response, the caller waiting in between.
+
+export const rpiSequence = `sequenceDiagram
+  participant C as Client (Order Service)
+  participant S as Customer Service
+  C->>S: GET /customers/42/address
+  activate S
+  S->>S: load customer 42
+  S-->>C: 200 OK { address }
+  deactivate S
+  Note over C: caller was blocked until the response arrived`;
+
+<Mermaid code={rpiSequence} title="Remote Procedure Invocation — one request, one response, the caller blocked in between" />
+
+## Example
+
+A typed client for fetching a customer's shipping address. The client wraps the transport so the caller writes something close to an ordinary method call, but a timeout makes the network's existence explicit. Each example is self-contained and idiomatic to its language.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type Address = { line1: string; city: string; postalCode: string };
+
+    class CustomerClient {
+      constructor(private baseUrl: string) {}
+
+      async getAddress(customerId: string): Promise<Address> {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2000);
+        try {
+          const res = await fetch(`${this.baseUrl}/customers/${customerId}/address`, {
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            throw new Error(`customer service returned ${res.status}`);
+          }
+          return (await res.json()) as Address;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    }
+
+    const customers = new CustomerClient('http://customer-service');
+    const address = await customers.getAddress('42');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from dataclasses import dataclass
+    import httpx
+
+    @dataclass
+    class Address:
+        line1: str
+        city: str
+        postal_code: str
+
+    class CustomerClient:
+        def __init__(self, base_url: str) -> None:
+            self._base_url = base_url
+
+        async def get_address(self, customer_id: str) -> Address:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                res = await client.get(f"{self._base_url}/customers/{customer_id}/address")
+                res.raise_for_status()
+                body = res.json()
+                return Address(body["line1"], body["city"], body["postalCode"])
+
+    customers = CustomerClient("http://customer-service")
+    address = await customers.get_address("42")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type Address struct {
+        Line1      string `json:"line1"`
+        City       string `json:"city"`
+        PostalCode string `json:"postalCode"`
+    }
+
+    type CustomerClient struct {
+        baseURL string
+        http    *http.Client
+    }
+
+    func NewCustomerClient(baseURL string) *CustomerClient {
+        return &CustomerClient{baseURL: baseURL, http: &http.Client{Timeout: 2 * time.Second}}
+    }
+
+    func (c *CustomerClient) GetAddress(ctx context.Context, customerID string) (*Address, error) {
+        url := fmt.Sprintf("%s/customers/%s/address", c.baseURL, customerID)
+        req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+        res, err := c.http.Do(req)
+        if err != nil {
+            return nil, err
+        }
+        defer res.Body.Close()
+        if res.StatusCode != http.StatusOK {
+            return nil, fmt.Errorf("customer service returned %d", res.StatusCode)
+        }
+        var addr Address
+        if err := json.NewDecoder(res.Body).Decode(&addr); err != nil {
+            return nil, err
+        }
+        return &addr, nil
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct Address {
+        line1: String,
+        city: String,
+        #[serde(rename = "postalCode")]
+        postal_code: String,
+    }
+
+    struct CustomerClient {
+        base_url: String,
+        http: reqwest::Client,
+    }
+
+    impl CustomerClient {
+        fn new(base_url: impl Into<String>) -> Self {
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .expect("client");
+            Self { base_url: base_url.into(), http }
+        }
+
+        async fn get_address(&self, customer_id: &str) -> Result<Address, reqwest::Error> {
+            let url = format!("{}/customers/{customer_id}/address", self.base_url);
+            self.http.get(url).send().await?.error_for_status()?.json().await
+        }
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Simplicity.** The model is the one every developer already knows: call, wait, get a result. There is no broker to operate and no intermediate state to track.
+- **A clear contract.** Especially with gRPC, the request and response types are defined once and enforced for both sides, so a mismatch is caught at build time.
+
+What it costs you:
+
+- **Temporal coupling.** Because the caller blocks, both services must be available at the same instant. If the callee is down or deploying, the caller's request fails right now — there is no buffer in between.
+- **Cascading failures.** A slow callee makes the caller slow too; the caller's threads or connections pile up waiting, and the slowness propagates upstream until an entire chain of services is stuck. A single struggling service can take down everything that depends on it.
+- **Reduced availability.** The overall availability of a synchronous call chain is the product of each link's availability, so the more hops a request makes, the more fragile it becomes.
+
+Because of these failure modes, never make a raw synchronous call without protecting it. Wrap it with timeouts, retries, and a [Circuit Breaker](/microservices-design-from-zero-to-hero/en/reliability/circuit-breaker/) so a failing dependency fails fast instead of dragging the caller down with it. Where the interaction does not truly need an immediate answer, prefer [Messaging](/microservices-design-from-zero-to-hero/en/communication/messaging/) instead.
+
+## Related patterns
+
+- [Messaging](/microservices-design-from-zero-to-hero/en/communication/messaging/) — the asynchronous alternative that removes temporal coupling.
+- [Service Discovery](/microservices-design-from-zero-to-hero/en/communication/service-discovery/) — how the client finds the address it sends the request to.
+- [API Gateway](/microservices-design-from-zero-to-hero/en/communication/api-gateway/) — often the front door through which external RPI calls arrive.
+
+<Callout title="REST or gRPC?">
+Reach for REST at the system's edge and for public APIs, where human readability, broad tooling, and cacheable HTTP semantics matter most. Reach for gRPC for internal service-to-service traffic, where the strict schema, smaller payloads, and HTTP/2 streaming pay off — and where both ends are yours to regenerate when the contract changes.
+</Callout>
+
+export const quizRpi = [
+  {
+    q: 'What kind of interaction is Remote Procedure Invocation?',
+    options: [
+      'Asynchronous, one-to-many',
+      'Synchronous, one-to-one — a request to a single service with the caller blocking for the response',
+      'Asynchronous, one-to-one through a queue',
+      'A broadcast to every subscriber',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is temporal coupling in the context of RPI?',
+    options: [
+      'The client and service must use the same clock',
+      'Both the caller and the callee must be available at the same moment for the call to succeed',
+      'Requests must be processed in timestamp order',
+      'The response must arrive within one second',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why can a single slow service cause a cascading failure with RPI?',
+    options: [
+      'Because the broker runs out of disk space',
+      'Because blocked callers pile up waiting, propagating the slowness upstream to everything that depends on them',
+      'Because gRPC cannot handle large payloads',
+      'Because REST does not support timeouts',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which pattern should wrap a synchronous call to prevent it from dragging the caller down?',
+    options: [
+      'Event Sourcing',
+      'API Composition',
+      'A Circuit Breaker, together with timeouts and retries',
+      'Database per Service',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="communication/remote-procedure-invocation" questions={quizRpi} />
+
+<ProgressTracker client:visible id="communication/remote-procedure-invocation" />

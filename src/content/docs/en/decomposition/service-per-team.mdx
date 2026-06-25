@@ -1,0 +1,113 @@
+---
+title: Service per Team
+description: 'Align service ownership with teams so each team owns and deploys its services end to end. Conway''s law says architecture mirrors organization — so shape both deliberately to get autonomous, fast-moving teams.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+You have a sound set of services, drawn around capabilities and subdomains and designed to run autonomously. The point of all that work was speed — teams shipping in parallel without waiting on each other. But ownership has been left vague. Several teams touch the Order service; a shared "platform" team is the only one allowed to deploy Billing; and a change to Shipping needs sign-off from a group that does not really work on it. The architecture is decomposed, but the organization around it is not, and the promised autonomy never arrives.
+
+## Problem
+
+**Conway's law** observes that a system's structure tends to mirror the communication structure of the organization that builds it. This is not a slogan but a constraint: if three teams build one service, the service grows three teams' worth of seams and every change requires three-way negotiation; if one team must touch four services to ship a feature, those four services quietly couple to that team's release schedule. Shared ownership turns every deployment into a coordination problem — who is allowed to merge, who must review, whose tests must pass, who is on call when it breaks. The cost of a change comes to be dominated not by the code but by the number of people who must agree.
+
+So the forces are: you want each service to be changed and deployed quickly and confidently, but ownership spread across many teams (or many teams crammed onto one service) reintroduces exactly the cross-team coordination that decomposition was meant to remove.
+
+## Solution
+
+**Service per Team** makes ownership explicit and exclusive: **each service is owned by exactly one team, and a team owns a small, related set of services end to end** — design, code, test, deploy, and operate. No other team deploys your service; no service has two masters. Crucially, you do not let the org chart fall out by accident — you treat Conway's law as a design tool (the *inverse Conway manoeuvre*) and deliberately shape teams to match the service boundaries you want.
+
+A team is sized to own its services comfortably — small enough to coordinate within itself, large enough to carry the on-call and delivery load. Teams collaborate the way services do: through stable, published APIs and contracts rather than through shared code or shared deployment pipelines. When team A needs something from team B's service, it asks across a versioned interface, not by editing B's code.
+
+The result is that the organization and the architecture reinforce each other. Aligned boundaries mean most changes stay inside one team's services, so that team can decide, build, test, and release on its own cadence — which is the autonomy the whole exercise was for.
+
+export const teamDiagram = `flowchart TB
+  subgraph TeamA[Team Checkout]
+    direction TB
+    SA1[Order Service]
+    SA2[Cart Service]
+  end
+  subgraph TeamB[Team Billing]
+    direction TB
+    SB1[Billing Service]
+    SB2[Invoice Service]
+  end
+  subgraph TeamC[Team Fulfilment]
+    direction TB
+    SC1[Shipping Service]
+    SC2[Inventory Service]
+  end
+  TeamA -. published API .-> TeamB
+  TeamA -. published API .-> TeamC
+  TeamB -. published API .-> TeamC
+  Note[One team owns each service end to end;<br/>teams collaborate only through stable contracts]`;
+
+<Mermaid code={teamDiagram} title="Each team owns a small set of services end to end and collaborates with other teams only through published APIs" />
+
+## Resulting context
+
+What you gain:
+
+- **Real autonomy and speed.** A team that owns its services end to end can design, build, test, and deploy without waiting on anyone, so most changes ship at the team's own pace.
+- **Clear accountability.** Exactly one team owns each service, which removes the "who is responsible?" ambiguity — for code review, for the deploy pipeline, and for the pager when it breaks.
+- **An architecture that matches the organization.** By shaping teams to fit the desired service boundaries, you stop fighting Conway's law and start using it; the seams in the system land where the seams between teams already are.
+
+What it costs you:
+
+- **Coordination is pushed to the boundaries.** Autonomy within a team comes at the price of disciplined contracts between teams. A change that crosses a service boundary still needs cross-team agreement, so badly placed boundaries simply relocate the coordination pain rather than removing it.
+- **Reorganization is hard and political.** Aligning teams to services may mean changing reporting lines and headcount — an organizational change that is slower and more sensitive than any code change.
+- **Risk of coupling and duplication.** Without care, teams either couple through shared libraries and databases (recreating the distributed monolith) or duplicate effort because no one owns the common ground; both need active governance to avoid.
+
+## Related patterns
+
+- [Decompose by Business Capability](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-business-capability/) — capabilities map cleanly onto teams, making ownership easy to assign.
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-subdomain/) — bounded contexts give each team a self-contained slice to own.
+- [Self-Contained Service](/microservices-design-from-zero-to-hero/en/decomposition/self-contained-service/) — runtime autonomy and team autonomy reinforce each other; a team that depends on no one at deploy time also wants services that depend on no one at runtime.
+
+<Callout title="The inverse Conway manoeuvre">
+Conway's law is usually quoted as a warning, but it is also a lever. If your architecture will end up looking like your org chart anyway, then *choose the architecture you want first and shape the teams to match it*. Deliberately drawing team boundaries to mirror your intended service boundaries — rather than retrofitting services onto whatever teams already exist — is how you make the organization push the design in the direction you want instead of away from it.
+</Callout>
+
+export const quizTeam = [
+  {
+    q: 'What does Conway\'s law say?',
+    options: [
+      'Every service must be owned by at least two teams for resilience',
+      'A system\'s structure tends to mirror the communication structure of the organization that builds it',
+      'Teams should never communicate through APIs',
+      'The number of services must equal the number of engineers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the core rule of the Service per Team pattern?',
+    options: [
+      'Every team owns exactly one service and no more',
+      'Each service is owned end to end by exactly one team, and teams collaborate through stable published contracts',
+      'A central platform team deploys all services',
+      'Services are owned collectively by all teams at once',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine pitfall of aligning services with teams?',
+    options: [
+      'It makes independent deployment impossible',
+      'Coordination is pushed to the boundaries, so badly placed boundaries relocate the coordination pain rather than removing it',
+      'It forces every team to share one database',
+      'It eliminates the need for any APIs between services',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/service-per-team" questions={quizTeam} />
+
+<ProgressTracker client:visible id="decomposition/service-per-team" />

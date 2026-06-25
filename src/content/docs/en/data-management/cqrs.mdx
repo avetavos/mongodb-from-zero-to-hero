@@ -1,0 +1,237 @@
+---
+title: CQRS
+description: 'Separate the write model from one or more purpose-built read models kept in sync by events, so a query that spans services or needs an unusual shape becomes a fast local lookup.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Your cross-service queries started as simple API compositions, and for a while that was fine. Then the queries grew teeth: a dashboard that lists the highest-value orders per region, a search box that filters customers by spend across several services, a report that sorts and paginates over millions of rows. Composing these at request time means pulling enormous result sets from each service and joining them in memory on every page load. It is too slow, and it leans on services that were never built to answer that question.
+
+## Problem
+
+The same data model rarely serves both jobs well. A write model is normalized and shaped around enforcing business rules one record at a time. A demanding query wants data pre-joined, denormalized, indexed, and sometimes spanning what several services own. Forcing one model to do both makes writes awkward and reads slow.
+
+How do you serve expensive, cross-cutting, or oddly shaped queries efficiently without distorting the model that handles your writes?
+
+## Solution
+
+**CQRS** — Command Query Responsibility Segregation — splits the model in two. The **command side** handles writes: it owns the authoritative state, enforces invariants, and on every change publishes a domain event. The **query side** maintains one or more **read models** — denormalized views shaped exactly for the queries they serve. A read model is built by subscribing to those events and projecting them into its own store; queries then hit this pre-joined view directly.
+
+The read model can be any technology that fits the query — a denormalized SQL table, a document store, a search index — and it can combine events from several services into one view, which is what makes CQRS so good at cross-service queries.
+
+export const cqrsDiagram = `flowchart LR
+  Client[Client] -->|command| CmdSide[Command Side]
+  CmdSide --> WDB[(Write Model)]
+  CmdSide -->|domain events| Bus[(Event Bus)]
+  Bus --> Proj[Projection / Event Handler]
+  Proj --> RDB[(Read Model - denormalized)]
+  Client -->|query| QSide[Query Side]
+  QSide --> RDB`;
+
+<Mermaid code={cqrsDiagram} title="Writes flow through the command side and emit events; projections build read models that the query side serves" />
+
+## Example
+
+Below, a command handler updates the authoritative state and emits an event. A separate projection consumes that event and upserts a denormalized row; the query side just reads that row. The two halves never share a model.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    // --- Command side: handle a write, emit an event ---
+    async function placeOrder(cmd: { orderId: string; customerId: string; total: number }) {
+      await writeDb.insertOrder(cmd.orderId, cmd.customerId, cmd.total, 'CONFIRMED');
+      await eventBus.publish({
+        type: 'OrderPlaced',
+        orderId: cmd.orderId,
+        customerId: cmd.customerId,
+        total: cmd.total,
+      });
+    }
+
+    // --- Query side: a projection keeps a denormalized read model in sync ---
+    eventBus.on('OrderPlaced', async (e) => {
+      const customer = await customerSvc.getCustomer(e.customerId);
+      await readDb.upsertOrderSummary({
+        orderId: e.orderId,
+        total: e.total,
+        customerName: customer.name, // pre-joined at projection time
+      });
+    });
+
+    // A query is now a single fast lookup against the read model.
+    const topOrders = () => readDb.query('SELECT * FROM order_summary ORDER BY total DESC LIMIT 20');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # --- Command side: handle a write, emit an event ---
+    async def place_order(cmd: dict) -> None:
+        await write_db.insert_order(cmd["order_id"], cmd["customer_id"], cmd["total"], "CONFIRMED")
+        await event_bus.publish({
+            "type": "OrderPlaced",
+            "order_id": cmd["order_id"],
+            "customer_id": cmd["customer_id"],
+            "total": cmd["total"],
+        })
+
+    # --- Query side: a projection keeps a denormalized read model in sync ---
+    @event_bus.on("OrderPlaced")
+    async def project_order_placed(e: dict) -> None:
+        customer = await customer_svc.get_customer(e["customer_id"])
+        await read_db.upsert_order_summary({
+            "order_id": e["order_id"],
+            "total": e["total"],
+            "customer_name": customer["name"],  # pre-joined at projection time
+        })
+
+    # A query is now a single fast lookup against the read model.
+    async def top_orders():
+        return await read_db.query("SELECT * FROM order_summary ORDER BY total DESC LIMIT 20")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    // --- Command side: handle a write, emit an event ---
+    func PlaceOrder(ctx context.Context, cmd PlaceOrderCmd) error {
+        if err := writeDB.InsertOrder(ctx, cmd.OrderID, cmd.CustomerID, cmd.Total, "CONFIRMED"); err != nil {
+            return err
+        }
+        return eventBus.Publish(ctx, Event{
+            Type:       "OrderPlaced",
+            OrderID:    cmd.OrderID,
+            CustomerID: cmd.CustomerID,
+            Total:      cmd.Total,
+        })
+    }
+
+    // --- Query side: a projection keeps a denormalized read model in sync ---
+    func OnOrderPlaced(ctx context.Context, e Event) error {
+        customer, err := customerSvc.GetCustomer(ctx, e.CustomerID)
+        if err != nil {
+            return err
+        }
+        return readDB.UpsertOrderSummary(ctx, OrderSummary{
+            OrderID:      e.OrderID,
+            Total:        e.Total,
+            CustomerName: customer.Name, // pre-joined at projection time
+        })
+    }
+
+    // A query is now a single fast lookup against the read model.
+    func TopOrders(ctx context.Context) ([]OrderSummary, error) {
+        return readDB.Query(ctx, "SELECT * FROM order_summary ORDER BY total DESC LIMIT 20")
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    // --- Command side: handle a write, emit an event ---
+    async fn place_order(cmd: PlaceOrderCmd) -> Result<(), Error> {
+        write_db::insert_order(&cmd.order_id, &cmd.customer_id, cmd.total, "CONFIRMED").await?;
+        event_bus::publish(Event::OrderPlaced {
+            order_id: cmd.order_id,
+            customer_id: cmd.customer_id,
+            total: cmd.total,
+        })
+        .await
+    }
+
+    // --- Query side: a projection keeps a denormalized read model in sync ---
+    async fn on_order_placed(e: OrderPlaced) -> Result<(), Error> {
+        let customer = customer_svc::get_customer(&e.customer_id).await?;
+        read_db::upsert_order_summary(OrderSummary {
+            order_id: e.order_id,
+            total: e.total,
+            customer_name: customer.name, // pre-joined at projection time
+        })
+        .await
+    }
+
+    // A query is now a single fast lookup against the read model.
+    async fn top_orders() -> Result<Vec<OrderSummary>, Error> {
+        read_db::query("SELECT * FROM order_summary ORDER BY total DESC LIMIT 20").await
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Efficient queries.** The read model is pre-joined and indexed for exactly the queries it serves, so even cross-service or large-scale queries become single fast lookups.
+- **Independent scaling.** Reads and writes scale separately; a read-heavy workload can have many replicas of the read model without touching the write side.
+- **Right tool per side.** Use a relational store for writes and a search index or document store for reads, each optimized for its job.
+
+What it costs you:
+
+- **More moving parts.** You now operate an event bus, projections, and at least two stores instead of one. This is real operational and cognitive overhead.
+- **Eventual consistency.** The read model lags the write model by the time it takes an event to propagate and project. A user who just wrote may briefly read stale data, so the UI must account for it.
+- **Duplicated data and replayable projections.** The read model duplicates data, and you need a way to rebuild it from scratch when the view changes or a projection has a bug.
+
+Because of the overhead, reach for CQRS only when a query genuinely needs it. For modest cross-service queries, the simpler [API Composition](/microservices-design-from-zero-to-hero/en/data-management/api-composition/) is usually the better choice.
+
+## Related patterns
+
+- [API Composition](/microservices-design-from-zero-to-hero/en/data-management/api-composition/) — the simpler alternative; prefer it until a query proves too expensive to compose live.
+- [Event Sourcing](/microservices-design-from-zero-to-hero/en/data-management/event-sourcing/) — a natural source of the events that feed CQRS projections.
+- [Saga](/microservices-design-from-zero-to-hero/en/data-management/saga/) — read models often expose the intermediate state a saga produces.
+
+<Callout title="CQRS does not require Event Sourcing (and vice versa)">
+The two patterns pair beautifully but are independent. You can do CQRS by publishing events from ordinary CRUD writes, and you can do Event Sourcing without ever splitting reads from writes. Adopt each one for its own reason, and only combine them when both reasons apply.
+</Callout>
+
+export const quizCqrs = [
+  {
+    q: 'What does CQRS separate?',
+    options: [
+      'The application from the database',
+      'The write model (commands) from one or more read models (queries)',
+      'The frontend from the backend',
+      'Authentication from authorization',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How is a CQRS read model kept up to date?',
+    options: [
+      'By querying the write database on every read',
+      'By projecting domain events emitted by the command side into a denormalized store',
+      'By a nightly batch copy of all tables',
+      'By a two-phase commit between the two models',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is an inherent drawback of CQRS?',
+    options: [
+      'It cannot be combined with Event Sourcing',
+      'It forbids using relational databases',
+      'The read model is eventually consistent — it can briefly lag the write model',
+      'It requires a single shared database for reads and writes',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'When should you prefer API Composition over CQRS?',
+    options: [
+      'When the query is modest and composing live is fast enough — avoid the overhead of a maintained read model',
+      'Always; CQRS is never appropriate',
+      'Only when the data fits in one service',
+      'When you need strong consistency across writes',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="data-management/cqrs" questions={quizCqrs} />
+
+<ProgressTracker client:visible id="data-management/cqrs" />

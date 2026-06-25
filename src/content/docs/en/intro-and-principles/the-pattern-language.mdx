@@ -1,0 +1,120 @@
+---
+title: The Pattern Language
+description: 'The microservices patterns form a connected language: the scale cube explains why you decompose, and decomposition then cascades into data, communication, reliability, observability, and deployment problems — each solved by its own group of patterns.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+By now you can decide *whether* to use microservices. If the answer is yes, you face a long list of patterns — decomposition strategies, sagas, gateways, circuit breakers, tracing, and more — and it is tempting to treat them as a menu of independent tricks. They are not. Each pattern exists because an earlier decision created a problem it solves. Seen that way, the patterns form a connected **language**, and learning the connections is more valuable than memorizing any single entry.
+
+## Problem
+
+How do you make sense of dozens of patterns without drowning in them? You need a map: a way to see why decomposition is even worth doing, and how that one choice ripples outward into the families of problems the rest of the course is about.
+
+We need two things: a model for *why you split* a system, and a model for *what splitting creates* that the patterns then have to fix.
+
+## Solution
+
+### Why you split: the scale cube
+
+A useful way to think about scaling is along three independent axes, often pictured as a cube:
+
+- **X-axis — horizontal duplication.** Run many identical copies of the application behind a load balancer. This is the classic, easy scaling move, and it works for a monolith too. It scales throughput but not complexity: every copy still contains the whole system.
+- **Y-axis — functional decomposition.** Split the application by *what it does*, into services around business capabilities. This is the axis that defines microservices. It scales development — letting teams and components evolve independently — not just traffic.
+- **Z-axis — data partitioning.** Split by *which data* a request touches, routing each request to the partition (or shard) that holds its data. The code is the same everywhere, but each instance serves a slice of the data.
+
+The Y-axis is the one this course is mostly about, because functional decomposition is what turns one application into many services — and that single move is the source of every other problem group below.
+
+export const cubeDiagram = `flowchart LR
+  Mono[Single Application] --> X[X-axis<br/>Run many identical copies]
+  Mono --> Y[Y-axis<br/>Split by business capability]
+  Mono --> Z[Z-axis<br/>Partition by data]
+  Y --> Decomp[Functional decomposition<br/>= microservices]`;
+
+<Mermaid code={cubeDiagram} title="The scale cube — three independent axes of scaling, with Y-axis decomposition leading to microservices" />
+
+### What splitting creates: the pattern groups
+
+The moment you decompose along the Y-axis, a chain of new problems appears, and each problem group is solved by a family of patterns. They follow each other in a natural order:
+
+export const groupsDiagram = `flowchart TB
+  Decomp[Decomposition<br/>split into services] --> Data[Data Management<br/>consistency without a shared DB]
+  Data --> Msg[Transactional Messaging<br/>publish events reliably]
+  Msg --> Comm[Communication<br/>how services talk]
+  Comm --> Rel[Reliability<br/>survive partial failure]
+  Rel --> Obs[Observability<br/>see across services]
+  Obs --> Deploy[Deployment and Cross-cutting<br/>ship, run, secure]`;
+
+<Mermaid code={groupsDiagram} title="Decomposition cascades into a chain of problem groups, each solved by its own family of patterns" />
+
+Read the chain as a story:
+
+- **Decomposition** splits the system into services — but now those services must keep data consistent.
+- **Data Management** restores consistency and queryability without a shared database — but reliable consistency depends on publishing events as part of a transaction.
+- **Transactional Messaging** makes that event publishing reliable — but services still have to talk to each other.
+- **Communication** defines how they talk, synchronously and asynchronously, through APIs and gateways — but the network they talk over fails in partial, surprising ways.
+- **Reliability** keeps the system working through those partial failures — but you cannot fix what you cannot see across a fleet of services.
+- **Observability** lets you see across all of them — and finally everything has to be shipped, run, and secured in production.
+- **Deployment and Cross-cutting** handles that last mile.
+
+Each arrow is a problem handed forward. That is what makes this a *language* rather than a list: you cannot fully understand a saga without the data boundary that makes it necessary, and you cannot run sagas safely without reliable messaging underneath. The patterns reference and depend on one another.
+
+## Resulting context
+
+With this map you can place any individual pattern. When you meet a new one, ask which group it belongs to and which earlier decision created the problem it addresses. That single habit turns a sprawling catalog into a navigable structure — and it tells you what to learn next, because the groups build on each other in order.
+
+The natural place to start applying this is the first problem decomposition creates: keeping data consistent when every service owns its own store.
+
+## Related patterns
+
+- [What Is Microservices Architecture?](/microservices-design-from-zero-to-hero/en/intro-and-principles/) — the foundation the whole language rests on.
+- [When to Use Microservices](/microservices-design-from-zero-to-hero/en/intro-and-principles/when-to-use-microservices/) — deciding to decompose, which sets this chain in motion.
+- [Data Management](/microservices-design-from-zero-to-hero/en/data-management/) — the first problem group decomposition creates, and the next module to read.
+
+<Callout title="Learn the connections, not just the catalog">
+A pattern in isolation is trivia; a pattern in its place is a tool you know when to reach for. The scale cube tells you *why* to decompose, and the chain of problem groups tells you what decomposition will hand you next. Carry this map through the rest of the course and each new pattern will slot into a structure you already understand.
+</Callout>
+
+export const quizLanguage = [
+  {
+    q: 'Which axis of the scale cube corresponds to splitting an application into microservices?',
+    options: [
+      'X-axis — running many identical copies behind a load balancer',
+      'Y-axis — functional decomposition by business capability',
+      'Z-axis — partitioning requests by the data they touch',
+      'None of the axes relates to microservices',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What makes the microservices patterns a "language" rather than a list?',
+    options: [
+      'They are all written in the same programming language',
+      'Each pattern solves a problem created by an earlier decision, so the patterns reference and depend on one another',
+      'They must be applied in alphabetical order',
+      'They are unrelated and can be learned in any combination',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which problem group does decomposition create first, according to the chain?',
+    options: [
+      'Deployment and cross-cutting concerns',
+      'Data management — keeping data consistent without a shared database',
+      'Observability across services',
+      'Choosing a programming language',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/the-pattern-language" questions={quizLanguage} />
+
+<ProgressTracker client:visible id="intro-and-principles/the-pattern-language" />

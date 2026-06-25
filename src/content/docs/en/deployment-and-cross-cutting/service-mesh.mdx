@@ -1,0 +1,150 @@
+---
+title: Service Mesh
+description: 'Move communication concerns — mutual TLS, retries, timeouts, traffic shaping, and telemetry — out of your service code and into a sidecar proxy deployed beside every service, all driven by a central control plane, so every service gets the same networking behaviour without writing it.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Your services talk to each other constantly, and every one of those calls needs the same handful of safeguards: the traffic should be encrypted, a failed request should be retried a bounded number of times, a slow callee should hit a timeout rather than hang the caller, and every call should emit a metric and a trace span. In the reliability and observability modules you learned to build these into the service — circuit breakers, retries, instrumentation.
+
+The trouble is that you now have twenty services in four languages, and each must implement all of it correctly and identically. The Go team's retry logic differs subtly from the Java team's. mTLS is configured three different ways. One service forgot to emit traces entirely. The same cross-cutting networking logic is reimplemented, inconsistently, everywhere.
+
+## Problem
+
+You want every service-to-service call to be encrypted, retried, timed out, observed, and routed according to one consistent policy — without asking every team in every language to write and maintain that logic by hand. You want to change a policy (tighten a timeout, shift 5% of traffic to a canary) centrally, without redeploying the services. And you want it to work uniformly whether a service is in Go, Java, Python, or Rust.
+
+So the forces are: consistent, centrally governed networking behaviour across a polyglot fleet, applied without modifying or redeploying the services that carry the business logic.
+
+## Solution
+
+Adopt a **service mesh**. The mesh moves all of these communication concerns out of the service and into a **sidecar proxy** — a small proxy process deployed in the same unit as each service instance. Every byte the service sends or receives passes through its sidecar. The sidecar, not your code, performs mutual TLS, applies retries and timeouts, enforces routing rules, and records metrics and traces.
+
+Because the proxy sits in the network path and is language-agnostic, the service is unaware of it. A Go service and a Java service get identical mTLS, retry, and telemetry behaviour because the same proxy implements it for both.
+
+The fleet of sidecars is the **data plane** — they carry the actual traffic. A separate **control plane** configures them: you express policy once (this route, this timeout, this traffic split), and the control plane pushes the resulting configuration to every sidecar. Changing a policy is a control-plane update, not a service redeploy.
+
+export const meshDiagram = `flowchart TB
+  CP[Control plane: policy + certificates]
+  subgraph A[Order Service pod]
+    AS[order-service]
+    AP[sidecar proxy]
+    AS <--> AP
+  end
+  subgraph B[Payment Service pod]
+    BS[payment-service]
+    BP[sidecar proxy]
+    BS <--> BP
+  end
+  AP -->|mTLS, retries, timeouts| BP
+  CP -. config .-> AP
+  CP -. config .-> BP`;
+
+<Mermaid code={meshDiagram} title="Each service runs beside a sidecar proxy (the data plane); a control plane pushes policy and certificates to every sidecar" />
+
+## Example
+
+You describe traffic behaviour as a policy the control plane distributes. This one sets a timeout and bounded retries for calls to the payment service, and splits traffic so 90% goes to the stable version and 10% to a canary — none of which requires touching the payment service's code.
+
+```yaml
+apiVersion: networking.mesh.io/v1
+kind: TrafficPolicy
+metadata:
+  name: payment-routing
+spec:
+  host: payment-service
+  timeout: 2s
+  retries:
+    attempts: 3
+    perTryTimeout: 800ms
+    retryOn: 5xx,connect-failure
+  mtls:
+    mode: STRICT
+  trafficSplit:
+    - version: stable
+      weight: 90
+    - version: canary
+      weight: 10
+```
+
+The control plane translates this into configuration for every sidecar that calls `payment-service`. To roll the canary forward you change the weights here; no service is rebuilt or redeployed.
+
+## Resulting context
+
+What you gain:
+
+- **Consistent cross-cutting networking.** mTLS, retries, timeouts, and telemetry behave identically for every service regardless of language, because one proxy implements them all.
+- **Centralized, code-free control.** Routing, security, and resilience policy live in the control plane. Canary releases, traffic shifts, and tighter timeouts are configuration changes, not redeploys.
+- **Built-in observability and zero-trust.** Every hop is automatically traced and metered, and service-to-service traffic is encrypted and authenticated by default.
+
+What it costs you:
+
+- **Extra latency and resource use.** Every call now traverses two proxies, adding a small but real latency tax and a sidecar's worth of CPU and memory per service instance.
+- **Operational complexity.** The mesh is a sophisticated distributed system you must install, upgrade, and debug; a misconfigured control plane can break communication fleet-wide.
+- **Another layer to reason about.** When a call fails, the answer might be in your service, the sidecar, or the control plane's policy — more moving parts between cause and symptom.
+
+A practical rule: a mesh earns its keep once you have many polyglot services and real needs for uniform mTLS, traffic control, and telemetry; for a handful of services it is usually more machinery than the problem warrants.
+
+## Related patterns
+
+- [Service per Container](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-per-container/) — the sidecar is typically a second container deployed alongside the service container.
+- [Microservice Chassis](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/microservice-chassis/) — an in-process alternative for some of the same concerns; mesh and chassis are often combined.
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/externalized-configuration/) — mesh policy is itself externalized configuration, pushed by the control plane.
+
+<Callout title="Mesh moves the logic out of your code, not out of existence">
+A service mesh does not make retries, timeouts, and mTLS disappear — it relocates them from your application code into a sidecar managed centrally. The benefit is uniformity and central control; the price is a proxy on every hop and a powerful new system to operate. It is a trade you make when consistency across many services matters more than the added latency and complexity.
+</Callout>
+
+export const quizMesh = [
+  {
+    q: 'Where does a service mesh put communication concerns like mTLS, retries, and timeouts?',
+    options: [
+      'Inside each service\'s business code, duplicated per language',
+      'In a sidecar proxy deployed beside every service instance, governed by a central control plane',
+      'In the database layer',
+      'In the client browser',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the difference between the data plane and the control plane?',
+    options: [
+      'The data plane stores data; the control plane stores logs',
+      'The data plane is the fleet of sidecar proxies that carry traffic; the control plane configures them with policy and certificates',
+      'They are two names for the same component',
+      'The control plane carries the traffic and the data plane sets policy',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why can a service mesh apply identical behaviour to services written in different languages?',
+    options: [
+      'Because it requires every service to be rewritten in one language',
+      'Because the language-agnostic sidecar proxy sits in the network path and handles the concerns, so the service is unaware of it',
+      'Because it only works with HTTP',
+      'Because each team manually copies the same code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a real cost of running a service mesh?',
+    options: [
+      'Services can no longer call each other',
+      'Every call traverses extra proxies, adding latency and resource use, and the mesh itself is a complex system to operate',
+      'It forces all traffic to be unencrypted',
+      'Policy changes always require redeploying every service',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/service-mesh" questions={quizMesh} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/service-mesh" />

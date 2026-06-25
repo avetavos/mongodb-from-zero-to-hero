@@ -1,0 +1,100 @@
+---
+title: Decomposition
+description: 'How do you split a system into services? The two main strategies — by business capability and by subdomain — plus the supporting patterns that keep the resulting services autonomous, available, and owned.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+You have decided to build your system as a set of services rather than one monolith. The promise is appealing: small, independently deployable units that teams can ship on their own cadence. But before any of that pays off, you face a single deceptively simple question — where do the lines go? A microservice architecture is, more than anything else, a set of boundaries. Draw them well and the system feels like it wants to be changed; draw them badly and you get a *distributed monolith*, where every change still ripples across every service, except now over the network.
+
+## Problem
+
+The trouble is that "split it into services" is not advice — it is a restatement of the goal. Splitting by technical layer (one service for the web tier, one for business logic, one for data access) recreates the same tight coupling, because a single feature still cuts across all of them. Splitting at random produces services that constantly call each other to get anything done. And there is no compiler to tell you that a boundary is wrong; you usually discover it months later, when a "small" feature touches four services and three teams.
+
+So the question this module answers is this: by what principle do you decide what belongs in one service and what belongs in another, so that each service is cohesive inside, loosely coupled to the rest, and able to evolve on its own?
+
+## Solution
+
+There is no single algorithm, but there is a small, coherent set of patterns that work together. Two of them are *strategies* for finding the boundaries; the rest are *supporting* patterns that keep the resulting services healthy.
+
+The two main decomposition strategies are:
+
+- **Decompose by Business Capability** — define each service around something the business *does* (Order Management, Billing, Shipping). The boundaries follow the organization's stable capabilities rather than its current technology.
+- **Decompose by Subdomain** — use Domain-Driven Design to find bounded contexts and subdomains, and make each one a service. This is a more rigorous, model-driven path to roughly the same kind of boundaries.
+
+Two supporting patterns keep those services autonomous once they exist:
+
+- **Self-Contained Service** — a service answers a request without making synchronous calls to other services, so it stays available when its neighbours are slow or down.
+- **Service per Team** — ownership of each service is aligned with a single team, so that the architecture and the organization reinforce each other instead of fighting.
+
+export const overviewDiagram = `flowchart TB
+  Start[Monolith to decompose] --> Q{Choose a strategy}
+  Q -->|what the business does| BC[Decompose by<br/>Business Capability]
+  Q -->|domain model| SD[Decompose by<br/>Subdomain / DDD]
+  BC --> Services[Candidate services]
+  SD --> Services
+  Services --> SCS[Self-Contained Service<br/>keep each one available]
+  Services --> SPT[Service per Team<br/>give each one an owner]
+  SCS --> Good[Cohesive, loosely coupled,<br/>independently deployable services]
+  SPT --> Good`;
+
+<Mermaid code={overviewDiagram} title="The decomposition pattern language: two strategies for finding boundaries, two supporting patterns for keeping services autonomous" />
+
+## What this module covers
+
+We begin with the two strategies, because everything else depends on getting the boundaries roughly right. **Decompose by Business Capability** is the most approachable starting point and a good default. **Decompose by Subdomain** brings the discipline of Domain-Driven Design and tends to produce sharper boundaries when the domain is complex. The two are complementary, not rival — capabilities give you a fast first cut, subdomains refine it.
+
+We then turn to two patterns that protect the services after the lines are drawn. **Self-Contained Service** is about runtime autonomy: a service should not fall over just because something it talks to is unavailable. **Service per Team** is about organizational autonomy: a service should have exactly one team that owns it end to end, in line with Conway's law. Each lesson follows the same shape — the situation that leads to the pattern, the forces in tension, what the pattern does, a diagram, and an honest look at what the pattern costs.
+
+## Related patterns
+
+- [Decompose by Business Capability](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-business-capability/) — the most common starting strategy.
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-subdomain/) — the Domain-Driven Design path to boundaries.
+
+<Callout title="Boundaries are a hypothesis, not a verdict">
+You will not get every line right on the first try, and that is fine. The goal of these patterns is not a perfect decomposition but a *defensible* one — boundaries you can explain, defend, and adjust as you learn more about the domain. Treat your first cut as a hypothesis to be tested by the changes the business actually asks for.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the central question of decomposition?',
+    options: [
+      'Which programming language each service should use',
+      'By what principle to decide what belongs in one service versus another, so services stay cohesive and loosely coupled',
+      'How many database servers to provision',
+      'Which cloud provider to deploy to',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is splitting a system by technical layer (web, logic, data) usually a poor decomposition?',
+    options: [
+      'Because technical layers are illegal in microservices',
+      'Because a single feature still cuts across all the layers, recreating tight coupling over the network',
+      'Because layers cannot be deployed independently at all',
+      'Because each layer must use a different database',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which two patterns are the main *strategies* for finding service boundaries?',
+    options: [
+      'Self-Contained Service and Service per Team',
+      'Decompose by Business Capability and Decompose by Subdomain',
+      'Saga and CQRS',
+      'API Composition and Database per Service',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="decomposition/index" />

@@ -1,0 +1,151 @@
+---
+title: Service Discovery
+description: 'When service instances start, stop, and move, a caller can no longer hard-code an address. Service discovery lets a client find a live instance’s network location through a registry — client-side or server-side.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+The Order service needs to call the Customer service. In a fixed deployment you might hard-code `http://customer-service:8080` and be done. But in a modern environment, services run as many instances behind autoscaling, containers are rescheduled across hosts, and platforms assign network locations dynamically. The set of live Customer instances — and their IP addresses and ports — changes minute to minute. The address the caller needs does not exist as a constant anywhere.
+
+## Problem
+
+A caller must obtain the network location of a service instance, but that location is dynamic: instances come and go as they scale, crash, redeploy, and move. The caller also wants to spread its requests across the healthy instances and must avoid sending traffic to an instance that has died. Hard-coding addresses is impossible, and a static config file goes stale the moment an instance restarts on a new host. How does a caller reliably find a live instance to talk to?
+
+## Solution
+
+The keystone is a **service registry**: a database of services, their instances, and each instance's location and health. Instances get into the registry one of two ways:
+
+- **Self-registration** — each instance registers itself on startup, sends periodic heartbeats, and deregisters on shutdown. Simple, but couples every service to the registry's API.
+- **Third-party registration** — a separate registrar (often the deployment platform) watches instances and updates the registry on the service's behalf, so the service code stays unaware of it.
+
+Given the registry, there are two ways a caller reaches an instance.
+
+**Client-side discovery.** The client queries the registry, gets the list of healthy instances, picks one (load-balancing in the client itself), and calls it directly.
+
+export const clientSide = `sequenceDiagram
+  participant C as Client (Order Service)
+  participant R as Service Registry
+  participant I as Customer Instance
+  C->>R: where is customer-service?
+  R-->>C: [10.0.1.7:8080, 10.0.2.3:8080]
+  C->>C: pick one (load-balance)
+  C->>I: GET /customers/42
+  I-->>C: 200 OK`;
+
+<Mermaid code={clientSide} title="Client-side discovery — the client queries the registry and load-balances across instances itself" />
+
+**Server-side discovery.** The client calls a stable address — a router or load balancer — which queries the registry, picks an instance, and forwards the request. The client knows nothing about the registry.
+
+export const serverSide = `sequenceDiagram
+  participant C as Client (Order Service)
+  participant LB as Load Balancer / Router
+  participant R as Service Registry
+  participant I as Customer Instance
+  C->>LB: GET /customers/42
+  LB->>R: where is customer-service?
+  R-->>LB: healthy instances
+  LB->>I: forward request
+  I-->>LB: 200 OK
+  LB-->>C: 200 OK`;
+
+<Mermaid code={serverSide} title="Server-side discovery — a load balancer at a stable address resolves the registry and forwards the request" />
+
+## Example
+
+A registry entry and a load-balancer note. The registry holds each instance's location and health; the load balancer routes by service name to whatever instances are currently healthy.
+
+```text
+# Service registry entry for customer-service
+service:   customer-service
+instances:
+  - id: customer-7a3f   address: 10.0.1.7:8080   health: passing   ttl: 10s
+  - id: customer-9b2c   address: 10.0.2.3:8080   health: passing   ttl: 10s
+  - id: customer-4d1e   address: 10.0.3.9:8080   health: critical  ttl: 10s   # excluded from routing
+
+# Load balancer routing note (server-side discovery)
+# Clients call the stable name "customer-service".
+# The LB resolves it against the registry and forwards
+# only to instances whose health == passing, spreading
+# load round-robin. An instance that misses its TTL
+# heartbeat is marked critical and dropped automatically.
+```
+
+## Resulting context
+
+What you gain:
+
+- **Dynamic, resilient routing.** Callers always reach a currently-healthy instance, no matter how often instances scale, crash, or move. Dead instances drop out of rotation automatically.
+- **Built-in load balancing.** Requests spread across all healthy instances, whether the client (client-side) or a router (server-side) does the spreading.
+
+What it costs you:
+
+- **The registry is critical infrastructure.** It must be highly available and consistent enough to trust; if it goes dark or returns stale data, callers route to dead instances. It is usually run as a replicated cluster.
+- **A trade-off between the two styles.** Client-side discovery is efficient (no extra hop) but puts discovery and load-balancing logic into every client and every language you use. Server-side discovery keeps clients simple but adds a network hop and another component to operate.
+- **Heartbeat tuning.** Health checks and TTLs must be tuned: too slow and dead instances linger; too aggressive and a brief blip ejects a healthy instance.
+
+Many platforms — for example a container orchestrator with built-in DNS and a service mesh — provide server-side discovery out of the box, so the registry and routing are part of the infrastructure rather than your application code.
+
+## Related patterns
+
+- [Remote Procedure Invocation](/microservices-design-from-zero-to-hero/en/communication/remote-procedure-invocation/) — the synchronous call that needs an instance address to send to.
+- [API Gateway](/microservices-design-from-zero-to-hero/en/communication/api-gateway/) — relies on discovery to route to live instances of internal services.
+- [Backends for Frontends](/microservices-design-from-zero-to-hero/en/communication/backends-for-frontends/) — each BFF discovers the internal services it composes.
+
+<Callout title="You may already have discovery for free">
+Before building a registry, check what your platform gives you. A container orchestrator typically registers and health-checks pods and exposes them under a stable DNS name with built-in load balancing — that is third-party registration plus server-side discovery, handed to you. A service mesh adds the same with richer routing and retries. Reach for an explicit registry library only when your environment does not already solve this.
+</Callout>
+
+export const quizDiscovery = [
+  {
+    q: 'Why can a caller not simply hard-code a service’s address?',
+    options: [
+      'Because addresses are secret',
+      'Because instances start, stop, scale, and move, so their locations change dynamically',
+      'Because hard-coded strings are not allowed in microservices',
+      'Because the registry forbids it',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the role of the service registry?',
+    options: [
+      'It stores each service’s business data',
+      'It is a database of services, their instances, locations, and health that callers consult to find live instances',
+      'It compiles the service code',
+      'It replaces the message broker',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does client-side discovery differ from server-side discovery?',
+    options: [
+      'Client-side encrypts traffic; server-side does not',
+      'In client-side, the client queries the registry and load-balances itself; in server-side, a load balancer at a stable address does the lookup and forwarding',
+      'Client-side works only with REST; server-side only with gRPC',
+      'There is no difference',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What distinguishes self-registration from third-party registration?',
+    options: [
+      'Self-registration uses DNS; third-party uses IP addresses',
+      'In self-registration each instance registers and heartbeats itself; in third-party registration a separate registrar updates the registry on the instance’s behalf',
+      'Self-registration is only for databases',
+      'Third-party registration requires a circuit breaker',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/service-discovery" questions={quizDiscovery} />
+
+<ProgressTracker client:visible id="communication/service-discovery" />

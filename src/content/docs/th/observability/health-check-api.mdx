@@ -1,0 +1,245 @@
+---
+title: Health Check API
+description: 'แต่ละบริการเปิดเผย endpoint ที่รายงาน liveness และ readiness ของมัน เพื่อให้ orchestrator และ load balancer สามารถ route ทราฟฟิกหลบ instance ที่ป่วยหรือกำลัง warming-up ได้โดยอัตโนมัติ โดยไม่ต้องมีมนุษย์มาเกี่ยวข้อง'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+บริการของคุณรันเป็น replica ที่เหมือนกันหลายตัวอยู่หลัง load balancer ถูกจัดตารางโดย orchestrator ที่สามารถเริ่มและหยุดมันได้ตามใจ replica ไม่ได้พร้อมทำงานที่มีประโยชน์เสมอไปทันทีที่โปรเซสของมันเริ่มทำงาน มันอาจยังเปิด database connection pool อยู่, กำลัง warm cache หรือกำลังรัน migration และ replica ก็สามารถกลายเป็นไม่แข็งแรงได้นานหลังจาก startup คือ database connection ของมันหลุด, downstream dependency ที่มันต้องการดับลง หรือมันเกิด deadlock ในขณะที่ทางเทคนิคแล้วโปรเซสยังรันต่อไป
+
+platform รอบ ๆ บริการของคุณไม่รู้เลยว่าสิ่งเหล่านี้กำลังเกิดขึ้น สำหรับ load balancer แล้ว โปรเซสที่ยอมรับ TCP connection ดูเหมือนยังมีชีวิตอยู่ แม้ในตอนที่ทุกคำขอที่มันให้บริการคืนค่า error ออกมา
+
+## ปัญหา
+
+ถ้า orchestrator และ load balancer แยกไม่ออกระหว่าง replica ที่แข็งแรงกับที่ป่วย มันก็จะส่งทราฟฟิกของผู้ใช้จริงไปยัง instance ที่ให้บริการมันไม่ได้ต่อไป pod ที่สูญเสีย database connection ยังคงได้รับคำขอหนึ่งในสาม และล้มเหลวทุกคำขอ replica ที่เพิ่งเริ่มทำงานถูกเพิ่มเข้าไปใน rotation ก่อนที่มันจะ warm up เสร็จ ดังนั้นคลื่นผู้ใช้กลุ่มแรกจึงเจอ error แบบเย็น ๆ
+
+คุณต้องการให้ platform ตัดสินใจเรื่อง routing และ restart โดยอัตโนมัติ แต่ entity เดียวที่รู้จริง ๆ ว่า replica แข็งแรงหรือไม่คือตัว replica เอง แล้วบริการจะบอก platform ได้อย่างไร อย่างต่อเนื่อง ราคาถูก และในรูปแบบที่ platform เข้าใจอยู่แล้ว ว่าตอนนี้มันควรได้รับทราฟฟิกหรือไม่
+
+## ทางออก
+
+แต่ละบริการเปิดเผย **Health Check API** คือ HTTP endpoint หนึ่งตัวหรือมากกว่าที่ platform poll ตามตารางเวลา บริการตรวจสอบสถานะของตัวเองและคืนค่า status code ที่ platform สามารถนำไปดำเนินการได้ — `200` สำหรับแข็งแรง, อะไรสักอย่างในช่วง `5xx` สำหรับไม่แข็งแรง
+
+ข้อคิดสำคัญคือ "แข็งแรง" มีสองความหมายที่ชัดเจน และ platform ที่เป็นผู้ใหญ่แล้วจะถามแยกกัน
+
+- **Liveness** — *โปรเซสเสียโดยพื้นฐานและจำเป็นต้อง restart หรือไม่?* การตรวจ liveness ที่ล้มเหลวบอก orchestrator ให้ฆ่าและสร้าง instance ขึ้นใหม่ ให้การตรวจนี้ราคาถูกและไม่พึ่ง dependency มันควรล้มเหลวเฉพาะเมื่อการ restart จะช่วยได้จริง ๆ (เช่น deadlock) ไม่ใช่เมื่อ downstream เพียงแค่ช้า
+- **Readiness** — *instance นี้ให้บริการทราฟฟิกได้ตอนนี้หรือไม่?* การตรวจ readiness ที่ล้มเหลวบอก load balancer ให้หยุด route คำขอมาที่นี่ แต่ **ไม่** restart โปรเซส นี่คือจุดที่คุณตรวจ dependency ที่บริการต้องการจริง ๆ — database, cache ที่จำเป็น, downstream ที่สำคัญ — เพื่อให้ replica ที่กำลัง warming-up หรือเสื่อมสภาพชั่วคราวถูกดึงออกจาก rotation อย่างเงียบ ๆ และเพิ่มกลับเข้ามาเมื่อมันฟื้น
+
+export const pollDiagram = `flowchart LR
+  ORCH[Orchestrator] -->|GET /health/live every Ns| LIVE{liveness ok?}
+  LB[Load Balancer] -->|GET /health/ready every Ns| READY{readiness ok?}
+  LIVE -->|no| KILL[restart instance]
+  LIVE -->|yes| KEEP[leave running]
+  READY -->|no| DRAIN[stop routing traffic here]
+  READY -->|yes| SERVE[send traffic here]`;
+
+<Mermaid code={pollDiagram} title="orchestrator poll liveness เพื่อตัดสินใจเรื่อง restart; load balancer poll readiness เพื่อตัดสินใจเรื่อง routing" />
+
+## ตัวอย่าง
+
+readiness endpoint ที่ตรวจ dependency ที่บริการต้องการจริง ๆ และรายงานผลลัพธ์แบบมีโครงสร้าง มันคืนค่า `200` เฉพาะเมื่อทุก dependency ที่จำเป็นเข้าถึงได้ และ `503` ในกรณีอื่น เพื่อให้ load balancer สามารถ drain มันได้โดยไม่ต้องมีมนุษย์ตัดสินใจอะไร
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import express from 'express';
+
+    const app = express();
+
+    async function checkDb(): Promise<boolean> {
+      try {
+        await db.query('SELECT 1');
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    // Liveness: cheap, no dependencies. Fail only if a restart would help.
+    app.get('/health/live', (_req, res) => {
+      res.status(200).json({ status: 'UP' });
+    });
+
+    // Readiness: check required dependencies.
+    app.get('/health/ready', async (_req, res) => {
+      const checks = { database: await checkDb() };
+      const healthy = Object.values(checks).every(Boolean);
+      res.status(healthy ? 200 : 503).json({
+        status: healthy ? 'UP' : 'DOWN',
+        checks,
+      });
+    });
+
+    app.listen(8080);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from fastapi import FastAPI, Response
+
+    app = FastAPI()
+
+    async def check_db() -> bool:
+        try:
+            await db.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+    # Liveness: cheap, no dependencies. Fail only if a restart would help.
+    @app.get("/health/live")
+    async def live():
+        return {"status": "UP"}
+
+    # Readiness: check required dependencies.
+    @app.get("/health/ready")
+    async def ready(response: Response):
+        checks = {"database": await check_db()}
+        healthy = all(checks.values())
+        response.status_code = 200 if healthy else 503
+        return {"status": "UP" if healthy else "DOWN", "checks": checks}
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    package main
+
+    import (
+        "encoding/json"
+        "net/http"
+    )
+
+    func checkDB() bool {
+        if err := db.Ping(); err != nil {
+            return false
+        }
+        return true
+    }
+
+    func main() {
+        // Liveness: cheap, no dependencies. Fail only if a restart would help.
+        http.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(map[string]string{"status": "UP"})
+        })
+
+        // Readiness: check required dependencies.
+        http.HandleFunc("/health/ready", func(w http.ResponseWriter, _ *http.Request) {
+            checks := map[string]bool{"database": checkDB()}
+            healthy := true
+            for _, ok := range checks {
+                if !ok {
+                    healthy = false
+                }
+            }
+            w.Header().Set("Content-Type", "application/json")
+            if healthy {
+                w.WriteHeader(http.StatusOK)
+            } else {
+                w.WriteHeader(http.StatusServiceUnavailable)
+            }
+            json.NewEncoder(w).Encode(map[string]any{"checks": checks})
+        })
+
+        http.ListenAndServe(":8080", nil)
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use axum::{routing::get, Json, Router};
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    async fn check_db() -> bool {
+        sqlx::query("SELECT 1").execute(&pool).await.is_ok()
+    }
+
+    // Liveness: cheap, no dependencies. Fail only if a restart would help.
+    async fn live() -> Json<serde_json::Value> {
+        Json(json!({ "status": "UP" }))
+    }
+
+    // Readiness: check required dependencies.
+    async fn ready() -> (StatusCode, Json<serde_json::Value>) {
+        let db_ok = check_db().await;
+        let code = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+        (code, Json(json!({
+            "status": if db_ok { "UP" } else { "DOWN" },
+            "checks": { "database": db_ok }
+        })))
+    }
+
+    fn app() -> Router {
+        Router::new()
+            .route("/health/live", get(live))
+            .route("/health/ready", get(ready))
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่ได้ผลลัพธ์
+
+สิ่งที่คุณได้รับ:
+
+- **Routing และ restart ที่ self-healing** platform ดึง replica ที่ป่วยออกจาก rotation และ restart ตัวที่เสียโดยไม่ต้องมีมนุษย์มาเกี่ยวข้อง ดังนั้น instance ที่ล้มเหลวจึงทำให้ความจุลดลงแทนที่จะก่อให้เกิด error ที่ผู้ใช้มองเห็น
+- **Rollout และ scaling ที่ปลอดภัย** replica ใหม่จะได้รับทราฟฟิกก็ต่อเมื่อ readiness ผ่าน ดังนั้นการ deploy และ scale-up จึงไม่ก่อให้เกิด error แบบเย็น ๆ
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **คุณต้องแยก liveness ออกจาก readiness อย่างระมัดระวัง** ถ้าการตรวจ liveness ของคุณล้มเหลวเมื่อใดก็ตามที่ downstream ช้า orchestrator ก็จะ restart instance ที่แข็งแรงทุกครั้งที่ downstream สะดุด — เปลี่ยนการสะดุดเล็กน้อยของ dependency ให้กลายเป็นพายุ restart
+- **Health check สามารถโกหกหรือมีต้นทุนสูงเกินไปได้** การตรวจที่คืนค่า `200` เสมอไม่ว่าสถานะจะเป็นอย่างไรนั้นแย่กว่าไม่มีเลย ส่วนการตรวจที่รัน query แพง ๆ ทุกครั้งที่ poll จะเพิ่มภาระและตัวมันเองก็อาจกลายเป็นคอขวด ให้การตรวจมีความหมายแต่ราคาถูก และ cache ผลลัพธ์เมื่อ poll บ่อย
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Application Metrics](/microservices-design-from-zero-to-hero/th/observability/application-metrics/) — health เป็นสัญญาณใช่/ไม่ใช่; metrics แสดงการเสื่อมสภาพแบบค่อยเป็นค่อยไปที่นำหน้าก่อนการตรวจที่ล้มเหลว
+- [Log Aggregation](/microservices-design-from-zero-to-hero/th/observability/log-aggregation/) — เมื่อการตรวจ readiness เริ่มล้มเหลว logs ที่ถูกรวบรวมจะบอกคุณว่า *ทำไม*
+
+<Callout title="Readiness เป็นการตัดสินใจเรื่อง routing ไม่ใช่คำตัดสินต่อทั้งโลก">
+ความผิดพลาดที่พบบ่อยคือการให้ readiness ล้มเหลวเมื่อ downstream *ใด ๆ* เข้าถึงไม่ได้ ถ้าทุก replica ตรวจ dependency ที่ไม่เสถียรตัวเดียวกัน มันก็จะรายงาน `DOWN` พร้อมกันหมด และ load balancer ก็ไม่มีที่เหลือให้ route ให้ตรวจเฉพาะ dependency ที่ถ้าขาดไป instance นี้จะไร้ประโยชน์จริง ๆ และให้เลือก graceful degradation — คืนค่า response ที่ลดทอนลง — มากกว่าการถอนตัวออกจาก rotation ทั้งหมด
+</Callout>
+
+export const quizHealth = [
+  {
+    q: 'What is the difference between a liveness check and a readiness check?',
+    options: [
+      'Liveness ตัดสินว่าจะ restart instance หรือไม่; readiness ตัดสินว่าจะ route ทราฟฟิกไปหามันหรือไม่',
+      'Liveness รันครั้งเดียวตอน startup; readiness รันเฉพาะตอน shutdown',
+      'มันเหมือนกันทุกประการ; สองชื่อนี้ใช้แทนกันได้',
+      'Readiness restart instance; liveness drain ทราฟฟิก',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'Why should a liveness check generally avoid calling downstream dependencies?',
+    options: [
+      'เพราะการเรียก downstream ไม่ได้รับอนุญาตผ่าน HTTP',
+      'เพราะ downstream ที่ช้าจะทำให้ liveness ล้มเหลวและกระตุ้นการ restart ที่ไม่จำเป็น ทั้งที่การ restart ไม่ได้ช่วยอะไร',
+      'เพราะการตรวจ liveness ต้องคืนค่า 503 เสมอ',
+      'เพราะ load balancer เพิกเฉยต่อผลลัพธ์ของ liveness',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is it risky to fail readiness whenever any downstream is unreachable?',
+    options: [
+      'มันทำให้ endpoint ตอบสนองเร็วเกินไป',
+      'มันละเมิดข้อกำหนดของ HTTP',
+      'ทุก replica อาจรายงาน DOWN พร้อมกัน ทำให้ load balancer ไม่มี instance ให้ route ไปหา',
+      'การตรวจ readiness ไม่สามารถคืนค่า JSON ได้',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="observability/health-check-api" questions={quizHealth} />
+
+<ProgressTracker client:visible id="observability/health-check-api" />

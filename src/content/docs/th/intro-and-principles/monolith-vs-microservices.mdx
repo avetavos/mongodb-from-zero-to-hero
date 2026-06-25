@@ -1,0 +1,126 @@
+---
+title: Monolith vs Microservices
+description: 'monolithic architecture บรรจุทั้งแอปพลิเคชันเป็นหน่วย deploy เดียว มันเรียบง่ายและเริ่มต้นได้รวดเร็ว และจะเจ็บก็ต่อเมื่อถึง scale ระดับหนึ่งเท่านั้น — ซึ่งนั่นคือจุดเปรียบเทียบที่ microservices ถูกออกแบบมาเพื่อรับมือ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+แทบทุกระบบที่ประสบความสำเร็จเริ่มต้นในฐานะ monolith และก็มีเหตุผลที่ดี เมื่อคุณยังคิดอยู่ว่าจะสร้างอะไร สิ่งสุดท้ายที่คุณต้องการคือภาระของระบบแบบกระจาย คุณเขียน module ของคุณ ต่อสายเชื่อมเข้าด้วยกันใน process เดียว ชี้พวกมันไปยังฐานข้อมูลเดียว แล้วก็ ship ออกไป เพื่อจะเข้าใจว่าทำไมทีมหนึ่งจึงยอมแบกรับความซับซ้อนของ microservices คุณต้องเข้าใจสถาปัตยกรรมที่พวกเขากำลังก้าวออกมาเสียก่อน — และทำไมมันถึงรับใช้พวกเขาได้ดีมานานขนาดนั้น
+
+## Problem
+
+**monolithic architecture** บรรจุทั้งแอปพลิเคชันเป็นหน่วย deploy เดียว module ทั้งหมด — order logic, payment logic, inventory logic — อยู่ใน codebase เดียว compile หรือ bundle เป็น artifact เดียว รันใน process เดียว และใช้ฐานข้อมูลเดียวร่วมกัน
+
+นี่ไม่ใช่ข้อบกพร่อง สำหรับทีมเล็กและผลิตภัณฑ์ที่ยังอ่อนวัย monolith มีจุดแข็งที่แท้จริง:
+
+- **พัฒนาง่าย** repository เดียว build เดียว วิธีเดียวในการรันทั้งหมดบนเครื่องของคุณ
+- **ทดสอบง่าย** end-to-end test รันกับ process เดียว ไม่มีเครือข่ายอยู่ตรงกลางให้ต้อง mock หรือคอยล้มเป็นพัก ๆ
+- **deploy ง่าย** artifact เดียวออกไป ไม่มี version-skew ระหว่าง service ให้ต้องมานั่งคิด
+- **strong consistency ได้ง่าย** transaction ฐานข้อมูลเดียวสามารถอัปเดต orders, inventory และ payments แบบ atomic ได้ และ join เดียวก็อ่านข้ามทั้งหมดได้
+
+ปัญหาไม่ได้อยู่ที่ monolith เอง — แต่อยู่ที่สิ่งที่เกิดขึ้นกับ monolith ที่ *ประสบความสำเร็จ* เมื่อเวลาผ่านไป เมื่อ codebase เติบโตและทีมก็เติบโตตามไปด้วย สิ่งเดียวกันที่เคยทำให้มันเรียบง่าย นั่นคือหน่วยเดียวที่ใช้ร่วมกัน กลับกลายเป็นสิ่งที่ทำให้ทุกคนช้าลง:
+
+- codebase ใหญ่ขึ้นจนไม่มีใครเข้าใจมันได้ทั้งหมด และการเปลี่ยนแปลงในส่วนหนึ่งก็ไปทำให้อีกส่วนพัง
+- ทุกการเปลี่ยนแปลง ไม่ว่าจะเล็กแค่ไหน ต้อง build และ deploy ทั้งแอปพลิเคชัน ดังนั้น release จึงใหญ่ ไม่ค่อยเกิดบ่อย และเสี่ยง
+- คุณไม่สามารถ scale แต่ละส่วนอย่างอิสระได้ ถ้ามีเพียง payment logic ที่ติด CPU-bound คุณก็ยังต้องรันสำเนาของ *ทั้ง* แอปพลิเคชันเพิ่มเพื่อให้ทันความต้องการ
+- ทีมเหยียบเท้ากันเอง คนจำนวนมาก commit เข้า codebase เดียวและรอ release pipeline ที่ใช้ร่วมกันตัวเดียว ก่อให้เกิดการแย่งชิงและภาระการประสานงาน
+- คุณถูกล็อกอยู่กับ technology stack เดิม การจะรับเอาภาษาหรือ framework ใหม่มาใช้หมายถึงต้องเขียนใหม่หรือแบก monolith ทั้งก้อนติดตัวไปด้วย
+
+ดังนั้นแรงผลักก็ชัดเจน: monolith ปรับให้เหมาะกับความเรียบง่ายในช่วงต้น แต่ monolith ขนาดใหญ่ที่ยุ่งวุ่นวายแลกความสามารถในการ deploy อย่างอิสระ การ scale อย่างอิสระ และความเป็นอิสระของทีมทิ้งไป
+
+## Solution
+
+**microservices architecture** คือจุดเปรียบเทียบที่จงใจ แทนที่จะเป็นหน่วย deploy เดียว คุณแยกแอปพลิเคชันออกเป็นชุดของ service ที่เล็กลง แต่ละตัว deploy ได้อย่างอิสระ แต่ละตัวเป็นเจ้าของข้อมูลของมัน แต่ละตัวสอดคล้องกับ business capability หนึ่ง สิ่งที่เคยเป็น method call ภายใน process เดียวกลายเป็น API call หรือ event ที่ข้ามเครือข่าย
+
+ไดอะแกรมด้านล่างวางทั้งสองไว้เคียงข้างกัน: กล่องเดียวที่คุณ deploy ทั้งก้อน เทียบกับหลายกล่องที่คุณ deploy ได้ด้วยตัวของมันเอง
+
+export const compareDiagram = `flowchart TB
+  subgraph Monolith[Monolithic Architecture]
+    direction TB
+    M[Single Deployable Unit]
+    MO[Orders Module]
+    MP[Payments Module]
+    MI[Inventory Module]
+    M --- MO
+    M --- MP
+    M --- MI
+    MDB[(Shared Database)]
+    MO --> MDB
+    MP --> MDB
+    MI --> MDB
+  end
+  subgraph Micro[Microservices Architecture]
+    direction TB
+    SO[Order Service] --> SODB[(Orders DB)]
+    SP[Payment Service] --> SPDB[(Payments DB)]
+    SI[Inventory Service] --> SIDB[(Inventory DB)]
+  end`;
+
+<Mermaid code={compareDiagram} title="หน่วย deploy เดียวบนฐานข้อมูลที่ใช้ร่วมกัน เทียบกับ service หลายตัวที่ deploy ได้อย่างอิสระ แต่ละตัวมีฐานข้อมูลของตัวเอง" />
+
+การแยกนี้ไม่ได้มาฟรี และไม่ได้ดีกว่าโดยอัตโนมัติ มันแลก in-process simplicity และ easy consistency ของ monolith กับความเป็นอิสระและ scalability — และเพิ่มต้นทุนของการดำเนินงานระบบแบบกระจายเข้ามา บทเรียนถัดไปจะชั่งน้ำหนักการแลกเปลี่ยนนี้อย่างซื่อตรง
+
+## Resulting context
+
+อะไรบ้างที่เปลี่ยนไปเมื่อคุณย้ายจากด้านซ้ายของไดอะแกรมไปด้านขวา:
+
+- transaction เดียวที่ใช้ร่วมกันกลายเป็น workflow ที่ต้องประสานงานข้าม service ดังนั้น strong consistency จึงกลายเป็น eventual consistency ที่คุณต้องออกแบบรองรับ
+- การ deploy ทั้งแอปพลิเคชันกลายเป็นการ deploy ขนาดเล็กที่อิสระจำนวนมาก
+- ปุ่มปรับ scale เดียวกลายเป็นปุ่มปรับหนึ่งปุ่มต่อหนึ่ง service
+- codebase เดียวที่ทุกคนเป็นเจ้าของกลายเป็น codebase จำนวนมาก แต่ละอันมีทีมหนึ่งเป็นเจ้าของ
+
+ทั้งหมดนี้ไม่ได้หมายความว่า monolith ผิด monolith ที่มีโครงสร้างดี — *modular* monolith ที่มีขอบเขตภายในที่สะอาด — สามารถพาผลิตภัณฑ์ไปได้ไกลมาก และบ่อยครั้งก็เป็นจุดเริ่มต้นที่ฉลาดกว่า ประเด็นของบทเรียนนี้ไม่ใช่ว่าอย่างหนึ่งดีและอีกอย่างแย่ แต่คือทั้งสองทำ trade-off ที่ตรงข้ามกัน และคุณควรเลือก trade-off ที่สถานการณ์ของคุณเรียกร้องจริง ๆ
+
+## Related patterns
+
+- [What Is Microservices Architecture?](/microservices-design-from-zero-to-hero/th/intro-and-principles/) — นิยามที่บทเรียนนี้นำมาเปรียบเทียบ
+- [Benefits and Drawbacks](/microservices-design-from-zero-to-hero/th/intro-and-principles/benefits-and-drawbacks/) — trade-off ที่พิจารณาอย่างละเอียด
+- [When to Use Microservices](/microservices-design-from-zero-to-hero/th/intro-and-principles/when-to-use-microservices/) — การเลือกว่าคุณควรอยู่ฝั่งไหนของไดอะแกรม
+
+<Callout title="จงเป็นธรรมกับ monolith">
+monolith ไม่ใช่ความผิดพลาดที่คุณกำลังหนีออกมา มันคือค่าเริ่มต้นที่สมเหตุสมผลซึ่งคุณอาจเติบโตจนเกินมันไปในที่สุด ผลิตภัณฑ์ส่วนใหญ่ไม่เคยไปถึง scale ที่ต้นทุนของมันมากเกินกว่าความเรียบง่ายของมัน จงปฏิบัติต่อการย้ายไปสู่ microservices ในฐานะการตอบสนองต่อความเจ็บปวดที่เฉพาะเจาะจงและสังเกตเห็นได้ — ทีมขนาดใหญ่ที่ติดอยู่กับ pipeline เดียว component ที่ต้อง scale แยกกัน — ไม่ใช่ในฐานะเครื่องหมายของวุฒิภาวะทางสถาปัตยกรรม
+</Callout>
+
+export const quizCompare = [
+  {
+    q: 'What defines a monolithic architecture?',
+    options: [
+      'แอปพลิเคชันที่เขียนโค้ดไว้ไม่ดี',
+      'แอปพลิเคชันที่ถูกบรรจุและ deploy เป็นหน่วยเดียว โดยทั่วไปอยู่บนฐานข้อมูลที่ใช้ร่วมกันหนึ่งตัว',
+      'แอปพลิเคชันที่ใช้ภาษาโปรแกรมเพียงภาษาเดียว',
+      'แอปพลิเคชันที่ไม่มี automated test',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine strength of the monolith for a small team and young product?',
+    options: [
+      'การ scale แต่ละ component อย่างอิสระ',
+      'การพัฒนา ทดสอบ และ deploy ที่เรียบง่าย บวกกับ strong consistency ที่ทำได้ง่ายผ่าน transaction ฐานข้อมูลเดียว',
+      'ความเป็นเจ้าของ deployable แยกต่างหากของแต่ละทีม',
+      'อิสระในการใช้ technology stack ที่ต่างกันในแต่ละ module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When does a monolith typically start to hurt?',
+    options: [
+      'ทันที ตั้งแต่วันแรกของทุกโปรเจกต์',
+      'เมื่อ codebase และทีมเติบโตใหญ่ขึ้น ทำให้การเปลี่ยนแปลงเสี่ยง และบังคับให้ต้อง deploy และ scale ทั้งแอปพลิเคชัน',
+      'เฉพาะเมื่อมันเขียนด้วยภาษาโปรแกรมเก่า ๆ เท่านั้น',
+      'ไม่เคยเลย — monolith scale ได้เหมือนกับ microservices',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/monolith-vs-microservices" questions={quizCompare} />
+
+<ProgressTracker client:visible id="intro-and-principles/monolith-vs-microservices" />

@@ -1,0 +1,279 @@
+---
+title: Retry and Timeout
+description: 'กำหนดขอบเขตให้ทุกการเรียก remote ด้วย timeout ที่เข้มงวดเพื่อให้มันค้างตลอดกาลไม่ได้ จากนั้น retry ความล้มเหลวแบบ transient ด้วย exponential backoff และ jitter การ retry ต้องเล็งไปที่ idempotent operation และต้องจับคู่กับ circuit breaker เพื่อหลีกเลี่ยง retry storm'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+การเรียก remote ไม่เหมือนกับการเรียกฟังก์ชันภายในเครื่อง มันเดินทางผ่านเครือข่ายที่ทำ packet หล่นหาย ผ่าน load balancer ที่บางครั้ง reset connection ไปยังบริการที่อาจอยู่ระหว่างการ rolling deploy หรือกำลัง garbage-collecting ชั่วครู่ ปัญหาเหล่านี้จำนวนมากเป็นแบบ *transient* — มันคงอยู่เพียงมิลลิวินาทีและความพยายามครั้งถัดไปก็จะสำเร็จ การ reset connection, การได้ `503` ชั่วขณะในขณะที่ pod กำลัง restart, การสะดุดของเครือข่ายเล็กน้อย: ไม่มีอันไหนหมายความว่า dependency พังจริง ๆ
+
+## ปัญหา
+
+มีโหมดความล้มเหลวสองแบบซ่อนอยู่ในทุกการเรียก remote แบบแรกคือ **การรอแบบไม่มีขอบเขต**: การเรียกที่ไม่มีขีดจำกัดเวลาสามารถค้างได้ตลอดระยะเวลาของ TCP timeout — เป็นนาทีในค่าเริ่มต้นบางอย่าง — ในขณะที่ thread นั่งว่างถือ connection ไว้ แบบที่สองคือ **การสะดุดแบบ transient**: ความพยายามครั้งเดียวล้มเหลวด้วยเหตุผลที่ผ่านพ้นไปแล้ว และการยอมแพ้ไปเลยจะเปลี่ยนการสะดุดที่กู้คืนได้ให้กลายเป็น error ที่ผู้ใช้มองเห็น
+
+แต่การแก้แบบไร้เดียงสากลับทำให้สิ่งต่าง ๆ แย่ลง การ retry ทันทีโดยไม่หน่วงเวลาคือการกระหน่ำ dependency ที่กำลังฟื้นตัว การ retry แบบพร้อมเพรียงกันข้าม client หลายพันตัวสร้าง **thundering herd** — คลื่นของการ retry ที่ซิงค์กันซึ่งมาถึงในขณะเดียวกันทั้งหมดและล้ม dependency กลับไปอีกครั้ง และการ retry operation แบบ *non-idempotent* — "หักเงินจากบัตรนี้", "จัดส่งคำสั่งซื้อนี้" — อาจทำให้มันถูกประมวลผลสองครั้ง
+
+ดังนั้นแรงที่ตึงเครียดกันคือ: คุณอยากกู้คืนจากการสะดุดโดยอัตโนมัติ คุณต้องไม่รอตลอดกาล คุณต้องไม่ขยายภาระให้ dependency ที่กำลังดิ้นรน และคุณต้องไม่ทำให้ side effect ซ้ำซ้อน
+
+## วิธีแก้
+
+ผสานวินัยสองอย่างเข้ากับทุกการเรียก remote
+
+**Timeout** กำหนดขอบเขตบนที่เข้มงวดว่าความพยายามครั้งเดียวจะใช้เวลาได้นานแค่ไหน เมื่องบเวลาหมดลง ความพยายามนั้นจะถูกยกเลิกและนับเป็นความล้มเหลว สิ่งนี้จำกัด latency ที่ผู้เรียกจะได้พบเจอและปล่อยทรัพยากรทันที
+
+**Retry ด้วย exponential backoff และ jitter** เมื่อเกิดความล้มเหลวแบบ *transient* ก็ลองอีกครั้ง — แต่รอนานขึ้นในระหว่างความพยายามแต่ละครั้ง (การหน่วงเวลาเพิ่มขึ้นแบบ exponential: ประมาณ `base`, `base × 2`, `base × 4`, …) และเพิ่ม **jitter** แบบสุ่มให้กับการหน่วงเวลาแต่ละครั้งเพื่อให้ client ที่ทำงานพร้อมกันกระจายตัวออกแทนที่จะ retry พร้อมเพรียงกัน จำกัดจำนวนความพยายามเพื่อให้ความล้มเหลวปรากฏขึ้นในที่สุด และ retry เฉพาะ operation ที่เป็น **idempotent** เท่านั้น — การรันมันสองครั้งให้ผลเหมือนกับรันครั้งเดียว
+
+export const retryFlow = `sequenceDiagram
+  participant C as Caller
+  participant D as Dependency
+  C->>D: attempt 1 (timeout 1s)
+  Note over C,D: no response within 1s
+  C--xC: timeout fires, attempt cancelled
+  Note over C: wait ~0.5s (base + jitter)
+  C->>D: attempt 2 (timeout 1s)
+  D--xC: 503 transient
+  Note over C: wait ~1.0s (base*2 + jitter)
+  C->>D: attempt 3 (timeout 1s)
+  D-->>C: 200 OK`;
+
+<Mermaid code={retryFlow} title="timeout กำหนดขอบเขตให้แต่ละความพยายาม การ retry รอนานขึ้นเรื่อย ๆ พร้อม jitter จนกว่าจะมีครั้งหนึ่งสำเร็จหรืองบหมด" />
+
+## ตัวอย่าง
+
+นี่คือ helper ที่รัน operation ด้วย timeout ต่อความพยายาม และ retry ความล้มเหลวแบบ transient โดยใช้ exponential backoff บวก jitter มันสมมติว่า operation เป็น idempotent แต่ละตัวอย่างเป็นอิสระในตัวเองและเขียนตามแบบฉบับของแต่ละภาษา
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    interface RetryOptions {
+      attempts: number;
+      timeoutMs: number;
+      baseDelayMs: number;
+      isTransient: (err: unknown) => boolean;
+    }
+
+    function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ms);
+      return fn(ctrl.signal).finally(() => clearTimeout(timer));
+    }
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    async function retry<T>(
+      op: (signal: AbortSignal) => Promise<T>,
+      opts: RetryOptions,
+    ): Promise<T> {
+      let lastErr: unknown;
+      for (let i = 0; i < opts.attempts; i++) {
+        try {
+          return await withTimeout(op, opts.timeoutMs);
+        } catch (err) {
+          lastErr = err;
+          if (!opts.isTransient(err) || i === opts.attempts - 1) throw err;
+          // Exponential backoff with full jitter.
+          const ceiling = opts.baseDelayMs * 2 ** i;
+          await sleep(Math.random() * ceiling);
+        }
+      }
+      throw lastErr;
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import asyncio
+    import random
+    from typing import Awaitable, Callable, TypeVar
+
+    T = TypeVar("T")
+
+    async def retry(
+        op: Callable[[], Awaitable[T]],
+        *,
+        attempts: int,
+        timeout_s: float,
+        base_delay_s: float,
+        is_transient: Callable[[Exception], bool],
+    ) -> T:
+        last_err: Exception | None = None
+        for i in range(attempts):
+            try:
+                return await asyncio.wait_for(op(), timeout=timeout_s)
+            except (asyncio.TimeoutError, Exception) as err:
+                last_err = err
+                transient = isinstance(err, asyncio.TimeoutError) or is_transient(err)
+                if not transient or i == attempts - 1:
+                    raise
+                # Exponential backoff with full jitter.
+                ceiling = base_delay_s * (2 ** i)
+                await asyncio.sleep(random.uniform(0, ceiling))
+        assert last_err is not None
+        raise last_err
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type RetryOptions struct {
+        Attempts    int
+        Timeout     time.Duration
+        BaseDelay   time.Duration
+        IsTransient func(error) bool
+    }
+
+    func Retry[T any](
+        ctx context.Context,
+        op func(context.Context) (T, error),
+        opts RetryOptions,
+    ) (T, error) {
+        var zero T
+        var lastErr error
+        for i := 0; i < opts.Attempts; i++ {
+            attemptCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+            v, err := op(attemptCtx)
+            cancel()
+            if err == nil {
+                return v, nil
+            }
+            lastErr = err
+            if !opts.IsTransient(err) || i == opts.Attempts-1 {
+                return zero, err
+            }
+            // Exponential backoff with full jitter.
+            ceiling := opts.BaseDelay * (1 << i)
+            jitter := time.Duration(rand.Int63n(int64(ceiling)))
+            select {
+            case <-time.After(jitter):
+            case <-ctx.Done():
+                return zero, ctx.Err()
+            }
+        }
+        return zero, lastErr
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::future::Future;
+    use std::time::Duration;
+    use rand::Rng;
+    use tokio::time::{sleep, timeout};
+
+    pub struct RetryOptions {
+        pub attempts: u32,
+        pub timeout: Duration,
+        pub base_delay: Duration,
+    }
+
+    pub async fn retry<T, E, F, Fut>(
+        opts: &RetryOptions,
+        mut op: F,
+        is_transient: impl Fn(&E) -> bool,
+    ) -> Result<T, E>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+        E: From<&'static str>,
+    {
+        let mut last_err: Option<E> = None;
+        for i in 0..opts.attempts {
+            match timeout(opts.timeout, op()).await {
+                Ok(Ok(v)) => return Ok(v),
+                Ok(Err(e)) => {
+                    let transient = is_transient(&e);
+                    last_err = Some(e);
+                    if !transient || i == opts.attempts - 1 {
+                        return Err(last_err.unwrap());
+                    }
+                }
+                Err(_) => last_err = Some(E::from("attempt timed out")),
+            }
+            // Exponential backoff with full jitter.
+            let ceiling = opts.base_delay * 2u32.pow(i);
+            let jitter = rand::thread_rng().gen_range(0..=ceiling.as_millis() as u64);
+            sleep(Duration::from_millis(jitter)).await;
+        }
+        Err(last_err.unwrap())
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เกิดขึ้นตามมา
+
+สิ่งที่คุณได้รับ:
+
+- **latency ที่มีขอบเขต** เพราะทุกความพยายามมี timeout จึงไม่มีการเรียกใดค้างตลอดกาล และผู้เรียกรู้เวลากรณีเลวร้ายที่สุดที่มันจะใช้ได้ (ประมาณจำนวนความพยายามคูณ timeout บวกการหน่วงเวลาแบบ backoff)
+- **การฟื้นตัวอัตโนมัติจากการสะดุด** การ reset แบบ transient, `503` ชั่วขณะ และการสะดุดของเครือข่ายชั่วครู่จะรักษาตัวเองโดยไม่ทำให้ error ปรากฏต่อผู้ใช้
+- **ภาระที่กระจายตัว** jitter ทำลายการซิงค์ที่สร้าง thundering herd ดังนั้น dependency ที่กำลังฟื้นตัวจึงไม่ถูกล้มด้วยกำแพงของการ retry พร้อมกัน
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **ความเสี่ยงต่อ retry storm** การ retry ทวีภาระ หาก dependency รับภาระเกินจริง ๆ — ไม่ใช่แค่สะดุด — การ retry แบบไร้เดียงสาคือการเติมเชื้อไฟ นี่คือเหตุผลที่ retry ต้องจับคู่กับ **circuit breaker** อย่างแน่นอน: เมื่อ breaker trip การ retry จะหยุดโดยสิ้นเชิงจนกว่า dependency จะฟื้นตัว
+- **idempotency เป็นสิ่งจำเป็น** การ retry operation แบบ non-idempotent อาจทำให้ side effect ของมันถูกประมวลผลสองครั้ง อาจจะจำกัดการ retry ไว้เฉพาะ operation ที่ปลอดภัย (การอ่าน, การเขียนแบบ idempotent) หรือทำให้การเขียนเป็น idempotent ด้วย idempotency key เพื่อให้รายการซ้ำถูกตรวจจับและเพิกเฉย
+- **การจูนงบประมาณ** ความพยายามมากเกินไปหรือ timeout นานเกินไปทำให้การเรียกที่ล้มเหลวมีราคาแพงสำหรับผู้เรียก น้อยเกินไปทำให้การ retry ไร้ความหมาย งบเวลารวมต้องอยู่ภายใน deadline ของผู้เรียกเอง
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Circuit Breaker](/microservices-design-from-zero-to-hero/th/reliability/circuit-breaker/) — คู่หูสำคัญที่หยุดการ retry ไม่ให้กลายเป็น storm
+- [Bulkhead](/microservices-design-from-zero-to-hero/th/reliability/bulkhead/) — กำหนดขอบเขตทรัพยากรที่การ retry สามารถกินได้ในขณะที่มันรอ
+- [Saga](/microservices-design-from-zero-to-hero/th/data-management/saga/) — compensating transaction ของมันต้องเป็น idempotent อย่างแม่นยำเพราะมันอาจถูก retry
+
+<Callout title="retry เฉพาะสิ่งที่ทำซ้ำได้อย่างปลอดภัย">
+การ retry สามารถทำให้ request *เดียวกัน* ถูกประมวลผลมากกว่าหนึ่งครั้ง — ความพยายามครั้งแรกอาจสำเร็จจริงบนเซิร์ฟเวอร์แล้วแม้ว่า response จะไปไม่ถึงคุณ สำหรับการอ่านสิ่งนี้ไม่เป็นอันตราย สำหรับการเขียนมันไม่เป็นเช่นนั้น: การ retry "หักเงินจากบัตร" อาจเรียกเก็บเงินซ้ำสองครั้ง retry เฉพาะ idempotent operation เท่านั้น หรือมอบ idempotency key ให้กับการเขียนแต่ละครั้งที่เซิร์ฟเวอร์ใช้เพื่อรู้จักและทิ้งรายการซ้ำ หากปราศจาก idempotency นโยบายการ retry คือบั๊กด้านความถูกต้องที่รอจะเกิดขึ้น
+</Callout>
+
+export const quizRetryTimeout = [
+  {
+    q: 'ทำไมทุกการเรียก remote จึงต้องมี timeout ที่เข้มงวด?',
+    options: [
+      'เพื่อทำให้การเรียก return เร็วขึ้นเมื่อสำเร็จ',
+      'เพื่อให้ความพยายามครั้งเดียวไม่มีวันค้างอย่างไม่มีกำหนด จำกัด latency กรณีเลวร้ายที่สุดและปล่อยทรัพยากร',
+      'เพราะ protocol ของเครือข่ายกำหนดให้ต้องมี',
+      'เพื่อบังคับให้ dependency ตอบสนองเร็วขึ้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การเพิ่ม jitter ให้การหน่วงเวลาในการ retry แก้ปัญหาอะไร?',
+    options: [
+      'มันทำให้การ retry เร็วขึ้น',
+      'มันกระจาย client ที่ทำงานพร้อมกันออกตามเวลา ป้องกัน thundering herd ของการ retry ที่ซิงค์กัน',
+      'มันเข้ารหัส payload ของการ retry',
+      'มันรับประกันว่าการ retry จะสำเร็จ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'operation แบบใดที่ปลอดภัยต่อการ retry โดยไม่ต้องระวังเป็นพิเศษ?',
+    options: [
+      'operation อะไรก็ได้ทั้งหมด',
+      'idempotent operation ซึ่งการรันมันสองครั้งให้ผลเหมือนกับรันครั้งเดียว',
+      'เฉพาะ operation ที่เขียนลงฐานข้อมูล',
+      'เฉพาะ operation ที่ใช้เวลาน้อยกว่าหนึ่งวินาที',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการ retry จึงควรจับคู่กับ circuit breaker?',
+    options: [
+      'breaker ทำให้การ retry เร็วขึ้น',
+      'หากไม่มี breaker การ retry ต่อ dependency ที่รับภาระเกินจริง ๆ จะทวีภาระจนกลายเป็น retry storm',
+      'breaker จำเป็นต่อการวัด timeout',
+      'การ retry ทำงานไม่ได้หากไม่มี breaker อยู่',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="reliability/retry-and-timeout" questions={quizRetryTimeout} />
+
+<ProgressTracker client:visible id="reliability/retry-and-timeout" />

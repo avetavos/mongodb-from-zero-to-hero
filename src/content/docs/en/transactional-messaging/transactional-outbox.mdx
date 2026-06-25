@@ -1,0 +1,238 @@
+---
+title: Transactional Outbox
+description: 'Make publishing atomic with the business write: insert the outgoing message into an outbox table in the same local transaction as the state change, and let a separate relay deliver it to the broker.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Your service needs to record a business change and tell the rest of the system about it. As the module intro showed, doing both as two independent writes — one to the database, one to the broker — opens a gap where a crash produces either a ghost event or a lost event. You want a way for the message to share the fate of the business change: if the change commits, the message will eventually be delivered; if the change rolls back, no message exists.
+
+## Problem
+
+You cannot enroll the message broker in your database transaction, and two-phase commit across them is something you have already ruled out. But you *can* control your own database completely. Inside a single local transaction you can write as many rows, to as many tables, as you like, and they all commit or roll back together.
+
+So the forces are: you need atomicity between "the business change happened" and "a message about it exists," you only have one system that gives you transactions (your database), and you still need the message to leave the database and reach the broker eventually.
+
+## Solution
+
+Add an **outbox** table to the service's database. When you make a business change, write the outgoing message as a row in the outbox table *within the same transaction* as the change. Because both inserts are in one local transaction, they commit together or not at all — the dual write has collapsed into a single atomic write.
+
+The outbox row is not the delivery; it is a durable *intent* to deliver. A separate component, the **message relay**, reads committed outbox rows and publishes them to the broker, marking each as sent (or deleting it) once the broker acknowledges. How the relay reads the outbox is the subject of the next two lessons — by tailing the transaction log, or by polling the table.
+
+export const outboxDiagram = `flowchart LR
+  subgraph Service
+    H[Handler]
+  end
+  subgraph DB[Service Database]
+    BT[(business table)]
+    OT[(outbox table)]
+  end
+  R[Message Relay]
+  B[(Message Broker)]
+  H -->|one local transaction| BT
+  H -->|same transaction| OT
+  R -->|read committed rows| OT
+  R -->|publish, then mark sent| B`;
+
+<Mermaid code={outboxDiagram} title="The business row and the outbox row commit in one transaction; a relay drains the outbox to the broker" />
+
+## Example
+
+The core move is a single transaction that inserts the business row and an outbox row together. The serialized payload and message metadata go into the outbox; nothing is published from this code path at all.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { randomUUID } from 'node:crypto';
+
+    // pool is a node-postgres Pool; the whole function is one DB transaction.
+    async function confirmOrder(orderId: string, customerId: string, amount: number) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        await client.query(
+          'UPDATE orders SET status = $1 WHERE id = $2',
+          ['CONFIRMED', orderId],
+        );
+
+        const payload = JSON.stringify({ orderId, customerId, amount });
+        await client.query(
+          `INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [randomUUID(), 'Order', orderId, 'OrderConfirmed', payload],
+        );
+
+        await client.query('COMMIT'); // business row + outbox row commit together
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import json
+    import uuid
+
+    # conn is a psycopg connection; the `with` block is one DB transaction.
+    def confirm_order(conn, order_id: str, customer_id: str, amount: int) -> None:
+        with conn:  # commits on success, rolls back on exception
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET status = %s WHERE id = %s",
+                    ("CONFIRMED", order_id),
+                )
+
+                payload = json.dumps(
+                    {"orderId": order_id, "customerId": customer_id, "amount": amount}
+                )
+                cur.execute(
+                    """INSERT INTO outbox
+                         (id, aggregate_type, aggregate_id, event_type, payload)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (str(uuid.uuid4()), "Order", order_id, "OrderConfirmed", payload),
+                )
+            # business row + outbox row commit together here
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func ConfirmOrder(ctx context.Context, db *sql.DB, orderID, customerID string, amount int64) error {
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil {
+            return err
+        }
+        defer tx.Rollback() // no-op once committed
+
+        if _, err = tx.ExecContext(ctx,
+            `UPDATE orders SET status = $1 WHERE id = $2`,
+            "CONFIRMED", orderID); err != nil {
+            return err
+        }
+
+        payload, _ := json.Marshal(map[string]any{
+            "orderId": orderID, "customerId": customerID, "amount": amount,
+        })
+        if _, err = tx.ExecContext(ctx,
+            `INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+             VALUES ($1, $2, $3, $4, $5)`,
+            uuid.NewString(), "Order", orderID, "OrderConfirmed", payload); err != nil {
+            return err
+        }
+
+        return tx.Commit() // business row + outbox row commit together
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use sqlx::{Pool, Postgres};
+    use uuid::Uuid;
+
+    async fn confirm_order(
+        pool: &Pool<Postgres>,
+        order_id: &str,
+        customer_id: &str,
+        amount: i64,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?; // one local transaction
+
+        sqlx::query("UPDATE orders SET status = $1 WHERE id = $2")
+            .bind("CONFIRMED")
+            .bind(order_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let payload = serde_json::json!({
+            "orderId": order_id, "customerId": customer_id, "amount": amount,
+        });
+        sqlx::query(
+            "INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind("Order")
+        .bind(order_id)
+        .bind("OrderConfirmed")
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await // business row + outbox row commit together
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Atomic publish-intent.** The message and the business change share one transaction, so you can never have one without the other. The dual-write problem is solved at the source.
+- **Broker independence.** The write path no longer touches the broker, so a broker outage cannot fail or slow down a business operation — the outbox simply accumulates rows until the relay catches up.
+- **A natural audit trail.** The outbox is a durable record of every event the service intended to emit.
+
+What it costs you:
+
+- **At-least-once delivery, not exactly-once.** The relay can crash after publishing but before marking the row sent, so it will republish. Consumers must therefore be idempotent — the final lesson of this module.
+- **A relay to build and run.** Someone has to drain the outbox; the next two lessons cover the two ways to do it.
+- **Outbox housekeeping.** Sent rows must be pruned, or the table grows without bound.
+
+## Related patterns
+
+- [Transaction Log Tailing](/microservices-design-from-zero-to-hero/en/transactional-messaging/transaction-log-tailing/) — one way to implement the relay, with no polling.
+- [Polling Publisher](/microservices-design-from-zero-to-hero/en/transactional-messaging/polling-publisher/) — the simpler way to implement the relay.
+- [Idempotent Consumer](/microservices-design-from-zero-to-hero/en/transactional-messaging/idempotent-consumer/) — required because the outbox guarantees only at-least-once delivery.
+
+<Callout title="The outbox row is intent, not delivery">
+Committing the outbox row does not mean the message has been sent — it means the service has *promised* to send it. Delivery is a separate, retryable job. This separation is exactly why the pattern works: the hard atomic part happens inside one database, and the unreliable network part is pushed to a step that can be retried until it succeeds.
+</Callout>
+
+export const quizOutbox = [
+  {
+    q: 'What makes the transactional outbox atomic with the business change?',
+    options: [
+      'Two-phase commit between the database and the broker',
+      'The outbox row is inserted in the same local database transaction as the business change, so both commit or both roll back',
+      'The broker participates in the database transaction',
+      'The message is published before the transaction commits',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a committed outbox row represent?',
+    options: [
+      'Proof that the message has already reached the broker',
+      'A durable intent to deliver the message, which a separate relay will fulfill',
+      'A lock held on the broker until delivery',
+      'A failed delivery that must be retried by the handler',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must consumers of outbox-delivered messages be idempotent?',
+    options: [
+      'Because the outbox can lose messages',
+      'Because the relay may publish a message and then crash before marking it sent, causing redelivery — at-least-once delivery',
+      'Because the database transaction is not durable',
+      'Because messages arrive out of order',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactional-messaging/transactional-outbox" questions={quizOutbox} />
+
+<ProgressTracker client:visible id="transactional-messaging/transactional-outbox" />

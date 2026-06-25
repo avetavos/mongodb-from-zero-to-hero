@@ -1,0 +1,156 @@
+---
+title: API Gateway
+description: 'Give external clients a single entry point that routes requests to the right services, aggregates several calls into one, and handles cross-cutting concerns like authentication and rate limiting in one place.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You have a dozen services, each with its own API and its own network address. A mobile app or a single-page web client needs data from several of them to render a single screen — the order summary alone touches Orders, Inventory, and Customer. If the client talks to each service directly, it has to know every service's address, make many round trips over a slow mobile network, and implement authentication against each one.
+
+## Problem
+
+Exposing internal services directly to external clients couples those clients to your internal structure. The client must discover and call many endpoints, and every time you split or merge a service, every client breaks. Worse, cross-cutting concerns — authentication, TLS termination, rate limiting, request logging — would have to be implemented in every service or in every client. And a chatty client on a high-latency connection pays a round trip per service just to fill one screen. How do you give external clients one stable, efficient, secure place to call, without leaking your internal topology?
+
+## Solution
+
+An **API Gateway** is a single server that sits between external clients and the internal services. It is the one entry point to the system, and it does three jobs:
+
+- **Routing** — it receives every external request and forwards it to the appropriate service, mapping a public path to an internal address. Clients know only the gateway.
+- **Aggregation** — for a request that needs data from several services, the gateway can fan out, call each one, and compose a single response, so the client makes one call instead of many.
+- **Offloading cross-cutting concerns** — authentication, authorization, TLS termination, rate limiting, request logging, and caching all happen once, at the edge, instead of being duplicated in every service.
+
+export const gatewayDiagram = `flowchart LR
+  Web[Web Client] --> GW
+  Mobile[Mobile Client] --> GW
+  ThirdParty[Third-party API client] --> GW
+  GW[API Gateway<br/>routing - aggregation - auth - rate limit]
+  GW --> O[Order Service]
+  GW --> I[Inventory Service]
+  GW --> C[Customer Service]`;
+
+<Mermaid code={gatewayDiagram} title="API Gateway — a single entry point that routes, aggregates, and offloads cross-cutting concerns" />
+
+## Example
+
+Gateway behaviour is configuration, not application code: you declare routes and the policies that apply to them, and the gateway engine enforces them. Here is a route configuration that maps public paths to internal services and attaches authentication and rate limiting to each route.
+
+```yaml
+# api-gateway.yaml — routes external paths to internal services
+listen: ":443"
+tls:
+  cert: /etc/gateway/tls.crt
+  key: /etc/gateway/tls.key
+
+routes:
+  - path: /api/orders/*
+    upstream: http://order-service
+    methods: [GET, POST]
+    auth:
+      type: jwt
+      issuer: https://auth.example.com
+    rate_limit:
+      requests_per_minute: 120
+
+  - path: /api/customers/*
+    upstream: http://customer-service
+    methods: [GET]
+    auth:
+      type: jwt
+      issuer: https://auth.example.com
+    rate_limit:
+      requests_per_minute: 60
+
+  # An aggregating route: the gateway fans out and composes one response.
+  - path: /api/order-summary/:id
+    aggregate:
+      - get: http://order-service/orders/:id        # as "order"
+        as: order
+      - get: http://customer-service/customers/:customerId
+        as: customer
+      - get: http://inventory-service/stock/:sku
+        as: stock
+    auth:
+      type: jwt
+      issuer: https://auth.example.com
+```
+
+## Resulting context
+
+What you gain:
+
+- **One simple entry point.** Clients know a single host and a stable public API. Internal services can be split, merged, renamed, or moved without breaking any client.
+- **Cross-cutting concerns in one place.** Authentication, TLS, rate limiting, and logging are configured once at the edge instead of being reimplemented in every service.
+- **Fewer round trips.** Aggregation lets a client fill a whole screen with one request, which matters most on high-latency mobile connections.
+
+What it costs you:
+
+- **A new component to build and operate.** The gateway must itself be highly available and scalable, because it is on the critical path of every request. If it is down, the system is down.
+- **It can become a bottleneck or a God-object.** As more routing rules, transformations, and aggregations accumulate, the gateway grows into a large, shared component that every team must change — and a development bottleneck when one team's change waits behind another's.
+- **Risk of over-generalisation.** A single gateway trying to serve a web app, a mobile app, and third-party integrations equally well tends to serve none of them ideally, because their needs differ.
+
+That last cost is the motivation for the next pattern: instead of one gateway for everyone, give each client type its own. See [Backends for Frontends](/microservices-design-from-zero-to-hero/en/communication/backends-for-frontends/).
+
+## Related patterns
+
+- [Backends for Frontends](/microservices-design-from-zero-to-hero/en/communication/backends-for-frontends/) — one tailored gateway per client type, addressing the God-object risk.
+- [Service Discovery](/microservices-design-from-zero-to-hero/en/communication/service-discovery/) — how the gateway finds live instances of the services it routes to.
+- [API Composition](/microservices-design-from-zero-to-hero/en/data-management/api-composition/) — the aggregation technique a gateway uses to join data from several services.
+
+<Callout title="The gateway routes; it does not own business logic">
+It is tempting to push "just a little" business logic into the gateway — a discount calculation here, an order validation there. Resist it. The gateway's job is routing, aggregation, and cross-cutting concerns. Business rules belong in the owning service; once they leak into the gateway, you have rebuilt a distributed monolith with the gateway as its hidden core.
+</Callout>
+
+export const quizGateway = [
+  {
+    q: 'What is the primary purpose of an API Gateway?',
+    options: [
+      'To store each service’s database',
+      'To be a single entry point that routes external requests, aggregates calls, and handles cross-cutting concerns',
+      'To replace the message broker',
+      'To run the business logic of every service',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does request aggregation help a mobile client?',
+    options: [
+      'It encrypts the response',
+      'It lets the client make one request instead of many, so it pays one round trip to fill a screen that spans several services',
+      'It caches the database on the device',
+      'It removes the need for authentication',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which cross-cutting concern is a natural fit for the gateway?',
+    options: [
+      'Choosing each service’s database schema',
+      'Authentication, TLS termination, and rate limiting handled once at the edge',
+      'Writing each service’s domain model',
+      'Defining saga compensations',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a key risk of a single API Gateway?',
+    options: [
+      'It forces every service to share a database',
+      'It can become a bottleneck or God-object that every team must change and that serves no client type ideally',
+      'It makes synchronous calls impossible',
+      'It prevents clients from using HTTPS',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/api-gateway" questions={quizGateway} />
+
+<ProgressTracker client:visible id="communication/api-gateway" />

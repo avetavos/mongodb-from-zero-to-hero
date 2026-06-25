@@ -1,0 +1,102 @@
+---
+title: Deployment & Cross-cutting Concerns
+description: 'Once you have many services, building them is no longer the hard part — packaging, running, and operating them is. This module covers how to ship services and how to give every one of them the same baseline of networking, config, and operability.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You have decomposed the monolith, drawn clean service boundaries, given each service its own database, and wired up communication, reliability, and observability. On a whiteboard the system looks finished. Then you try to run it. Where the monolith was one process you deployed once, you now have twenty services, each written perhaps in a different language, each needing to start in a known environment, find its dependencies, and behave the same way in staging as in production.
+
+The work has shifted. Writing a service is no longer the expensive part. Packaging it, placing it on a machine, giving it the right configuration, securing the traffic between services, and ensuring every service exposes health checks and metrics the same way — that is where most teams now spend their operational effort.
+
+## Problem
+
+A handful of questions decide whether running many services is sustainable or a daily fire:
+
+How do you package a service so it runs identically on a laptop, in CI, and in production? How do you run it without hand-tuning each host? How do you keep networking concerns — encryption, retries, timeouts — consistent across services written by different teams in different languages? And how do you avoid rewriting the same logging, metrics, and health-check plumbing in every single service?
+
+If each team answers these differently, you get a fleet of snowflakes: services that start in subtly different ways, configure themselves from a dozen mechanisms, and each implement security and observability just slightly wrong.
+
+## Solution
+
+This module groups the patterns into two layers. The first is about **how a service runs** — its packaging and runtime. The second is about **the cross-cutting baseline** every running service shares — networking, common plumbing, and configuration.
+
+export const overviewDiagram = `flowchart TB
+  subgraph Run[How a service runs]
+    SPC[Service per Container]
+    SLD[Serverless Deployment]
+  end
+  subgraph Cross[Cross-cutting baseline]
+    SM[Service Mesh]
+    MC[Microservice Chassis]
+    EC[Externalized Configuration]
+  end
+  Img[Built artifact] --> SPC
+  Img --> SLD
+  SPC --> SM
+  SLD --> EC
+  SM --> EC
+  MC --> EC`;
+
+<Mermaid code={overviewDiagram} title="Two layers: how a service runs, and the cross-cutting concerns every running service shares" />
+
+The five patterns in this module fit together like this:
+
+- **Service per Container** — package each service as a container image and run exactly one service per container, so it starts fast, stays isolated, and deploys identically everywhere; an orchestrator schedules the containers across machines.
+- **Serverless Deployment** — run a service as functions on a platform that manages the servers for you, scaling to zero when idle and per-request under load, in exchange for cold starts and platform limits.
+- **Service Mesh** — push networking concerns such as mutual TLS, retries, timeouts, and traffic shaping into a sidecar proxy beside each service, governed by a central control plane, so every service gets the same behaviour without writing it.
+- **Microservice Chassis** — start every new service on a shared framework or base that already wires in configuration, logging, metrics, health checks, and service discovery, so teams write business logic instead of plumbing.
+- **Externalized Configuration** — keep endpoints, credentials, and feature flags out of the image and inject them at runtime, so one immutable artifact runs unchanged in every environment.
+
+## What this module covers
+
+We begin with the two runtime models — containers and serverless — because everything else assumes a way to actually run a service. Then we cover the cross-cutting concerns that turn a pile of running processes into an operable fleet: a mesh for consistent networking, a chassis for consistent in-process plumbing, and externalized configuration so one artifact is environment-agnostic. Each lesson keeps the same shape: the situation that leads to the pattern, the forces in tension, what the pattern does, a diagram, a concrete config example, and an honest look at what the pattern costs you.
+
+## Related patterns
+
+- [Service per Container](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-per-container/) — start here; it is the default way services run today.
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/externalized-configuration/) — the pattern that lets a single built artifact run everywhere.
+
+<Callout title="Build is solved; operate is the frontier">
+The hard problems of a mature microservices system are rarely about writing more business code. They are about making dozens of independently built services start the same way, talk to each other securely, report their health uniformly, and be configured per environment without rebuilding. This module is about that operational frontier.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Why does deployment and operation become the central challenge once you have many services?',
+    options: [
+      'Because microservices are slower than monoliths',
+      'Because writing a service is cheap, but packaging, running, securing, and operating many of them consistently is where the effort moves',
+      'Because microservices cannot use databases',
+      'Because each service must be written in the same language',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does this module group its patterns?',
+    options: [
+      'By programming language',
+      'Into how a service runs (packaging and runtime) and the cross-cutting baseline every running service shares',
+      'By team size',
+      'Into frontend and backend concerns',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which pattern lets a single immutable built artifact run unchanged in every environment?',
+    options: ['Service Mesh', 'Microservice Chassis', 'Externalized Configuration', 'Serverless Deployment'],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/index" />

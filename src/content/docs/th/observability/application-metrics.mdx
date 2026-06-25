@@ -1,0 +1,219 @@
+---
+title: Application Metrics
+description: 'เปิดเผย counters, gauges และ histograms — request rate, error rate และ latency ซึ่งเป็นสัญญาณ RED และ USE — เพื่อให้ dashboards สรุปสุขภาพของทั้ง fleet และ alerts ทำงานก่อนที่ผู้ใช้จะสังเกตเห็น'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+logs และ traces มีรายละเอียดและเป็นราย ๆ คำขอ — เหมาะอย่างยิ่งเมื่อคุณรู้แล้วว่ามีอะไรผิดและอยากสืบสวนคำขอหนึ่ง แต่มันตอบคำถามผิดสำหรับงานปฏิบัติการอีกครึ่งหนึ่ง คือ *ระบบแข็งแรงอยู่ตอนนี้โดยรวมหรือไม่?* คุณไม่สามารถเฝ้าดู log นับล้านบรรทัดต่อนาทีเพื่อสังเกตว่า error rate เพิ่งเพิ่มเป็นสองเท่า และคุณไม่สามารถเปิด trace เพื่อรู้ว่า p99 latency ทั้ง fleet กำลังค่อย ๆ ไต่ขึ้นตลอดบ่ายหรือไม่ คุณต้องการบทสรุปที่พอดีกับหน้าจอ และตัวเลขที่เครื่องสามารถเทียบกับ threshold ได้
+
+## ปัญหา
+
+สัญญาณที่มีรายละเอียดไม่ aggregate อย่างราคาถูก การนับ error ด้วยการ tail logs นั้นช้าและเปราะบาง; การคำนวณ latency percentile ข้ามทุก replica ด้วยการอ่าน traces นั้นแพงและเป็นการทำหลังเหตุการณ์ และคุณต้องการมากกว่า snapshot ปัจจุบัน — คุณต้องการ trend ตามเวลา เพื่อให้คุณเห็นการเสื่อมสภาพที่กำลังก่อตัวและ alert *ก่อน* ที่มันจะกลายเป็นเหตุขัดข้อง แทนที่จะอ่านเกี่ยวกับมันหลังจากนั้น
+
+แล้วคุณจะผลิตบทสรุปเชิงตัวเลขที่ราคาถูก อัปเดตอย่างต่อเนื่องของพฤติกรรมบริการของคุณได้อย่างไร — request rate, errors, latency, การใช้ทรัพยากร — ที่ dashboard สามารถวาดกราฟและระบบ alerting สามารถเฝ้าดูได้
+
+## ทางออก
+
+**Application metrics** คือการวัดเชิงตัวเลขที่บริการของคุณรักษาไว้ในหน่วยความจำและเปิดเผยให้ระบบ monitoring เก็บไป มันมาในสามรูปทรงหลัก:
+
+- **Counter** — ค่าที่ขึ้นได้อย่างเดียวเท่านั้น (หรือรีเซ็ตเป็นศูนย์เมื่อ restart): จำนวนคำขอที่ให้บริการทั้งหมด, จำนวน error ทั้งหมด คุณวาดกราฟ *อัตรา* การเปลี่ยนแปลงของมัน
+- **Gauge** — ค่าที่ขึ้นและลง: คำขอที่ in-flight ปัจจุบัน, ความลึกของ queue, ขนาดของ connection pool, หน่วยความจำที่ใช้อยู่
+- **Histogram** — การกระจายของค่าที่สังเกตได้ ถูกจัดลงถังตามช่วง: ระยะเวลาของคำขอ, ขนาดของ payload จากมันคุณคำนวณ percentile อย่าง p50, p95 และ p99 — ซื่อตรงกว่าค่าเฉลี่ยมาก
+
+การตั้งค่าทั่วไปคือให้แต่ละบริการเปิดเผยค่า metric ปัจจุบันของมันที่ endpoint หนึ่ง (เช่น `/metrics`) และให้ **scraper** poll endpoint นั้นเป็นช่วง ๆ จัดเก็บแต่ละค่าที่อ่านได้เป็น time series ใน metrics database ที่ขับเคลื่อน dashboards และ alerts สอง framework เล็ก ๆ บอกคุณว่า metric *ใด* สำคัญ: **RED** (Rate, Errors, Duration) สำหรับบริการที่ขับเคลื่อนด้วยคำขอ และ **USE** (Utilization, Saturation, Errors) สำหรับทรัพยากรอย่าง CPU, memory และ queue
+
+export const metricsDiagram = `flowchart LR
+  subgraph App[Service replica]
+    CODE[Request handler] -->|inc / observe| REG[In-memory registry]
+    REG --> EP[/metrics endpoint]
+  end
+  SCRAPER[Scraper] -->|poll every Ns| EP
+  SCRAPER --> TSDB[(Time-series DB)]
+  TSDB --> DASH[Dashboards]
+  TSDB --> ALERT[Alert rules]`;
+
+<Mermaid code={metricsDiagram} title="บริการอัปเดต metrics ในหน่วยความจำและเปิดเผยมัน; scraper poll และจัดเก็บ time series ที่ป้อนให้ dashboards และ alerts" />
+
+## ตัวอย่าง
+
+สองการดำเนินการที่คุณหยิบใช้บ่อยที่สุด: เพิ่มค่า counter เมื่อคำขอเสร็จสิ้น (ติด label ตามผลลัพธ์) และสังเกต latency ของมันใน histogram สิ่งเหล่านี้ใช้ client สไตล์ Prometheus ซึ่งเป็น pattern โดยพฤตินัยข้ามภาษา
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { Counter, Histogram } from 'prom-client';
+
+    const requests = new Counter({
+      name: 'http_requests_total',
+      help: 'Total HTTP requests',
+      labelNames: ['method', 'route', 'status'],
+    });
+
+    const latency = new Histogram({
+      name: 'http_request_duration_seconds',
+      help: 'Request latency in seconds',
+      labelNames: ['route'],
+      buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+    });
+
+    app.use((req, res, next) => {
+      const stop = latency.startTimer({ route: req.path });
+      res.on('finish', () => {
+        requests.inc({ method: req.method, route: req.path, status: res.statusCode });
+        stop();
+      });
+      next();
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import time
+    from prometheus_client import Counter, Histogram
+
+    REQUESTS = Counter(
+        "http_requests_total",
+        "Total HTTP requests",
+        ["method", "route", "status"],
+    )
+    LATENCY = Histogram(
+        "http_request_duration_seconds",
+        "Request latency in seconds",
+        ["route"],
+        buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+    )
+
+    async def metrics_middleware(request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        LATENCY.labels(route=request.url.path).observe(time.perf_counter() - start)
+        REQUESTS.labels(
+            method=request.method, route=request.url.path, status=response.status_code
+        ).inc()
+        return response
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    import (
+        "time"
+
+        "github.com/prometheus/client_golang/prometheus"
+        "github.com/prometheus/client_golang/prometheus/promauto"
+    )
+
+    var requests = promauto.NewCounterVec(prometheus.CounterOpts{
+        Name: "http_requests_total",
+        Help: "Total HTTP requests",
+    }, []string{"method", "route", "status"})
+
+    var latency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+        Name:    "http_request_duration_seconds",
+        Help:    "Request latency in seconds",
+        Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+    }, []string{"route"})
+
+    func instrument(route, method string, status int, start time.Time) {
+        latency.WithLabelValues(route).Observe(time.Since(start).Seconds())
+        requests.WithLabelValues(method, route, statusText(status)).Inc()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use prometheus::{register_counter_vec, register_histogram_vec, CounterVec, HistogramVec};
+    use std::time::Instant;
+
+    static REQUESTS: once_cell::sync::Lazy<CounterVec> = once_cell::sync::Lazy::new(|| {
+        register_counter_vec!(
+            "http_requests_total",
+            "Total HTTP requests",
+            &["method", "route", "status"]
+        ).unwrap()
+    });
+
+    static LATENCY: once_cell::sync::Lazy<HistogramVec> = once_cell::sync::Lazy::new(|| {
+        register_histogram_vec!(
+            "http_request_duration_seconds",
+            "Request latency in seconds",
+            &["route"],
+            vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+        ).unwrap()
+    });
+
+    fn instrument(route: &str, method: &str, status: &str, start: Instant) {
+        LATENCY.with_label_values(&[route]).observe(start.elapsed().as_secs_f64());
+        REQUESTS.with_label_values(&[method, route, status]).inc();
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่ได้ผลลัพธ์
+
+สิ่งที่คุณได้รับ:
+
+- **สุขภาพของ fleet บนหน้าจอเดียว** กราฟ rate, errors และ duration สรุปคำขอนับพันข้ามทุก replica ลงเป็นไม่กี่เส้นที่คุณอ่านได้ในพริบตา
+- **Alerts ก่อนผู้ใช้บ่น** เพราะ metrics เป็น time series ที่ต่อเนื่อง คุณจึงสามารถ alert บน error rate ที่กำลังเพิ่มขึ้นหรือ p99 ที่ข้าม threshold และลงมือก่อนที่มันจะกลายเป็นเหตุขัดข้อง
+- **ราคาถูกและเปิดอยู่ตลอด** counter และ histogram แทบไม่มีต้นทุนในการอัปเดตในหน่วยความจำ และถูกเก็บด้วยการ poll ดังนั้น overhead จึงคงที่เมื่อทราฟฟิกโตขึ้น — ไม่เหมือนการ log ทุกคำขอ
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **Cardinality เป็นกับดัก** ทุกการผสมที่แตกต่างกันของค่า label เป็น time series แยกต่างหาก การใส่ user id หรือ raw URL ที่มี id ลงใน label สามารถระเบิดเป็น time series นับล้านและทำให้ metrics store ล่ม ให้ label เป็น low-cardinality — method, route template, status class
+- **ค่า aggregate ซ่อนรายตัว** metric บอกคุณว่า error rate เพิ่มขึ้น; มันบอกคุณไม่ได้ว่า *คำขอใด* ล้มเหลวหรือทำไม คุณยังต้องการ logs และ traces เพื่อเจาะลึก metrics ชี้; สัญญาณอื่นอธิบาย
+- **Percentile ต้องการ histogram ไม่ใช่ค่าเฉลี่ย** latency เฉลี่ยที่ดูดีสามารถซ่อน p99 ที่แย่ได้ เลือก histogram bucket ที่ครอบคลุม service-level objective ของคุณ ไม่เช่นนั้น percentile ของคุณจะหยาบเกินไปจนไร้ประโยชน์
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Distributed Tracing](/microservices-design-from-zero-to-hero/th/observability/distributed-tracing/) — เมื่อ latency metric พุ่งขึ้น trace แสดงให้คุณเห็นว่า hop ใดก่อให้เกิดมัน
+- [Health Check API](/microservices-design-from-zero-to-hero/th/observability/health-check-api/) — health เป็นการตรวจแบบ binary; metrics เผยให้เห็นการเสื่อมถอยแบบค่อยเป็นค่อยไปที่นำหน้ามัน
+
+<Callout title="เลือกสัญญาณที่ถูกต้องสำหรับคำถาม">
+หยิบ metrics มาตอบคำถาม "ระบบโดยรวมเป็นอย่างไรตามเวลา?" และเพื่อขับเคลื่อน alerts หยิบ traces และ logs มาตอบคำถาม "เกิดอะไรขึ้นกับคำขอเดียวนี้?" anti-pattern ที่พบบ่อยคือการพยายามกู้คืนรายละเอียดราย ๆ คำขอจาก metrics ด้วยการเพิ่ม label ที่ high-cardinality — มันทำให้ metrics store ของคุณล้มละลายโดยไม่ให้สิ่งที่ logs และ traces ให้อยู่แล้ว ปล่อยให้แต่ละสัญญาณทำหน้าที่ของมัน
+</Callout>
+
+export const quizMetrics = [
+  {
+    q: 'Which metric type would you use for request latency so you can compute p95 and p99?',
+    options: [
+      'counter',
+      'gauge',
+      'histogram',
+      'boolean flag',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What do the RED signals stand for?',
+    options: [
+      'Reads, Edits, Deletes',
+      'Rate, Errors, Duration',
+      'Requests, Endpoints, Databases',
+      'Retries, Errors, Downtime',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is putting a user id into a metric label dangerous?',
+    options: [
+      'มันขัดต่อ license ของ Prometheus',
+      'มันสร้าง time series แยกต่อค่าที่แตกต่างกันแต่ละค่า ซึ่งสามารถระเบิด cardinality และทำให้ metrics store ล่ม',
+      'user id ไม่สามารถแปลงเป็น string ได้',
+      'มันทำให้ /metrics endpoint คืนค่า 503',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="observability/application-metrics" questions={quizMetrics} />
+
+<ProgressTracker client:visible id="observability/application-metrics" />

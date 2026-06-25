@@ -1,0 +1,112 @@
+---
+title: Benefits and Drawbacks
+description: 'microservices ซื้อความสามารถในการ deploy และ scale อย่างอิสระ ความเป็นอิสระของทีม fault isolation และความหลากหลายทางเทคโนโลยีให้คุณ — และเรียกเก็บค่าใช้จ่ายในรูปของความซับซ้อนของระบบแบบกระจาย ความสอดคล้องที่ยากขึ้น ภาระการดำเนินงาน และการทดสอบที่หินขึ้น'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+คุณเข้าใจแล้วว่า microservices architecture คืออะไรและมันต่างจาก monolith อย่างไร ก่อนตัดสินใจว่าจะรับมันมาใช้หรือไม่ คุณต้องมีบัญชีที่ซื่อตรง: สิ่งที่สถาปัตยกรรมนี้ให้คุณจริง ๆ และสิ่งที่มันเรียกเก็บจากคุณจริง ๆ การตลาดและทอล์กในงาน conference มักจะไล่ลิสต์ประโยชน์แล้วข้ามใบเรียกเก็บเงินไป บทเรียนนี้วางทั้งสองคอลัมน์ไว้เคียงข้างกัน เพราะคุณจะได้ประโยชน์ก็ต่อเมื่อ *จ่าย* ต้นทุน — ทั้งสองเป็นสองด้านของการตัดสินใจเดียวกัน
+
+## Problem
+
+อันตรายคือการรับ microservices มาใช้เพื่อข้อดี ในขณะที่ประเมินข้อเสียต่ำเกินไป ทีมได้ยินคำว่า "scale อย่างอิสระ" และ "deploy ได้เร็วขึ้น" แล้วก็ขยับตัวตาม เพียงเพื่อจะค้นพบว่าตอนนี้ request หนึ่งวิ่งข้ามถึงห้า service, transaction เดียวกลายเป็น workflow หลายขั้นตอน และ bug ง่าย ๆ ตอนนี้ต้องอาศัยการเชื่อมโยง log จากสาม process
+
+ดังนั้นคำถามที่บทเรียนนี้ตอบคือ: สำหรับแต่ละประโยชน์ที่ microservices สัญญาไว้ ต้นทุนที่คู่กันคืออะไร และคุณจะชั่งน้ำหนักทั้งสองอย่างไร?
+
+## Solution
+
+วาง trade-off ออกมาเป็นสองคอลัมน์ที่เชื่อมโยงกัน ทุกประโยชน์ทางซ้ายมีต้นทุนที่สอดคล้องอยู่ทางขวา — พวกมันมาด้วยกัน ไม่ได้มาแยกกัน
+
+export const tradeoffDiagram = `flowchart LR
+  subgraph Benefits[Benefits]
+    B1[Independent deploy and scale]
+    B2[Team autonomy]
+    B3[Fault isolation]
+    B4[Technology diversity]
+  end
+  subgraph Costs[Drawbacks]
+    C1[Distributed-system complexity]
+    C2[Data consistency is harder]
+    C3[Operational overhead]
+    C4[Testing across services]
+  end
+  B1 -.- C1
+  B2 -.- C3
+  B3 -.- C2
+  B4 -.- C4`;
+
+<Mermaid code={tradeoffDiagram} title="ทุกประโยชน์ของ microservices ถูกจ่ายด้วยต้นทุนที่คู่กัน" />
+
+### ประโยชน์
+
+- **การ deploy และ scale อย่างอิสระ** แต่ละ service ship ตามตารางของตัวเอง ดังนั้นการเปลี่ยนแปลงเล็ก ๆ ใน service หนึ่งไม่จำเป็นต้อง deploy ใหม่ทั้งระบบ คุณยังสามารถรัน instance ของเฉพาะ service ที่ต้องการเพิ่มได้ แทนที่จะ scale ทั้งแอปพลิเคชัน
+- **ความเป็นอิสระของทีม** ทีมหนึ่งสามารถเป็นเจ้าของ service ตั้งแต่ต้นจนจบ — โค้ดของมัน ข้อมูลของมัน release pipeline ของมัน — และตัดสินใจในระดับท้องถิ่นได้โดยไม่ต้องประสานงาน codebase ที่ใช้ร่วมกันหรือ deploy ที่ใช้ร่วมกันกับคนอื่นทุกคน
+- **fault isolation** ความล้มเหลวสามารถถูกจำกัดให้อยู่ใน service เดียวได้ ถ้า recommendations service ล้มลง checkout service ก็ยังรับ order ต่อได้ ตราบใดที่คุณออกแบบขอบเขตให้เสื่อมสภาพอย่างนุ่มนวล (degrade gracefully)
+- **ความหลากหลายทางเทคโนโลยี** แต่ละ service สามารถเลือกภาษา framework หรือ datastore ที่เหมาะกับงานของมัน และคุณสามารถรับเทคโนโลยีใหม่มาใช้ใน service เดียวได้โดยไม่ต้องเขียนทุกอย่างใหม่
+
+### ข้อเสีย
+
+- **ความซับซ้อนของระบบแบบกระจาย** ตอนนี้เครือข่ายอยู่ตรงกลางแอปพลิเคชันของคุณ การเรียกอาจช้า ล้มเหลว timeout หรือมาถึงสองครั้ง พฤติกรรมที่เคยเป็น function call แบบ deterministic กลายเป็น request ที่ต้องรับมือกับ partial failure
+- **ความสอดคล้องของข้อมูลยากขึ้น** เมื่อแต่ละ service เป็นเจ้าของข้อมูลของมัน คุณสูญเสีย atomic transaction เดียวไป การรักษาความสอดคล้องของข้อมูลข้าม service หมายถึง eventual consistency, saga และ compensating action — มีทั้งโมดูลของคอร์สนี้ที่มีอยู่ก็เพราะต้นทุนข้อนี้ข้อเดียว
+- **ภาระการดำเนินงาน** ตอนนี้คุณ deploy, monitor และรักษาความปลอดภัยให้ service จำนวนมากแทนที่จะเป็นตัวเดียว สิ่งนี้เรียกร้องการลงทุนจริงจังใน automation, CI/CD, container orchestration และ logging กับ tracing แบบรวมศูนย์ ก่อนที่สถาปัตยกรรมจะคุ้มทุน
+- **การทดสอบข้าม service** unit test ไม่เปลี่ยน แต่การตรวจสอบว่า service ทำงาน *ร่วมกัน* ได้ตอนนี้เกี่ยวข้องกับเครือข่าย contract ระหว่าง service และ failure mode ของการเรียกแบบกระจาย end-to-end test ยากขึ้นอย่างมีนัยสำคัญ
+
+## Resulting context
+
+บทสรุปที่ซื่อตรงคือ microservices ย้ายความซับซ้อน มันไม่ได้กำจัดมัน ใน monolith ความซับซ้อนอยู่ภายในโค้ด ที่ซึ่ง compiler และ debugger ช่วยคุณได้ ใน microservices ส่วนใหญ่ของมันย้ายไปอยู่ในพื้นที่ *ระหว่าง* service — เครือข่าย ข้อมูล การดำเนินงาน — ที่ซึ่งเครื่องมือของคุณอ่อนแอกว่าและ failure mode ของคุณยุ่งเหยิงกว่า
+
+การแลกเปลี่ยนนั้นคุ้มที่จะทำเมื่อประโยชน์พุ่งเป้าไปยังปัญหาที่คุณมีจริง: ทีมที่ติดขัดเพราะกันและกัน component ที่มีความต้องการ scale ต่างกันสุดขั้ว หรือข้อกำหนดเรื่อง fault isolation ที่คุณไม่สามารถทำได้ใน process เดียว มันเป็นการแลกเปลี่ยนที่แย่เมื่อคุณรับต้นทุนมาเพื่อไล่ตามประโยชน์ที่คุณยังไม่ต้องการ บทเรียนถัดไปจะแปลงการพิจารณานี้ให้เป็นการตัดสินใจที่เป็นรูปธรรม
+
+## Related patterns
+
+- [Monolith vs Microservices](/microservices-design-from-zero-to-hero/th/intro-and-principles/monolith-vs-microservices/) — สองสถาปัตยกรรมที่ trade-off เหล่านี้นั่งอยู่ตรงกลาง
+- [When to Use Microservices](/microservices-design-from-zero-to-hero/th/intro-and-principles/when-to-use-microservices/) — การแปลงบัญชีนี้ให้เป็นการตัดสินใจ
+- [Data Management](/microservices-design-from-zero-to-hero/th/data-management/) — โมดูลที่อุทิศให้กับต้นทุนเรื่องความสอดคล้อง
+
+<Callout title="microservices ย้ายความซับซ้อน มันไม่ได้ลบมันทิ้ง">
+ความซับซ้อนไม่ได้หายไปเมื่อคุณ decompose มันย้ายที่จากภายในโค้ดของคุณไปยังเครือข่าย ข้อมูล และการดำเนินงานของคุณ จงรับ microservices มาใช้เมื่อการย้ายที่นั้นซื้อบางสิ่งที่เป็นรูปธรรมให้คุณ — การ scale อย่างอิสระ, fault isolation, ความเป็นอิสระของทีม — และเฉพาะหลังจากที่คุณมี automation พอจะจ่ายค่าใช้จ่ายด้านการดำเนินงานแล้วเท่านั้น มิฉะนั้นคุณจะเก็บความซับซ้อนทั้งหมดไว้และสูญเสีย debugger ไป
+</Callout>
+
+export const quizTradeoff = [
+  {
+    q: 'Which of these is a benefit of microservices?',
+    options: [
+      'atomic transaction เดียวข้ามทุก service',
+      'การ deploy และ scale แต่ละ service อย่างอิสระ',
+      'end-to-end test ที่ง่ายขึ้น',
+      'ชิ้นส่วนที่ขยับน้อยลงให้ต้องดำเนินงาน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is data consistency harder in microservices?',
+    options: [
+      'เพราะฐานข้อมูลช้ากว่าใน monolith',
+      'เพราะแต่ละ service เป็นเจ้าของข้อมูลของมัน คุณจึงสูญเสีย atomic transaction เดียวไป และต้องใช้ eventual consistency และ compensating action',
+      'เพราะ microservices ใช้ฐานข้อมูลเชิงสัมพันธ์ไม่ได้',
+      'เพราะ service ไม่ได้รับอนุญาตให้เก็บข้อมูลใด ๆ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the most honest summary of the microservices trade-off?',
+    options: [
+      'microservices กำจัดความซับซ้อนออกจากระบบของคุณ',
+      'microservices ย้ายความซับซ้อนจากภายในโค้ดไปยังเครือข่าย ข้อมูล และการดำเนินงานระหว่าง service',
+      'microservices มีประโยชน์แต่ไม่มีข้อเสียที่แท้จริง',
+      'microservices ช้ากว่า monolith เสมอ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/benefits-and-drawbacks" questions={quizTradeoff} />
+
+<ProgressTracker client:visible id="intro-and-principles/benefits-and-drawbacks" />

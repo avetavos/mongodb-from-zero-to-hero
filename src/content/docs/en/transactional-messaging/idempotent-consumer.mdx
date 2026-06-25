@@ -1,0 +1,229 @@
+---
+title: Idempotent Consumer
+description: 'Brokers deliver at least once, so the same message can arrive twice. Make consumers safe against duplicates by tracking processed message ids — or by writing handlers that are naturally idempotent.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Every relay in this module — whether it [tails the transaction log](/microservices-design-from-zero-to-hero/en/transactional-messaging/transaction-log-tailing/) or [polls the outbox](/microservices-design-from-zero-to-hero/en/transactional-messaging/polling-publisher/) — delivers **at least once**. A relay can publish a message and then crash before recording that it did, so it republishes on restart. Brokers themselves redeliver when a consumer fails to acknowledge in time. The result is unavoidable: your consumer will sometimes receive the same message more than once.
+
+## Problem
+
+Many handlers are not safe to run twice. Crediting an account, decrementing stock, charging a card, or sending a shipment are all operations where a duplicate causes real damage — double charges, negative inventory, two parcels. You cannot prevent redelivery (that is the broker's safety mechanism), and you cannot demand exactly-once delivery from systems that do not offer it.
+
+So the forces are: messages can and will be redelivered, some side effects must not happen twice, and you cannot push the deduplication problem back onto the broker.
+
+## Solution
+
+Make the consumer **idempotent** — processing a message twice has the same effect as processing it once. There are two approaches, and the best handlers combine them.
+
+The general approach is to **track processed message ids**. Every message carries a unique id (assigned when the outbox row was created). The consumer keeps a `processed_messages` table; when a message arrives, it tries to record the id and apply the side effect *in the same local transaction*. If the id is already present, the message is a duplicate and is acknowledged without re-applying the effect. Recording the id and doing the work in one transaction is what makes this airtight — a crash either commits both or neither.
+
+The natural approach is to **design the side effect to be inherently idempotent**: an upsert keyed by a business id, a conditional update guarded by a status, or a `SET balance = X` rather than `balance = balance + Y`. When the operation is naturally idempotent, you may not need a dedup table at all.
+
+export const idempotentDiagram = `sequenceDiagram
+  participant B as Message Broker
+  participant C as Consumer
+  participant DB as Consumer DB
+  B->>C: deliver msg 42
+  C->>DB: BEGIN, INSERT id 42, apply effect, COMMIT
+  C-->>B: ack
+  B->>C: redeliver msg 42 (duplicate)
+  C->>DB: INSERT id 42 - already exists
+  Note over C,DB: duplicate detected, effect skipped
+  C-->>B: ack (no double effect)`;
+
+<Mermaid code={idempotentDiagram} title="The consumer records each message id with its effect; a redelivered duplicate is detected and skipped" />
+
+## Example
+
+The handler inserts the message id and applies the side effect in one transaction. A unique-constraint violation on the id means "already processed," so the duplicate is swallowed and acknowledged.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    // Returns true if newly processed, false if it was a duplicate.
+    async function handleMessage(pool: Pool, msg: Message): Promise<boolean> {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const res = await client.query(
+          'INSERT INTO processed_messages (id) VALUES ($1) ON CONFLICT DO NOTHING',
+          [msg.id],
+        );
+        if (res.rowCount === 0) {
+          await client.query('ROLLBACK'); // duplicate: id already recorded
+          return false;
+        }
+
+        // Side effect runs in the SAME transaction as recording the id.
+        await client.query(
+          'UPDATE accounts SET balance = balance + $1 WHERE id = $2',
+          [msg.amount, msg.accountId],
+        );
+
+        await client.query('COMMIT');
+        return true;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    def handle_message(conn, msg) -> bool:
+        """Return True if newly processed, False if it was a duplicate."""
+        with conn:  # one transaction: record id + apply effect
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO processed_messages (id) VALUES (%s) "
+                    "ON CONFLICT DO NOTHING",
+                    (msg.id,),
+                )
+                if cur.rowcount == 0:
+                    return False  # duplicate: id already recorded
+
+                # Side effect runs in the same transaction as recording the id.
+                cur.execute(
+                    "UPDATE accounts SET balance = balance + %s WHERE id = %s",
+                    (msg.amount, msg.account_id),
+                )
+        return True
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    // Returns true if newly processed, false if it was a duplicate.
+    func HandleMessage(ctx context.Context, db *sql.DB, msg Message) (bool, error) {
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil {
+            return false, err
+        }
+        defer tx.Rollback()
+
+        res, err := tx.ExecContext(ctx,
+            `INSERT INTO processed_messages (id) VALUES ($1) ON CONFLICT DO NOTHING`,
+            msg.ID)
+        if err != nil {
+            return false, err
+        }
+        if n, _ := res.RowsAffected(); n == 0 {
+            return false, nil // duplicate: id already recorded
+        }
+
+        // Side effect runs in the same transaction as recording the id.
+        if _, err := tx.ExecContext(ctx,
+            `UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+            msg.Amount, msg.AccountID); err != nil {
+            return false, err
+        }
+
+        return true, tx.Commit()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use sqlx::{Pool, Postgres};
+
+    /// Returns Ok(true) if newly processed, Ok(false) if it was a duplicate.
+    async fn handle_message(pool: &Pool<Postgres>, msg: &Message) -> Result<bool, sqlx::Error> {
+        let mut tx = pool.begin().await?; // record id + apply effect in one tx
+
+        let inserted = sqlx::query(
+            "INSERT INTO processed_messages (id) VALUES ($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(msg.id)
+        .execute(&mut *tx)
+        .await?;
+
+        if inserted.rows_affected() == 0 {
+            return Ok(false); // duplicate: id already recorded
+        }
+
+        // Side effect runs in the same transaction as recording the id.
+        sqlx::query("UPDATE accounts SET balance = balance + $1 WHERE id = $2")
+            .bind(msg.amount)
+            .bind(msg.account_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(true)
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Safety against redelivery.** Duplicates are detected and skipped, so at-least-once delivery becomes effectively exactly-once *processing* — the guarantee that actually matters.
+- **A clean contract with the rest of the module.** Because consumers are idempotent, the outbox and its relays are free to be simple and to redeliver without fear.
+
+What it costs you:
+
+- **State to keep and prune.** The `processed_messages` table grows; you must trim old ids (for example, by time window) and size it for your throughput.
+- **The effect must share the transaction.** Recording the id and applying the side effect must be atomic. If the side effect touches an external system that cannot join the transaction, you are back to a smaller dual-write — prefer naturally idempotent operations there.
+- **Ordering is still your problem.** Idempotency stops double-processing, but it does not guarantee messages arrive in order; if order matters, handle it separately.
+
+## Related patterns
+
+- [Transactional Outbox](/microservices-design-from-zero-to-hero/en/transactional-messaging/transactional-outbox/) — assigns the unique message id this pattern deduplicates on.
+- [Transaction Log Tailing](/microservices-design-from-zero-to-hero/en/transactional-messaging/transaction-log-tailing/) — a relay whose at-least-once delivery this pattern absorbs.
+- [Polling Publisher](/microservices-design-from-zero-to-hero/en/transactional-messaging/polling-publisher/) — the other at-least-once relay this pattern protects against.
+
+<Callout title="Aim for idempotent processing, not exactly-once delivery">
+Exactly-once delivery across a network is effectively impossible; exactly-once *processing* is achievable and is what you actually want. Record the message id and apply the effect in one transaction, or make the effect naturally idempotent, and duplicates stop mattering. This consumer-side discipline is what lets every other pattern in this module stay simple.
+</Callout>
+
+export const quizIdempotent = [
+  {
+    q: 'Why must consumers handle duplicate messages?',
+    options: [
+      'Because the outbox occasionally loses messages',
+      'Because relays and brokers deliver at least once, so the same message can be redelivered',
+      'Because consumers process messages out of order',
+      'Because the database cannot store message ids',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What makes id-based deduplication reliable?',
+    options: [
+      'Recording the message id and applying the side effect in the same local transaction',
+      'Asking the broker to guarantee exactly-once delivery',
+      'Sleeping briefly before processing each message',
+      'Publishing an acknowledgement before doing the work',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'Which is an example of a naturally idempotent side effect?',
+    options: [
+      'balance = balance + amount',
+      'An upsert keyed by a business id, or a conditional update guarded by a status',
+      'Appending a row to an audit log on every delivery',
+      'Sending an email on every message received',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactional-messaging/idempotent-consumer" questions={quizIdempotent} />
+
+<ProgressTracker client:visible id="transactional-messaging/idempotent-consumer" />

@@ -1,0 +1,343 @@
+---
+title: Circuit Breaker
+description: 'หยุดเรียก dependency ที่ล้มเหลวเมื่อ error ข้ามเกณฑ์ที่กำหนด circuit breaker จะเคลื่อนผ่านสถานะ Closed, Open และ Half-Open เพื่อ fail fast ระหว่างเกิดเหตุล่ม และตรวจวัดเพื่อหาการฟื้นตัว ป้องกันไม่ให้ dependency ที่ช้าทำให้ทรัพยากรของคุณหมดไป'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+บริการของคุณเรียก dependency ในทุก ๆ request — สมมติว่าเป็น pricing service ที่ flow ของ checkout ต้องปรึกษาก่อนจะคำนวณยอดรวมได้ ส่วนใหญ่การเรียกนั้นรวดเร็วและสำเร็จ แต่ pricing service เพิ่งเริ่มล้มเหลว: อาจรับภาระเกิน อาจมีฐานข้อมูลปลายทางที่ timeout หรืออาจอยู่ระหว่าง deploy ตอนนี้การเรียกแต่ละครั้งจึงไม่ error หลังจากรอนาน ก็ค้างจนกระทั่ง timeout ของคุณทำงาน
+
+แม้จะมี timeout ในแต่ละการเรียก (ซึ่งคุณควรมี) พฤติกรรมแบบไร้เดียงสาคือการพยายามต่อไป checkout request ที่เข้ามาทุกครั้งจะเรียก pricing service ที่พังอย่างซื่อสัตย์ รอจน timeout ล้มเหลว และจับ thread หรือ connection ไว้ตลอดเวลานั้น
+
+## ปัญหา
+
+การส่ง request ไปยัง dependency ที่คุณรู้อยู่แล้วว่ากำลังล้มเหลวคือความสูญเปล่าล้วน ๆ และแย่ยิ่งกว่าสูญเปล่า — มันเป็นอันตรายอย่างจริงจัง การเรียกที่ไร้ความหวังแต่ละครั้งครอบครอง thread หนึ่งตัว connection หนึ่งตัว และหน่วยความจำบางส่วนตลอดระยะเวลาของ timeout ภายใต้ภาระ ทรัพยากรที่ถูกครอบครองเหล่านั้นจะกองเพิ่มขึ้นเร็วกว่าที่ถูกปล่อย และบริการของคุณเองก็หมดกำลังที่จะรองรับ *ทุก* request รวมถึง request ที่ไม่เกี่ยวอะไรกับ dependency ที่ล้มเหลวเลย การ retry ยังเพิ่มภาระให้ dependency ที่กำลังดิ้นรนอยู่แล้ว ทำให้มันฟื้นตัวช้าลงไปอีก
+
+ดังนั้นแรงที่ตึงเครียดกันคือ: คุณอยากใช้ dependency ที่ปกติแล้วแข็งแรงต่อไป คุณต้องไม่กระหน่ำมันในขณะที่มันพังอย่างชัดเจน และคุณต้องสังเกตได้โดยอัตโนมัติเมื่อมันฟื้นตัวแล้ว — โดยไม่ต้องมีคนมาสับสวิตช์
+
+## วิธีแก้
+
+**circuit breaker** คือตัวห่อหุ้มที่มีสถานะรอบ ๆ การเรียก remote ซึ่งคอยเฝ้าดูว่าการเรียกเป็นอย่างไร และเมื่อความล้มเหลวข้ามเกณฑ์ มันจะ *หยุดปล่อยให้การเรียกผ่าน* ไปชั่วระยะพักตัว เหมือนกับ breaker ไฟฟ้าที่มันถูกตั้งชื่อตาม มันจะ trip เพื่อปกป้องระบบ แล้ว reset เมื่อสภาวะดูปลอดภัย
+
+มันเคลื่อนผ่านสามสถานะ:
+
+- **Closed** — สถานะปกติ การเรียกผ่านไปยัง dependency ได้ breaker นับความล้มเหลว (และความสำเร็จ) หากอัตราความล้มเหลวข้ามเกณฑ์ที่กำหนดภายใน window มันจะ trip ไปยัง **Open**
+- **Open** — สันนิษฐานว่า dependency พัง การเรียกจะ **ไม่** ผ่านไป มันล้มเหลวทันที (มักเรียก fallback) โดยไม่แตะ dependency เลย นี่คือ *failing fast* — ไม่มี thread ที่ถูกจับไว้รอ หลังจากตัวจับเวลาพักตัวหมดลง breaker จะเคลื่อนไปยัง **Half-Open**
+- **Half-Open** — สถานะทดลอง อนุญาตให้ probe call จำนวนจำกัดผ่านไปได้ หากมันสำเร็จ แสดงว่า dependency ฟื้นตัวแล้วและ breaker จะกลับไปยัง **Closed** หากมันล้มเหลว มันจะ trip กลับไปยัง **Open** และเริ่มพักตัวใหม่อีกครั้ง
+
+export const breakerStates = `stateDiagram-v2
+  [*] --> Closed
+  Closed --> Open: failure rate crosses threshold
+  Open --> HalfOpen: cool-down timer expires
+  HalfOpen --> Closed: probe calls succeed
+  HalfOpen --> Open: probe call fails
+  Closed --> Closed: success / failure below threshold
+  note right of Open
+    calls fail fast
+    (fallback runs, no remote call)
+  end note`;
+
+<Mermaid code={breakerStates} title="สถานะของ circuit breaker — Closed นับความล้มเหลว, Open fail fast, Half-Open ตรวจวัดเพื่อหาการฟื้นตัว" />
+
+## ตัวอย่าง
+
+นี่คือ breaker ที่ห่อหุ้มการเรียกแบบ asynchronous เพียงครั้งเดียว มันติดตามความล้มเหลวที่ติดต่อกันในขณะ Closed เปิด (open) เมื่อมันข้ามเกณฑ์ fail fast ในขณะ Open จนกระทั่งการพักตัวหมดลง และอนุญาตให้ probe หนึ่งครั้งใน Half-Open เพื่อตัดสินว่าจะ close อีกครั้งหรือไม่ แต่ละตัวอย่างเป็นอิสระในตัวเองและเขียนตามแบบฉบับของแต่ละภาษา
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type State = 'closed' | 'open' | 'half-open';
+
+    class OpenCircuitError extends Error {}
+
+    class CircuitBreaker {
+      private state: State = 'closed';
+      private failures = 0;
+      private openedAt = 0;
+
+      constructor(
+        private readonly threshold = 5,
+        private readonly cooldownMs = 10_000,
+      ) {}
+
+      async call<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.state === 'open') {
+          if (Date.now() - this.openedAt < this.cooldownMs) {
+            throw new OpenCircuitError('circuit is open');
+          }
+          this.state = 'half-open';
+        }
+        try {
+          const result = await fn();
+          this.onSuccess();
+          return result;
+        } catch (err) {
+          this.onFailure();
+          throw err;
+        }
+      }
+
+      private onSuccess(): void {
+        this.failures = 0;
+        this.state = 'closed';
+      }
+
+      private onFailure(): void {
+        this.failures += 1;
+        if (this.state === 'half-open' || this.failures >= this.threshold) {
+          this.state = 'open';
+          this.openedAt = Date.now();
+        }
+      }
+    }
+
+    const breaker = new CircuitBreaker();
+    const price = await breaker
+      .call(() => pricingClient.quote(cart))
+      .catch(() => fallbackPrice(cart)); // degrade gracefully when open
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import time
+    from typing import Awaitable, Callable, TypeVar
+
+    T = TypeVar("T")
+
+    class OpenCircuitError(Exception):
+        pass
+
+    class CircuitBreaker:
+        def __init__(self, threshold: int = 5, cooldown_s: float = 10.0):
+            self.threshold = threshold
+            self.cooldown_s = cooldown_s
+            self.state = "closed"
+            self.failures = 0
+            self.opened_at = 0.0
+
+        async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
+            if self.state == "open":
+                if time.monotonic() - self.opened_at < self.cooldown_s:
+                    raise OpenCircuitError("circuit is open")
+                self.state = "half-open"
+            try:
+                result = await fn()
+            except Exception:
+                self._on_failure()
+                raise
+            self._on_success()
+            return result
+
+        def _on_success(self) -> None:
+            self.failures = 0
+            self.state = "closed"
+
+        def _on_failure(self) -> None:
+            self.failures += 1
+            if self.state == "half-open" or self.failures >= self.threshold:
+                self.state = "open"
+                self.opened_at = time.monotonic()
+
+    breaker = CircuitBreaker()
+    try:
+        price = await breaker.call(lambda: pricing_client.quote(cart))
+    except Exception:
+        price = fallback_price(cart)  # degrade gracefully when open
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type state int
+
+    const (
+        closed state = iota
+        open
+        halfOpen
+    )
+
+    var ErrOpen = errors.New("circuit is open")
+
+    type Breaker struct {
+        mu        sync.Mutex
+        st        state
+        failures  int
+        threshold int
+        cooldown  time.Duration
+        openedAt  time.Time
+    }
+
+    func NewBreaker(threshold int, cooldown time.Duration) *Breaker {
+        return &Breaker{st: closed, threshold: threshold, cooldown: cooldown}
+    }
+
+    func (b *Breaker) Call(fn func() error) error {
+        b.mu.Lock()
+        if b.st == open {
+            if time.Since(b.openedAt) < b.cooldown {
+                b.mu.Unlock()
+                return ErrOpen
+            }
+            b.st = halfOpen
+        }
+        b.mu.Unlock()
+
+        err := fn()
+
+        b.mu.Lock()
+        defer b.mu.Unlock()
+        if err != nil {
+            b.failures++
+            if b.st == halfOpen || b.failures >= b.threshold {
+                b.st = open
+                b.openedAt = time.Now()
+            }
+            return err
+        }
+        b.failures = 0
+        b.st = closed
+        return nil
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::future::Future;
+    use std::time::{Duration, Instant};
+
+    #[derive(PartialEq)]
+    enum State {
+        Closed,
+        Open,
+        HalfOpen,
+    }
+
+    pub struct Breaker {
+        state: State,
+        failures: u32,
+        threshold: u32,
+        cooldown: Duration,
+        opened_at: Instant,
+    }
+
+    impl Breaker {
+        pub fn new(threshold: u32, cooldown: Duration) -> Self {
+            Self {
+                state: State::Closed,
+                failures: 0,
+                threshold,
+                cooldown,
+                opened_at: Instant::now(),
+            }
+        }
+
+        pub async fn call<T, E, F, Fut>(&mut self, fn_: F) -> Result<T, E>
+        where
+            F: FnOnce() -> Fut,
+            Fut: Future<Output = Result<T, E>>,
+            E: From<&'static str>,
+        {
+            if self.state == State::Open {
+                if self.opened_at.elapsed() < self.cooldown {
+                    return Err(E::from("circuit is open"));
+                }
+                self.state = State::HalfOpen;
+            }
+            match fn_().await {
+                Ok(v) => {
+                    self.failures = 0;
+                    self.state = State::Closed;
+                    Ok(v)
+                }
+                Err(e) => {
+                    self.failures += 1;
+                    if self.state == State::HalfOpen || self.failures >= self.threshold {
+                        self.state = State::Open;
+                        self.opened_at = Instant::now();
+                    }
+                    Err(e)
+                }
+            }
+        }
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เกิดขึ้นตามมา
+
+สิ่งที่คุณได้รับ:
+
+- **ไม่มี cascading failure อีกต่อไป** ในขณะที่ breaker อยู่ในสถานะ Open การเรียกที่ไร้ความหวังจะไม่มีวันไปถึง dependency ที่พัง ดังนั้นมันจึงจับ thread และ connection ของคุณไว้ไม่ได้ dependency ที่ล้มเหลวจะหมดความสามารถในการทำให้ผู้เรียกหมดทรัพยากร
+- **ความล้มเหลวที่รวดเร็วและคาดเดาได้** แทนที่ทุก request จะต้องรอจน timeout เต็มจำนวน request จะล้มเหลวทันทีและสามารถรัน fallback ได้ — ค่าที่ cache ไว้ ค่าเริ่มต้น หรือ error ที่ชัดเจน — ทำให้ latency มีขอบเขต
+- **การฟื้นตัวอัตโนมัติ** probe ของ Half-Open หมายความว่าระบบรักษาตัวเองได้: ไม่ต้องมีคนมาสังเกตการฟื้นตัวแล้วเปิด traffic ใหม่
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **การจูนเป็นงานจริง** เกณฑ์ (threshold), window ที่ใช้นับความล้มเหลว, ระยะเวลาพักตัว และจำนวน probe ของ half-open ล้วนต้องการค่า ไวเกินไป breaker ก็จะกระพริบจากการสะดุดปกติ หย่อนเกินไปมันก็ไม่เคยปกป้องคุณ
+- **คุณต้องมีแผนเรื่อง fallback** breaker เพียงแค่ fail fast — *อะไร* ที่มัน return เมื่อ Open คือการตัดสินใจของคุณ cache ที่เก่า ค่าเริ่มต้นที่สมเหตุสมผล หรือ response บางส่วน ช่วยให้ประสบการณ์ผู้ใช้ยังใช้งานได้ ส่วน error ที่ไม่ได้จัดการแค่ย้ายความล้มเหลวไปไว้ที่อื่น
+- **สถานะที่แชร์กันข้าม instance** แต่ละ instance ของบริการมักมี breaker ของตัวเอง ดังนั้น dependency หนึ่งอาจ "open" บน instance หนึ่งและ "closed" บนอีก instance หนึ่ง ซึ่งยอมรับได้สำหรับระบบส่วนใหญ่ แต่พึงระลึกว่ามุมมองเรื่องสุขภาพนั้นเป็นแบบต่อ instance เว้นแต่คุณจะแชร์มัน
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Retry and Timeout](/microservices-design-from-zero-to-hero/th/reliability/retry-and-timeout/) — timeout คือสิ่งที่เปลี่ยนการค้างให้กลายเป็นความล้มเหลวที่นับได้ซึ่ง breaker สามารถนำไปดำเนินการต่อได้
+- [Bulkhead](/microservices-design-from-zero-to-hero/th/reliability/bulkhead/) — ควบคุมทรัพยากรที่ dependency สามารถกินได้ตั้งแต่ก่อนที่ breaker จะ trip ด้วยซ้ำ
+- [Rate Limiting](/microservices-design-from-zero-to-hero/th/reliability/rate-limiting/) — ปกป้อง dependency ที่อยู่ปลายทางที่รับการเรียกซึ่ง breaker ควบคุมอยู่
+
+<Callout title="breaker ต้องมี timeout จึงจะทำงานได้">
+circuit breaker นับความล้มเหลว และการเรียกที่ค้างยังไม่ถือเป็นความล้มเหลวจนกว่าจะมีอะไรมาประกาศให้มันเป็น หากไม่มี timeout ต่อการเรียก dependency ที่ช้าจะทำให้ทุก probe รอไปอย่างไม่มีกำหนด จำนวนความล้มเหลวจะไม่เพิ่มขึ้น และ breaker จะไม่มีวัน trip จับคู่ breaker กับ timeout ที่เข้มงวดบนการเรียกที่มันห่อหุ้มเสมอ — timeout เป็นตัวสร้างความล้มเหลวที่ breaker ถูกออกแบบมาให้นับ
+</Callout>
+
+export const quizCircuitBreaker = [
+  {
+    q: 'circuit breaker มีสามสถานะอะไรบ้าง?',
+    options: [
+      'Idle, Running, Stopped',
+      'Closed, Open, Half-Open',
+      'Connected, Disconnected, Retrying',
+      'Healthy, Degraded, Failed',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เกิดอะไรขึ้นกับการเรียกในขณะที่ breaker อยู่ในสถานะ Open?',
+    options: [
+      'มันถูกเข้าคิวจนกว่า dependency จะฟื้นตัว',
+      'มันล้มเหลวทันทีโดยไม่ไปถึง dependency และมักรัน fallback',
+      'มันถูก retry อย่างดุดันมากขึ้น',
+      'มันถูก route ไปยัง dependency สำรองโดยอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'สถานะ Half-Open มีจุดประสงค์อะไร?',
+    options: [
+      'เพื่อทำให้ทุกการเรียกช้าลงครึ่งหนึ่ง',
+      'เพื่อปล่อยให้ probe call จำนวนจำกัดผ่านไปเพื่อทดสอบว่า dependency ฟื้นตัวแล้วหรือไม่',
+      'เพื่อแบ่ง traffic อย่างเท่ากันระหว่างสอง dependency',
+      'เพื่อ log ความล้มเหลวโดยไม่กระทบ traffic',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม circuit breaker จึงต้องจับคู่กับ timeout ต่อการเรียก?',
+    options: [
+      'timeout ทำให้การเรียกเร็วขึ้น',
+      'การเรียกที่ค้างไม่มีวันนับเป็นความล้มเหลวหากไม่มี timeout ดังนั้น breaker จึงจะไม่มีวัน trip',
+      'breaker เก็บสถานะไม่ได้หากไม่มีตัวจับเวลา',
+      'timeout จำเป็นต่อการ close วงจร',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="reliability/circuit-breaker" questions={quizCircuitBreaker} />
+
+<ProgressTracker client:visible id="reliability/circuit-breaker" />

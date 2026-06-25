@@ -1,0 +1,126 @@
+---
+title: Monolith vs Microservices
+description: 'The monolithic architecture packages an entire application as one deployable unit. It is simple and fast to start with, and only hurts at a certain scale — which is exactly the contrast microservices are designed for.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+Almost every successful system starts as a monolith, and for good reason. When you are figuring out what to build, the last thing you want is the overhead of a distributed system. You write your modules, wire them together in one process, point them at one database, and ship. To understand why a team would ever take on the complexity of microservices, you first have to understand the architecture they are moving away from — and why it served them so well for so long.
+
+## Problem
+
+A **monolithic architecture** packages the entire application as a single deployable unit. All the modules — the order logic, the payment logic, the inventory logic — live in one codebase, compile or bundle into one artifact, run in one process, and share one database.
+
+This is not a flaw. For a small team and a young product, the monolith has real strengths:
+
+- **Simple to develop.** One repository, one build, one way to run the whole thing on your laptop.
+- **Simple to test.** End-to-end tests run against a single process; there is no network in the middle to mock or to flake.
+- **Simple to deploy.** One artifact goes out the door. There is no version-skew between services to reason about.
+- **Easy, strong consistency.** A single database transaction can update orders, inventory, and payments atomically, and a single join can read across all of them.
+
+The trouble is not the monolith itself — it is what happens to a *successful* monolith over time. As the codebase grows and the team grows with it, the very thing that made it simple, its single shared unit, becomes the thing that slows everyone down:
+
+- The codebase grows large enough that no one fully understands it, and changes in one area break another.
+- Every change, however small, requires building and deploying the entire application, so releases get large, infrequent, and risky.
+- You cannot scale parts independently. If only the payment logic is CPU-bound, you still have to run more copies of the *whole* application to keep up.
+- Teams step on each other. Many people committing to one codebase and waiting for one shared release pipeline creates contention and coordination overhead.
+- You are locked into the original technology stack; adopting a new language or framework means rewriting or carrying the whole monolith with you.
+
+So the forces are clear: the monolith optimizes for early simplicity, but a large, busy monolith trades away independent deployment, independent scaling, and team autonomy.
+
+## Solution
+
+The **microservices architecture** is the deliberate contrast. Instead of one deployable unit, you split the application into a set of smaller services, each independently deployable, each owning its data, each aligned to a business capability. What was a method call inside one process becomes an API call or an event across the network.
+
+The diagram below puts the two side by side: one box you deploy as a whole, versus many boxes you deploy on their own.
+
+export const compareDiagram = `flowchart TB
+  subgraph Monolith[Monolithic Architecture]
+    direction TB
+    M[Single Deployable Unit]
+    MO[Orders Module]
+    MP[Payments Module]
+    MI[Inventory Module]
+    M --- MO
+    M --- MP
+    M --- MI
+    MDB[(Shared Database)]
+    MO --> MDB
+    MP --> MDB
+    MI --> MDB
+  end
+  subgraph Micro[Microservices Architecture]
+    direction TB
+    SO[Order Service] --> SODB[(Orders DB)]
+    SP[Payment Service] --> SPDB[(Payments DB)]
+    SI[Inventory Service] --> SIDB[(Inventory DB)]
+  end`;
+
+<Mermaid code={compareDiagram} title="One deployable unit over a shared database, versus many independently deployable services each with its own database" />
+
+The split is not free, and it is not automatically better. It exchanges the monolith's in-process simplicity and easy consistency for independence and scalability — and it adds the cost of operating a distributed system. The next lesson weighs that exchange honestly.
+
+## Resulting context
+
+What changes when you move from the left of the diagram to the right:
+
+- A single shared transaction becomes a coordinated workflow across services, so strong consistency becomes eventual consistency you design for.
+- A whole-application deploy becomes many small, independent deploys.
+- One scaling knob becomes one knob per service.
+- One codebase owned by everyone becomes many codebases, each owned by a team.
+
+None of this means the monolith is wrong. A well-structured monolith — a *modular* monolith with clean internal boundaries — can carry a product a very long way, and is often the smarter place to start. The point of this lesson is not that one is good and the other bad, but that they make opposite trade-offs, and you should pick the trade-off your situation actually calls for.
+
+## Related patterns
+
+- [What Is Microservices Architecture?](/microservices-design-from-zero-to-hero/en/intro-and-principles/) — the definition this lesson contrasts against.
+- [Benefits and Drawbacks](/microservices-design-from-zero-to-hero/en/intro-and-principles/benefits-and-drawbacks/) — the trade-off, examined in detail.
+- [When to Use Microservices](/microservices-design-from-zero-to-hero/en/intro-and-principles/when-to-use-microservices/) — choosing which side of the diagram you belong on.
+
+<Callout title="Be fair to the monolith">
+The monolith is not a mistake you are escaping; it is a sensible default you may eventually outgrow. Most products never reach the scale where its costs outweigh its simplicity. Treat the move to microservices as a response to specific, observed pain — large teams blocked on one pipeline, components that must scale separately — not as a sign of architectural maturity.
+</Callout>
+
+export const quizCompare = [
+  {
+    q: 'What defines a monolithic architecture?',
+    options: [
+      'An application with poorly written code',
+      'An application packaged and deployed as a single unit, typically over one shared database',
+      'An application that uses only one programming language',
+      'An application with no automated tests',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine strength of the monolith for a small team and young product?',
+    options: [
+      'Independent scaling of each component',
+      'Simple development, testing, and deployment, plus easy strong consistency via one database transaction',
+      'Per-team ownership of separate deployables',
+      'Freedom to use a different technology stack per module',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When does a monolith typically start to hurt?',
+    options: [
+      'Immediately, on day one of any project',
+      'As the codebase and team grow large, making changes risky and forcing whole-application deploys and scaling',
+      'Only when it is written in an old programming language',
+      'Never — monoliths scale the same as microservices',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/monolith-vs-microservices" questions={quizCompare} />
+
+<ProgressTracker client:visible id="intro-and-principles/monolith-vs-microservices" />

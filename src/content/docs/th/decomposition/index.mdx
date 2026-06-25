@@ -1,0 +1,100 @@
+---
+title: การแยกระบบ (Decomposition)
+description: 'จะแยกระบบออกเป็น service ได้อย่างไร? สองกลยุทธ์หลัก — แยกตาม business capability และแยกตาม subdomain — พร้อมกับ pattern เสริมที่ช่วยให้ service ที่ได้นั้นเป็นอิสระ พร้อมใช้งาน และมีเจ้าของชัดเจน'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## บริบท (Context)
+
+คุณตัดสินใจแล้วว่าจะสร้างระบบของคุณเป็นชุดของ service แทนที่จะเป็น monolith เพียงก้อนเดียว คำสัญญานั้นน่าดึงดูดใจ คือหน่วยเล็ก ๆ ที่ deploy ได้อย่างอิสระและทีมต่าง ๆ สามารถส่งมอบงานตามจังหวะของตัวเองได้ แต่ก่อนที่สิ่งเหล่านั้นจะให้ผล คุณต้องเจอกับคำถามเดียวที่ดูเหมือนง่ายแต่หลอกตา นั่นคือ เส้นแบ่งควรอยู่ตรงไหน? สถาปัตยกรรมแบบ microservice นั้น เหนือสิ่งอื่นใด คือชุดของเส้นแบ่ง (boundaries) วาดมันให้ดีแล้วระบบจะรู้สึกเหมือนอยากให้คุณเข้าไปแก้ไข วาดมันแย่ ๆ แล้วคุณจะได้ *distributed monolith* ที่ทุกการเปลี่ยนแปลงยังคงกระเพื่อมไปทั่วทุก service เพียงแต่ตอนนี้มันกระเพื่อมผ่านเครือข่ายแทน
+
+## ปัญหา (Problem)
+
+ปัญหาคือ "แยกมันออกเป็น service สิ" ไม่ใช่คำแนะนำ แต่เป็นแค่การพูดเป้าหมายซ้ำ การแยกตามชั้นทางเทคนิค (service หนึ่งสำหรับ web tier, หนึ่งสำหรับ business logic, หนึ่งสำหรับ data access) สร้างการเชื่อมต่อที่แน่นเหนียวแบบเดิมขึ้นมาใหม่ เพราะ feature เดียวก็ยังต้องตัดผ่านทั้งหมดอยู่ดี การแยกแบบสุ่มสร้าง service ที่ต้องเรียกหากันตลอดเวลาเพื่อให้งานอะไรสักอย่างสำเร็จ และไม่มี compiler ตัวไหนมาบอกคุณว่าเส้นแบ่งนั้นผิด คุณมักจะค้นพบมันหลายเดือนต่อมา ตอนที่ feature "เล็ก ๆ" อันหนึ่งไปแตะถึงสี่ service และสามทีม
+
+ดังนั้นคำถามที่ module นี้ตอบคือ ด้วยหลักการอะไรที่คุณจะใช้ตัดสินว่าอะไรควรอยู่ใน service หนึ่งและอะไรควรอยู่ในอีก service หนึ่ง เพื่อให้แต่ละ service มีความเกาะเกี่ยวภายในสูง (cohesive) เชื่อมต่อกับส่วนที่เหลืออย่างหลวม ๆ (loosely coupled) และสามารถพัฒนาต่อยอดได้ด้วยตัวเอง?
+
+## วิธีแก้ (Solution)
+
+ไม่มี algorithm เดียวที่ใช้ได้ แต่มีชุด pattern เล็ก ๆ ที่สอดคล้องกันและทำงานร่วมกันได้ สองตัวในนั้นเป็น *กลยุทธ์* สำหรับค้นหาเส้นแบ่ง ส่วนที่เหลือเป็น pattern *เสริม* ที่ช่วยให้ service ที่ได้นั้นมีสุขภาพดี
+
+สองกลยุทธ์หลักของการ decompose คือ:
+
+- **Decompose by Business Capability** — นิยามแต่ละ service รอบ ๆ สิ่งที่ธุรกิจ *ทำ* (Order Management, Billing, Shipping) เส้นแบ่งจะอิงตาม business capability ที่มั่นคงขององค์กรมากกว่าเทคโนโลยีปัจจุบัน
+- **Decompose by Subdomain** — ใช้ Domain-Driven Design เพื่อค้นหา bounded context และ subdomain แล้วทำให้แต่ละตัวเป็น service นี่เป็นเส้นทางที่เข้มงวดและขับเคลื่อนด้วยโมเดล (model-driven) มากกว่า ไปสู่เส้นแบ่งประเภทเดียวกันโดยคร่าว ๆ
+
+มีอีกสอง pattern เสริมที่ช่วยให้ service เหล่านั้นเป็นอิสระเมื่อมันถูกสร้างขึ้นแล้ว:
+
+- **Self-Contained Service** — service หนึ่งตอบ request โดยไม่ต้องเรียก service อื่นแบบ synchronous จึงยังคงพร้อมใช้งานได้แม้เพื่อนบ้านจะช้าหรือล่ม
+- **Service per Team** — ความเป็นเจ้าของของแต่ละ service ถูกจัดให้สอดคล้องกับทีมเดียว เพื่อให้สถาปัตยกรรมและองค์กรเสริมแรงซึ่งกันและกันแทนที่จะขัดแย้งกัน
+
+export const overviewDiagram = `flowchart TB
+  Start[Monolith to decompose] --> Q{Choose a strategy}
+  Q -->|what the business does| BC[Decompose by<br/>Business Capability]
+  Q -->|domain model| SD[Decompose by<br/>Subdomain / DDD]
+  BC --> Services[Candidate services]
+  SD --> Services
+  Services --> SCS[Self-Contained Service<br/>keep each one available]
+  Services --> SPT[Service per Team<br/>give each one an owner]
+  SCS --> Good[Cohesive, loosely coupled,<br/>independently deployable services]
+  SPT --> Good`;
+
+<Mermaid code={overviewDiagram} title="ภาษาแห่ง pattern ของการ decompose: สองกลยุทธ์สำหรับค้นหาเส้นแบ่ง และสอง pattern เสริมสำหรับรักษาให้ service เป็นอิสระ" />
+
+## module นี้ครอบคลุมอะไรบ้าง
+
+เราเริ่มจากสองกลยุทธ์ก่อน เพราะทุกอย่างที่เหลือขึ้นอยู่กับการวางเส้นแบ่งให้ถูกต้องพอประมาณ **Decompose by Business Capability** เป็นจุดเริ่มต้นที่เข้าถึงได้ง่ายที่สุดและเป็นค่าเริ่มต้นที่ดี **Decompose by Subdomain** นำวินัยของ Domain-Driven Design เข้ามา และมักให้เส้นแบ่งที่คมชัดกว่าเมื่อ domain มีความซับซ้อน ทั้งสองอย่างนี้เสริมกัน ไม่ใช่คู่แข่งกัน capability ให้การแบ่งครั้งแรกอย่างรวดเร็ว ส่วน subdomain ทำให้มันละเอียดขึ้น
+
+จากนั้นเราหันไปดูสอง pattern ที่ปกป้อง service หลังจากเส้นแบ่งถูกวาดแล้ว **Self-Contained Service** เกี่ยวกับความเป็นอิสระตอน runtime คือ service ไม่ควรล้มเพียงเพราะบางสิ่งที่มันคุยด้วยไม่พร้อมใช้งาน **Service per Team** เกี่ยวกับความเป็นอิสระเชิงองค์กร คือ service ควรมีทีมเดียวที่เป็นเจ้าของแบบ end to end ตาม Conway's law แต่ละบทเรียนมีรูปแบบเดียวกัน คือ สถานการณ์ที่นำไปสู่ pattern, แรงต่าง ๆ ที่ตึงเครียดกัน, สิ่งที่ pattern ทำ, แผนภาพ, และการมองอย่างตรงไปตรงมาว่า pattern นั้นมีต้นทุนอะไร
+
+## pattern ที่เกี่ยวข้อง
+
+- [Decompose by Business Capability](/microservices-design-from-zero-to-hero/th/decomposition/decompose-by-business-capability/) — กลยุทธ์เริ่มต้นที่พบบ่อยที่สุด
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/th/decomposition/decompose-by-subdomain/) — เส้นทางแบบ Domain-Driven Design สู่เส้นแบ่ง
+
+<Callout title="เส้นแบ่งคือสมมติฐาน ไม่ใช่คำตัดสิน">
+คุณจะวาดทุกเส้นให้ถูกต้องในครั้งแรกไม่ได้ และนั่นก็ไม่เป็นไร เป้าหมายของ pattern เหล่านี้ไม่ใช่การ decompose ที่สมบูรณ์แบบ แต่เป็นการ decompose ที่ *ปกป้องได้* (defensible) คือเส้นแบ่งที่คุณสามารถอธิบาย ปกป้อง และปรับเปลี่ยนได้เมื่อคุณเรียนรู้เกี่ยวกับ domain มากขึ้น จงมองการแบ่งครั้งแรกของคุณว่าเป็นสมมติฐานที่จะถูกทดสอบด้วยการเปลี่ยนแปลงที่ธุรกิจร้องขอจริง ๆ
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the central question of decomposition?',
+    options: [
+      'ภาษาโปรแกรมใดที่แต่ละ service ควรใช้',
+      'ด้วยหลักการอะไรที่จะตัดสินว่าอะไรควรอยู่ใน service หนึ่งเทียบกับอีก service หนึ่ง เพื่อให้ service ยังคงเกาะเกี่ยวกันแน่นและเชื่อมต่อกันอย่างหลวม ๆ',
+      'ควรจัดเตรียม database server กี่ตัว',
+      'ควร deploy ไปยัง cloud provider เจ้าไหน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is splitting a system by technical layer (web, logic, data) usually a poor decomposition?',
+    options: [
+      'เพราะชั้นทางเทคนิคนั้นผิดกฎใน microservices',
+      'เพราะ feature เดียวก็ยังตัดผ่านทุกชั้นอยู่ดี สร้างการเชื่อมต่อที่แน่นเหนียวขึ้นมาใหม่ผ่านเครือข่าย',
+      'เพราะชั้นต่าง ๆ ไม่สามารถ deploy ได้อย่างอิสระเลย',
+      'เพราะแต่ละชั้นต้องใช้ database คนละตัว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which two patterns are the main *strategies* for finding service boundaries?',
+    options: [
+      'Self-Contained Service และ Service per Team',
+      'Decompose by Business Capability และ Decompose by Subdomain',
+      'Saga และ CQRS',
+      'API Composition และ Database per Service',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="decomposition/index" />

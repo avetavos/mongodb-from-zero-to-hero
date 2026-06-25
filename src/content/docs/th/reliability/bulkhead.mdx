@@ -1,0 +1,269 @@
+---
+title: Bulkhead
+description: 'แยกทรัพยากร — thread pool, connection pool, semaphore — แยกตาม dependency เพื่อให้ dependency หนึ่งที่อิ่มตัวไม่สามารถทำให้ทุกอย่างหมดทรัพยากรได้ ตั้งชื่อตามช่องกันน้ำของเรือ bulkhead pattern ควบคุมความล้มเหลวให้อยู่เฉพาะส่วนหนึ่งของระบบ'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+บริการของคุณติดต่อกับ dependency หลายตัว ตัวอย่างเช่น หน้า product page อาจเรียก catalog service, reviews service และ recommendations service เพื่อประกอบเป็น response เดียว การเรียกทั้งสามใช้ทรัพยากรชุดเดียวกันที่มีจำกัดภายใน process ของคุณ: thread pool เดียวกันที่จัดการ request ที่เข้ามา, connection pool ของฐานข้อมูลเดียวกัน, จำนวน HTTP connection ที่กำลังทำงานคงที่จำนวนเดียวกัน
+
+การแชร์นั้นมองไม่เห็นและสะดวก — จนกระทั่ง dependency ตัวหนึ่งมีพฤติกรรมผิดปกติ
+
+## ปัญหา
+
+สมมติว่า recommendations service — ตัวที่สำคัญน้อยที่สุดในสามตัว — เริ่มช้า ทุก request ที่เรียกมันจะจอด thread ทิ้งไว้ตลอด timeout เพราะ dependency ทั้งหมดดึงจาก pool ที่แชร์กันชุดเดียว thread ที่ถูกจอดไว้เหล่านั้นจึงไม่ใช่ "thread ของ recommendations" แต่มันคือ *thread* เดียวกับที่การเรียก catalog และ reviews ต้องการ เมื่อ recommendations request สะสมขึ้น มันก็กิน pool ทั้งหมด ตอนนี้ request สำหรับ **catalog** ซึ่งแข็งแรงดีก็ขอ thread ไม่ได้เช่นกัน ความล้มเหลวใน dependency ที่สำคัญน้อยที่สุดได้ล้มตัวที่สำคัญที่สุดลงไป
+
+นี่คือการแย่งทรัพยากรผ่าน pool ที่แชร์กัน: dependency ที่ตะกละหรือติดขัดตัวหนึ่งทำให้ตัวอื่น ๆ ทั้งหมดอดอยาก และ circuit breaker เพียงอย่างเดียวก็ไม่ได้แก้มันได้สมบูรณ์ — มีช่วงหนึ่งก่อนที่ breaker จะ trip ที่ pool ที่แชร์กันถูกระบายจนหมดได้แล้ว
+
+ดังนั้นแรงที่ตึงเครียดกันคือ: คุณมีทรัพยากรที่จำกัด มี dependency หลายตัวที่แย่งชิงมัน และคุณต้องการให้ความต้องการของ dependency ที่ช้าตัวหนึ่งถูกจำกัด เพื่อให้มันกินส่วนแบ่งที่งานอื่น ๆ ที่แข็งแรงดีพึ่งพาไม่ได้
+
+## วิธีแก้
+
+**bulkhead** แบ่งกั้นทรัพยากรเพื่อให้ dependency แต่ละตัวดึงจาก pool ที่มีขอบเขตของตัวเองแทนที่จะเป็น pool ที่แชร์กันชุดเดียว ชื่อนี้มาจากการต่อเรือ: ตัวเรือถูกแบ่งออกเป็นช่องกันน้ำด้วย bulkhead เพื่อให้รอยรั่วในช่องหนึ่งท่วมเฉพาะช่องนั้นและเรือยังคงลอยอยู่ ในซอฟต์แวร์ คุณมอบ thread pool, connection pool หรือ — อย่างง่ายที่สุด — **bounded semaphore** ให้ dependency แต่ละตัว ซึ่งจำกัดจำนวนการเรียกแบบ concurrent ที่ไปยัง dependency นั้นที่กำลังทำงานพร้อมกันได้
+
+เมื่อ recommendations dependency อิ่มตัว มันจะครอบครองได้มากที่สุดเพียง permit ของช่อง *ของมันเอง* เมื่อ permit เหล่านั้นหมดลง การเรียก recommendation ต่อไปจะถูกปฏิเสธทันที (และสามารถ fall back ไปเป็น "ไม่มี recommendations") แต่ช่องของ catalog และ reviews ไม่ถูกแตะต้อง ความเสียหายถูกควบคุมไว้
+
+export const bulkheadDiagram = `flowchart TB
+  R[Incoming requests] --> C{Per-dependency<br/>bulkheads}
+  C --> CAT
+  C --> REV
+  C --> REC
+  subgraph CAT[Catalog compartment]
+    CP[8 permits] --> CS[Catalog service]
+  end
+  subgraph REV[Reviews compartment]
+    VP[4 permits] --> VS[Reviews service]
+  end
+  subgraph REC[Recommendations compartment]
+    RP[2 permits — saturated] --> RS[Recommendations service]
+  end
+  RP -. "extra calls rejected fast" .-> FB[Fallback: no recs]`;
+
+<Mermaid code={bulkheadDiagram} title="dependency แต่ละตัวได้ช่องที่มีขอบเขตของตัวเอง ช่องที่อิ่มตัวจะปฏิเสธอย่างรวดเร็วโดยไม่แตะตัวอื่น" />
+
+## ตัวอย่าง
+
+นี่คือ bulkhead ที่ implement เป็น bounded semaphore: การเรียกไปยัง dependency หนึ่งจะรันพร้อมกันได้มากที่สุด N ครั้ง และผู้เรียกที่ไม่สามารถได้ permit ทันทีจะถูกปฏิเสธแทนที่จะถูกปล่อยให้กองพะเนิน แต่ละตัวอย่างเป็นอิสระในตัวเองและเขียนตามแบบฉบับของแต่ละภาษา
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    class BulkheadFullError extends Error {}
+
+    class Bulkhead {
+      private inFlight = 0;
+      constructor(private readonly limit: number) {}
+
+      async run<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.inFlight >= this.limit) {
+          throw new BulkheadFullError('bulkhead full');
+        }
+        this.inFlight += 1;
+        try {
+          return await fn();
+        } finally {
+          this.inFlight -= 1;
+        }
+      }
+    }
+
+    // One compartment per dependency — sized independently.
+    const catalog = new Bulkhead(8);
+    const reviews = new Bulkhead(4);
+    const recs = new Bulkhead(2);
+
+    const recommendations = await recs
+      .run(() => recsClient.fetch(productId))
+      .catch(() => []); // recommendations saturated → degrade, do not block catalog
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import asyncio
+    from typing import Awaitable, Callable, TypeVar
+
+    T = TypeVar("T")
+
+    class BulkheadFullError(Exception):
+        pass
+
+    class Bulkhead:
+        def __init__(self, limit: int):
+            self._sem = asyncio.Semaphore(limit)
+
+        async def run(self, fn: Callable[[], Awaitable[T]]) -> T:
+            # Reject immediately instead of queuing when full.
+            if self._sem.locked():
+                raise BulkheadFullError("bulkhead full")
+            acquired = self._sem.acquire()
+            await asyncio.wait_for(acquired, timeout=0)
+            try:
+                return await fn()
+            finally:
+                self._sem.release()
+
+    # One compartment per dependency — sized independently.
+    catalog = Bulkhead(8)
+    reviews = Bulkhead(4)
+    recs = Bulkhead(2)
+
+    try:
+        recommendations = await recs.run(lambda: recs_client.fetch(product_id))
+    except BulkheadFullError:
+        recommendations = []  # degrade, do not block catalog
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var ErrBulkheadFull = errors.New("bulkhead full")
+
+    // A buffered channel of tokens is an idiomatic Go semaphore.
+    type Bulkhead struct {
+        tokens chan struct{}
+    }
+
+    func NewBulkhead(limit int) *Bulkhead {
+        return &Bulkhead{tokens: make(chan struct{}, limit)}
+    }
+
+    func (b *Bulkhead) Run(fn func() error) error {
+        select {
+        case b.tokens <- struct{}{}: // acquire a permit, or...
+            defer func() { <-b.tokens }()
+            return fn()
+        default: // ...reject immediately when full.
+            return ErrBulkheadFull
+        }
+    }
+
+    // One compartment per dependency — sized independently.
+    var (
+        catalog = NewBulkhead(8)
+        reviews = NewBulkhead(4)
+        recs    = NewBulkhead(2)
+    )
+
+    if err := recs.Run(func() error { return fetchRecs(productID) }); err != nil {
+        recommendations = nil // degrade, do not block catalog
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::future::Future;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    pub struct Bulkhead {
+        sem: Arc<Semaphore>,
+    }
+
+    impl Bulkhead {
+        pub fn new(limit: usize) -> Self {
+            Self { sem: Arc::new(Semaphore::new(limit)) }
+        }
+
+        pub async fn run<T, F, Fut>(&self, fn_: F) -> Result<T, &'static str>
+        where
+            F: FnOnce() -> Fut,
+            Fut: Future<Output = T>,
+        {
+            // try_acquire rejects immediately instead of queuing when full.
+            match self.sem.clone().try_acquire_owned() {
+                Ok(_permit) => Ok(fn_().await), // permit released on drop
+                Err(_) => Err("bulkhead full"),
+            }
+        }
+    }
+
+    // One compartment per dependency — sized independently.
+    let catalog = Bulkhead::new(8);
+    let reviews = Bulkhead::new(4);
+    let recs = Bulkhead::new(2);
+
+    let recommendations = recs
+        .run(|| fetch_recs(product_id))
+        .await
+        .unwrap_or_default(); // degrade, do not block catalog
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เกิดขึ้นตามมา
+
+สิ่งที่คุณได้รับ:
+
+- **การแยกความผิดพลาด (fault isolation)** dependency ที่ช้าหรือล้มเหลวจะกินได้มากที่สุดเพียงทรัพยากรของช่องของมันเอง dependency ที่แข็งแรงดียังคงรักษาส่วนแบ่งไว้ ดังนั้นความล้มเหลวหนึ่งจะไม่ลากทั้งบริการลงไปอีกต่อไป
+- **การใช้ทรัพยากรที่คาดเดาได้** ความ concurrency สูงสุดของ dependency แต่ละตัวถูกระบุชัดเจนและมีขอบเขต ซึ่งทำให้การวางแผนกำลังและการ load testing จัดการได้ง่ายขึ้นมาก — คุณรู้กรณีเลวร้ายที่สุดของแต่ละช่อง
+- **การเสื่อมประสิทธิภาพอย่างนุ่มนวล (graceful degradation)** เมื่อช่องเต็ม การเรียกจะถูกปฏิเสธอย่างรวดเร็วและสามารถ fall back ได้ ดังนั้นผู้ใช้จึงได้หน้า product page ที่ไม่มี recommendations แทนที่จะไม่ได้หน้าเลย
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **การกำหนดขนาดแต่ละช่อง** ตอนนี้คุณมีหลาย pool ให้จูนแทนที่จะเป็นอันเดียว ทำให้ช่องเล็กเกินไปแล้วคุณจะปฏิเสธการเรียกที่ dependency ที่แข็งแรงดีน่าจะรับได้ ใหญ่เกินไปมันก็เลิกเป็นขอบเขตที่มีประสิทธิภาพ
+- **การใช้งานสูงสุด (peak utilization) ลดลง** การสำรองกำลังต่อ dependency หมายความว่า permit บางส่วนจะนั่งว่างเมื่อ dependency ของมันเงียบ — คุณแลก throughput ดิบเล็กน้อยกับการแยกตัว ซึ่งปกติแล้วเป็นการแลกที่ดี แต่มันก็เป็นการแลก
+- **ชิ้นส่วนที่ขยับมากขึ้น** pool แยกตาม dependency เพิ่มพื้นผิวของการ config และการ monitoring แต่ละช่องคุ้มค่ากับ metric หนึ่งตัวเพื่อให้คุณเห็นว่าตัวไหนกำลังอิ่มตัว
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Circuit Breaker](/microservices-design-from-zero-to-hero/th/reliability/circuit-breaker/) — bulkhead ควบคุมความเสียหาย จากนั้น breaker จะหยุดเรียก dependency ที่พังโดยสิ้นเชิง
+- [Retry and Timeout](/microservices-design-from-zero-to-hero/th/reliability/retry-and-timeout/) — กำหนดขอบเขตว่าการเรียกแต่ละครั้งจะถือ permit ได้นานแค่ไหน ซึ่งกันไม่ให้ช่องเต็มอยู่ตลอดกาล
+- [Rate Limiting](/microservices-design-from-zero-to-hero/th/reliability/rate-limiting/) — จำกัด *อัตรา* ของงาน ในขณะที่ bulkhead จำกัด *ความ concurrency* ของงาน
+
+<Callout title="ขีดจำกัดความ concurrency ไม่ใช่ rate limit">
+bulkhead จำกัดจำนวนการเรียกที่รัน *ในเวลาเดียวกัน* ไม่ใช่จำนวนต่อวินาที สองอย่างนี้มักถูกสับสน bulkhead ขนาดสองปล่อยให้การเรียกที่รวดเร็วหนึ่งพันครั้งไหลผ่านได้ในหนึ่งวินาทีหากแต่ละครั้งเสร็จเร็ว — มันจะ block ก็ต่อเมื่อมีมากกว่าสองครั้งกำลังทำงานพร้อมกันเท่านั้น เลือกใช้ bulkhead เมื่อคุณต้องการควบคุมว่า dependency หนึ่งจะถือทรัพยากรที่แชร์กันได้มากเพียงใดในคราวเดียว เลือกใช้ rate limiting เมื่อคุณต้องการจำกัด throughput ตามเวลา
+</Callout>
+
+export const quizBulkhead = [
+  {
+    q: 'bulkhead pattern แยกอะไร?',
+    options: [
+      'network packet ระหว่างบริการ',
+      'ทรัพยากรเช่น thread pool, connection pool หรือ permit ของ semaphore แยกตาม dependency',
+      'database transaction ข้ามบริการ',
+      'ข้อความ log ตามระดับความรุนแรง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'bulkhead pattern ได้ชื่อมาจากไหน?',
+    options: [
+      'ประเภทหนึ่งของ network firewall',
+      'ช่องกันน้ำของเรือ ซึ่งกันไม่ให้รอยรั่วจมทั้งลำเรือ',
+      'อัลกอริทึม load-balancing',
+      'หน่วยของพื้นที่จัดเก็บฐานข้อมูล',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'bulkhead ป้องกัน dependency ที่ช้าตัวเดียวไม่ให้ล้มทั้งบริการได้อย่างไร?',
+    options: [
+      'มัน retry dependency ที่ช้าจนกว่ามันจะตอบสนอง',
+      'มันจำกัดทรัพยากรที่ dependency นั้นกินได้ ดังนั้น dependency อื่นจึงรักษาส่วนแบ่งของตัวเองไว้',
+      'มัน restart dependency ที่ช้าโดยอัตโนมัติ',
+      'มัน route traffic ทั้งหมดออกจากบริการ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'bulkhead ต่างจาก rate limiter อย่างไร?',
+    options: [
+      'bulkhead จำกัดความ concurrency (การเรียกที่กำลังทำงานพร้อมกัน) ส่วน rate limiter จำกัด throughput ตามเวลา',
+      'มันเป็นสองชื่อของสิ่งเดียวกัน',
+      'bulkhead ทำงานเฉพาะกับฐานข้อมูลเท่านั้น',
+      'rate limiter แยก thread ในขณะที่ bulkhead นับ request ต่อวินาที',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="reliability/bulkhead" questions={quizBulkhead} />
+
+<ProgressTracker client:visible id="reliability/bulkhead" />

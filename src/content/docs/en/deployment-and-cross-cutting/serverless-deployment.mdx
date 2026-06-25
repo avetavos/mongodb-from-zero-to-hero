@@ -1,0 +1,141 @@
+---
+title: Serverless Deployment
+description: 'Run a service as functions on a platform that manages the servers for you: code runs only in response to a request or event, scales from zero to many instances automatically, and you pay per invocation — at the price of cold starts, runtime limits, and platform lock-in.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Some of your services do real but bursty work. An image-thumbnailing service runs only when someone uploads a photo. A webhook handler fires a few times an hour. A nightly report generator runs once a day. With the container model, each of these still needs at least one replica running around the clock, consuming memory and a slot in the cluster, waiting for work that arrives in spikes.
+
+You are paying — in money and in operational attention — to keep idle processes warm and to patch the machines underneath them. For workloads that are event-driven and spiky, that feels like the wrong default. You would rather the service simply not exist until there is work for it to do.
+
+## Problem
+
+You want to run a piece of business logic without provisioning, patching, or scaling any servers yourself. You want it to scale to **zero** when idle so it costs nothing, and to scale **up automatically**, instance per concurrent request, when a burst arrives — without you configuring an autoscaler. And you want to pay only for the time the code actually runs, not for reserved capacity.
+
+So the forces are: eliminate server operations and idle cost entirely, while still scaling elastically with demand — accepting that you give up control over the runtime in return.
+
+## Solution
+
+Adopt **serverless deployment**, also called Functions as a Service (FaaS). You package your logic as a **function** and hand it to a platform such as AWS Lambda, Google Cloud Functions, or Azure Functions. You do not manage any servers; the platform provisions, patches, and scales the execution environment for you.
+
+The function is bound to a **trigger** — an HTTP request, a message on a queue, a file upload, a timer. When a trigger fires, the platform spins up an instance of your function, runs it, and tears it down (or keeps it warm briefly for reuse). When many triggers fire at once, the platform runs many instances in parallel, one per concurrent invocation. When none fire, nothing runs and you pay nothing.
+
+The first invocation after idle pays a **cold start**: the platform must create an execution environment and initialize your runtime before your code runs. Subsequent invocations on a warm instance skip that cost.
+
+export const serverlessDiagram = `flowchart LR
+  Up[Image uploaded] -->|event| Plat[FaaS platform]
+  Plat -->|invoke| F1[function instance 1]
+  Plat -->|invoke| F2[function instance 2]
+  Plat -->|invoke| F3[function instance 3]
+  F1 --> Store[(Thumbnail store)]
+  F2 --> Store
+  F3 --> Store
+  Idle[No events] -.->|scales to zero| Plat`;
+
+<Mermaid code={serverlessDiagram} title="An event triggers the platform, which spins up one function instance per concurrent invocation and scales back to zero when idle" />
+
+## Example
+
+You describe the function declaratively: its runtime, the handler entry point, its trigger, and its resource limits. The platform takes it from there — there is no server, replica count, or operating system for you to manage.
+
+```yaml
+functions:
+  generate-thumbnail:
+    runtime: nodejs20
+    handler: src/handler.onUpload
+    memory: 512MB
+    timeout: 30s
+    environment:
+      THUMBNAIL_BUCKET: thumbnails-prod
+    trigger:
+      type: object-storage
+      bucket: uploads-prod
+      event: object.created
+    concurrency:
+      maxInstances: 100
+      reservedInstances: 0   # scale all the way to zero when idle
+```
+
+The platform reads this and, on each `object.created` event in the uploads bucket, invokes `onUpload`, scaling from zero up to 100 parallel instances as the upload rate demands, then back to zero when the bucket goes quiet.
+
+## Resulting context
+
+What you gain:
+
+- **No server operations.** There is no host to provision, patch, or scale. The platform owns the operating system, the runtime upgrades, and the capacity planning.
+- **Scale to zero, pay per use.** Idle workloads cost nothing, and you pay for execution time rather than reserved capacity — a strong fit for bursty, event-driven, or infrequent tasks.
+- **Elastic by default.** A traffic spike is met with more instances automatically, with no autoscaler to tune.
+
+What it costs you:
+
+- **Cold starts.** The first request after idle waits while the platform initializes an environment, which hurts latency-sensitive and rarely invoked endpoints.
+- **Runtime limits.** Functions face caps on execution time, memory, and package size, and are typically stateless and short-lived — long-running or stateful workloads fit poorly.
+- **Lock-in and harder local testing.** Triggers, packaging, and APIs are platform-specific, so portability and faithful local reproduction are weaker than with plain containers.
+
+A practical rule: reach for serverless when the work is event-driven, spiky, or infrequent and latency tolerance is reasonable; keep steady, latency-critical, or long-running services on containers.
+
+## Related patterns
+
+- [Service per Container](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-per-container/) — the alternative runtime model for steady, long-lived services you would rather control.
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/externalized-configuration/) — functions still take their settings from injected environment values, not baked-in constants.
+- [Microservice Chassis](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/microservice-chassis/) — even functions benefit from a shared baseline of logging, metrics, and config.
+
+<Callout title="Serverless is a runtime choice, not an architecture">
+"Serverless" does not mean there are no servers — it means you do not manage them. It is one way to run a service, sitting alongside containers, not a replacement for sound service boundaries. Choose it per workload: a thumbnailer or webhook handler is a great fit; a low-latency request path that must always be warm usually is not.
+</Callout>
+
+export const quizServerless = [
+  {
+    q: 'What does "serverless" actually mean?',
+    options: [
+      'There are no servers involved at all',
+      'You run your logic as functions on a platform that provisions, patches, and scales the servers for you',
+      'The service runs entirely in the browser',
+      'You must manage your own autoscaler',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a cold start?',
+    options: [
+      'A function that fails on its first run',
+      'The latency of initializing a new execution environment before your code runs after a period of idleness',
+      'A deployment that happens during off-hours',
+      'A function that has run out of memory',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which workload is the best fit for serverless deployment?',
+    options: [
+      'A latency-critical request path that must always respond in single-digit milliseconds',
+      'A long-running stateful process that holds connections for hours',
+      'A bursty, event-driven task such as generating a thumbnail when a file is uploaded',
+      'A service that must run continuously at a fixed, steady load',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which is a genuine drawback of serverless?',
+    options: [
+      'You must patch the operating system yourself',
+      'Cold starts, runtime limits, and platform-specific lock-in that weakens portability',
+      'It can never scale beyond one instance',
+      'It always costs more than a container even when idle',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/serverless-deployment" questions={quizServerless} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/serverless-deployment" />

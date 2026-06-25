@@ -1,0 +1,206 @@
+---
+title: Microservice Chassis
+description: 'Give every new service the same built-in baseline — configuration, structured logging, metrics, health checks, and service discovery — by starting it on a shared framework or chassis, so teams write business logic instead of reinventing the same plumbing in each service.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Every service you build needs the same unglamorous machinery before it can do anything useful. It must load its configuration, set up structured logging with request correlation, expose metrics in the format your monitoring expects, answer health and readiness probes for the orchestrator, and register itself for discovery. None of this is business logic, yet it is a precondition for the business logic to run safely.
+
+When you wrote one service, you assembled this plumbing once. By the tenth service you notice the same hundreds of lines being copied, pasted, and quietly diverging: one service exposes `/healthz`, another `/health`; one logs JSON, another plain text; metrics are named inconsistently. The cross-cutting baseline is reimplemented, slightly differently, in every service.
+
+## Problem
+
+You want every new service to start life with configuration, logging, metrics, health checks, and discovery already wired in and consistent across the fleet — so that a service exposes the same health endpoint, emits logs in the same shape, and reports metrics with the same names as every other service. You want a developer creating a new service to write business logic on day one, not spend a week reassembling boilerplate. And you want to upgrade that baseline in one place rather than in twenty repositories.
+
+So the forces are: a consistent, ready-made operational baseline in every service, with minimal per-service effort and a single place to evolve it.
+
+## Solution
+
+Build a **microservice chassis**: a framework, library, or base that bundles the cross-cutting concerns so a new service inherits them. The chassis owns the plumbing — it reads configuration, configures structured logging, registers a metrics endpoint, mounts health and readiness probes, and handles discovery registration — and exposes a small surface where you plug in the business logic.
+
+The developer's job shrinks to: start from the chassis, add the routes and domain logic, and ship. Everything operational is already present and identical to every other service built on the chassis. Often the chassis is paired with a **service template** — a starter repository, generator, or skeleton — so creating a new service means generating from the template and filling in the business code.
+
+Because the baseline lives in one shared component, improving it (a new metrics field, a tightened log format, a better health check) is one change you roll out by bumping the chassis version across services, rather than editing each repository by hand.
+
+export const chassisDiagram = `flowchart TB
+  subgraph Service[A service built on the chassis]
+    direction TB
+    Biz[Business logic: routes and domain rules]
+    subgraph Chassis[Microservice chassis]
+      Cfg[Config loading]
+      Log[Structured logging]
+      Met[Metrics endpoint]
+      Health[Health and readiness probes]
+      Disc[Service discovery registration]
+    end
+    Biz --> Chassis
+  end
+  Chassis --> Plat[Platform: orchestrator, monitoring, registry]`;
+
+<Mermaid code={chassisDiagram} title="The chassis wraps the business logic, providing config, logging, metrics, health, and discovery; the developer adds only the domain code" />
+
+## Example
+
+Here a service is created on the chassis. The single bootstrap call wires up config, logging, metrics, health, and discovery; the only thing the developer adds is the route that carries business meaning. Each example is idiomatic to its language.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { createService } from '@acme/chassis';
+
+    // The chassis loads config, sets up logging, metrics,
+    // /health, /ready, and registers the service for discovery.
+    const app = createService({ name: 'order-service' });
+
+    // Developer adds only the business logic.
+    app.get('/orders/:id', async (req, res) => {
+      const order = await orderRepo.find(req.params.id);
+      res.json(order);
+    });
+
+    app.start();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from acme_chassis import create_service
+
+    # The chassis wires config, logging, metrics,
+    # /health, /ready, and discovery registration.
+    app = create_service(name="order-service")
+
+    # Developer adds only the business logic.
+    @app.get("/orders/{order_id}")
+    async def get_order(order_id: str):
+        return await order_repo.find(order_id)
+
+    app.start()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    package main
+
+    import "github.com/acme/chassis"
+
+    func main() {
+        // The chassis sets up config, logging, metrics,
+        // /health, /ready, and discovery registration.
+        app := chassis.NewService("order-service")
+
+        // Developer adds only the business logic.
+        app.Get("/orders/{id}", func(c *chassis.Ctx) error {
+            order, err := orderRepo.Find(c.Param("id"))
+            if err != nil {
+                return err
+            }
+            return c.JSON(order)
+        })
+
+        app.Start()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use acme_chassis::Service;
+
+    #[tokio::main]
+    async fn main() {
+        // The chassis wires config, logging, metrics,
+        // /health, /ready, and discovery registration.
+        let mut app = Service::new("order-service");
+
+        // Developer adds only the business logic.
+        app.get("/orders/:id", |ctx| async move {
+            let order = order_repo.find(ctx.param("id")).await?;
+            ctx.json(order)
+        });
+
+        app.start().await;
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Consistency for free.** Every service exposes the same health endpoint, log shape, and metric names, because one shared component provides them — observability and operability stop being per-team guesswork.
+- **Faster service creation.** A new service starts with the operational baseline already present, so developers write domain code instead of reassembling plumbing.
+- **One place to evolve the baseline.** Improvements to logging, metrics, or health land in the chassis and roll out by version bump, not by editing every repository.
+
+What it costs you:
+
+- **Per-language effort.** A polyglot fleet needs a chassis per language, and keeping them feature-equivalent is real, ongoing work.
+- **Coupling and versioning friction.** Every service depends on the chassis; a breaking change forces a coordinated upgrade, and a stale chassis can hold a service back.
+- **Risk of bloat.** A chassis that tries to do everything becomes heavy and opinionated. Keep it focused on genuinely cross-cutting concerns, not business helpers.
+
+A practical note: a chassis handles *in-process* concerns (config, logging, metrics, health), while a [Service Mesh](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-mesh/) handles *between-process* networking. Many teams use both.
+
+## Related patterns
+
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/externalized-configuration/) — the chassis is usually what reads and applies the externalized config.
+- [Service Mesh](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-mesh/) — handles the networking cross-cutting concerns the chassis leaves to the sidecar.
+- [Service per Container](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-per-container/) — a chassis-built service is still packaged and run as one service per container.
+
+<Callout title="A chassis is a starting point, not a cage">
+The goal is to remove undifferentiated plumbing, not to dictate how every service is built. Keep the chassis focused on truly cross-cutting concerns — config, logging, metrics, health, discovery — and let services keep their freedom over domain design. The day the chassis starts mandating how you model orders, it has overreached.
+</Callout>
+
+export const quizChassis = [
+  {
+    q: 'What is a microservice chassis?',
+    options: [
+      'A physical server rack that holds the service machines',
+      'A shared framework or base that bundles cross-cutting concerns — config, logging, metrics, health, discovery — so each new service inherits them',
+      'A database shared by all services',
+      'A tool that compiles services into containers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What problem does the chassis primarily solve?',
+    options: [
+      'It removes the need for a database',
+      'It stops the same logging, metrics, health, and config plumbing from being reimplemented, inconsistently, in every service',
+      'It encrypts traffic between services',
+      'It replaces the orchestrator',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does a chassis differ from a service mesh?',
+    options: [
+      'They are the same thing under different names',
+      'A chassis handles in-process concerns like config and logging; a mesh handles between-process networking like mTLS and retries',
+      'A chassis runs in the control plane and a mesh runs in the database',
+      'A chassis only works for serverless functions',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine cost of the chassis pattern?',
+    options: [
+      'Services can no longer expose health checks',
+      'A polyglot fleet needs one chassis per language, and every service is coupled to the chassis version',
+      'It forces all services into a single shared database',
+      'It prevents services from being deployed independently',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/microservice-chassis" questions={quizChassis} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/microservice-chassis" />

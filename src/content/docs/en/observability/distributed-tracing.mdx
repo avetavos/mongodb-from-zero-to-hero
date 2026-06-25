@@ -1,0 +1,220 @@
+---
+title: Distributed Tracing
+description: 'Give each external request a trace id, propagate it plus a span id across every hop, and reconstruct the full call tree with timing — so you can see exactly where a slow or failing request spent its time.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Aggregated, correlated logs let you find every line of one request and read them in order. That answers *what happened*. But there is a question logs answer poorly: *where did the time go?* A checkout that takes four seconds crossed the gateway, the order service, the payment service, and the inventory service. Each of those may also have called a database or a cache. Somewhere in that tree of nested calls, three of the four seconds were spent — but a flat list of log lines, even perfectly correlated, does not show you the shape of the tree or the duration of each branch.
+
+## Problem
+
+A correlation id tells you that a set of log lines belong together, but not how they *relate*. It does not say that the payment call happened *inside* the order call, that the inventory call ran *after* payment returned, or that the database query under inventory took 2.8 of the request's 4 seconds. Without that causal, timed structure you are back to eyeballing timestamps across services to guess at the critical path — and timestamps from different machines do not even agree perfectly.
+
+So how do you reconstruct the full nested call tree of one request, with the duration of every hop, across services that each only see their own slice?
+
+## Solution
+
+**Distributed tracing** models a request as a **trace** made of **spans**. A trace is the whole journey of one external request; a span is a single unit of work within it — an incoming request handled, an outbound call made, a query run. Each span records a start time, a duration, and a name, and carries two ids: a **trace id** shared by every span in the request, and a **span id** unique to itself. Each span also names its **parent span id**, and those parent links are what reconstruct the tree.
+
+The mechanism that makes this work across process boundaries is **context propagation**. When a service makes an outbound call, it injects the current trace id and its own span id into the request — typically as headers following a standard like W3C Trace Context (`traceparent`). The receiving service reads those headers, treats the incoming span id as its parent, starts a new span under it, and so on down the tree. Every service reports its spans to a central collector, which stitches them back together by trace id and parent links into a single timed waterfall.
+
+export const traceDiagram = `sequenceDiagram
+  participant GW as Gateway
+  participant O as Order Service
+  participant P as Payment Service
+  participant I as Inventory Service
+  GW->>O: POST /checkout\\ntraceparent: trace=abc, span=1
+  Note over O: start span 2 (parent 1)
+  O->>P: charge()\\ntraceparent: trace=abc, span=2
+  Note over P: start span 3 (parent 2)
+  P-->>O: ok (span 3 ends, 120ms)
+  O->>I: reserve()\\ntraceparent: trace=abc, span=2
+  Note over I: start span 4 (parent 2)
+  I-->>O: ok (span 4 ends, 2800ms)
+  O-->>GW: 200 (span 2 ends, 2950ms)`;
+
+<Mermaid code={traceDiagram} title="Each hop reads the incoming traceparent, starts a child span, and propagates trace plus its own span id onward — the collector rebuilds the tree from trace id and parent links" />
+
+## Example
+
+The heart of tracing is propagation: read trace context from the incoming request, and inject it into every outbound call. These examples read an incoming `traceparent` header and pass it on, the minimum that keeps a trace unbroken across a hop.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import express from 'express';
+    import { fetch } from 'undici';
+
+    const app = express();
+
+    app.post('/checkout', async (req, res) => {
+      // Read incoming trace context (or start a new trace at the edge).
+      const incoming = req.header('traceparent') ?? newTraceparent();
+      const { traceId, parentSpanId } = parseTraceparent(incoming);
+
+      // This service's own span becomes the parent of downstream calls.
+      const mySpanId = randomSpanId();
+      const outgoing = formatTraceparent(traceId, mySpanId);
+
+      // Propagate on every outbound call.
+      await fetch('http://payment/charge', {
+        method: 'POST',
+        headers: { traceparent: outgoing },
+      });
+
+      res.sendStatus(200);
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import httpx
+    from fastapi import FastAPI, Request
+
+    app = FastAPI()
+
+    @app.post("/checkout")
+    async def checkout(request: Request):
+        # Read incoming trace context (or start a new trace at the edge).
+        incoming = request.headers.get("traceparent") or new_traceparent()
+        trace_id, parent_span_id = parse_traceparent(incoming)
+
+        # This service's own span becomes the parent of downstream calls.
+        my_span_id = random_span_id()
+        outgoing = format_traceparent(trace_id, my_span_id)
+
+        # Propagate on every outbound call.
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                "http://payment/charge",
+                headers={"traceparent": outgoing},
+            )
+
+        return {"status": "ok"}
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func checkout(w http.ResponseWriter, r *http.Request) {
+        // Read incoming trace context (or start a new trace at the edge).
+        incoming := r.Header.Get("traceparent")
+        if incoming == "" {
+            incoming = newTraceparent()
+        }
+        traceID, parentSpanID := parseTraceparent(incoming)
+        _ = parentSpanID
+
+        // This service's own span becomes the parent of downstream calls.
+        mySpanID := randomSpanID()
+        outgoing := formatTraceparent(traceID, mySpanID)
+
+        // Propagate on every outbound call.
+        req, _ := http.NewRequest("POST", "http://payment/charge", nil)
+        req.Header.Set("traceparent", outgoing)
+        http.DefaultClient.Do(req)
+
+        w.WriteHeader(http.StatusOK)
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use axum::http::HeaderMap;
+
+    async fn checkout(headers: HeaderMap) -> axum::http::StatusCode {
+        // Read incoming trace context (or start a new trace at the edge).
+        let incoming = headers
+            .get("traceparent")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .unwrap_or_else(new_traceparent);
+        let (trace_id, _parent_span_id) = parse_traceparent(&incoming);
+
+        // This service's own span becomes the parent of downstream calls.
+        let my_span_id = random_span_id();
+        let outgoing = format_traceparent(&trace_id, &my_span_id);
+
+        // Propagate on every outbound call.
+        let client = reqwest::Client::new();
+        let _ = client
+            .post("http://payment/charge")
+            .header("traceparent", outgoing)
+            .send()
+            .await;
+
+        axum::http::StatusCode::OK
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+In practice you rarely write this propagation by hand: an instrumentation library (such as one built on OpenTelemetry) injects and extracts trace context, times spans, and exports them for you. Understanding the mechanism matters most when a trace mysteriously breaks at one hop.
+
+## Resulting context
+
+What you gain:
+
+- **The critical path, made visible.** A trace waterfall shows the duration of every hop, so you can see at a glance that 2.8 of 4 seconds were spent in one inventory query rather than guessing across log timestamps.
+- **Causal structure, not just correlation.** Parent links reconstruct *which call happened inside which*, recovering the nested view a single stack trace gave you in the monolith.
+- **Cross-service error attribution.** When a request fails, the trace points to the exact span and service where it broke, not just to a generic gateway `500`.
+
+What it costs you:
+
+- **Propagation must be unbroken.** A single hop that drops the trace context — an un-instrumented client, a queue that does not carry headers, a thread boundary — splits the trace in two and hides the tree past that point.
+- **Sampling is usually mandatory.** Recording every span of every request at high traffic is expensive, so you sample. Choose your sampling strategy deliberately, because a head-based sample can miss the rare failing request you most wanted to see.
+- **Instrumentation effort.** Every service, client library, and async boundary needs to participate; mixed languages and frameworks make uniform coverage real work.
+
+## Related patterns
+
+- [Log Aggregation](/microservices-design-from-zero-to-hero/en/observability/log-aggregation/) — put the trace id into every log line and traces and logs cross-reference each other.
+- [Application Metrics](/microservices-design-from-zero-to-hero/en/observability/application-metrics/) — metrics tell you latency rose; traces tell you *where* it rose.
+
+<Callout title="Logs, traces, and metrics are one toolkit">
+These three signals answer different questions and are strongest together. Metrics alert you that p99 latency jumped. A trace from a slow request shows you the hop that caused it. Aggregated logs, filtered by that trace's id, show you the error message inside that hop. Stamp the same trace id across all three and you can move fluidly between them during an incident instead of starting each investigation from scratch.
+</Callout>
+
+export const quizTracing = [
+  {
+    q: 'What is the relationship between a trace and a span?',
+    options: [
+      'A span is the whole request; a trace is one unit of work inside it',
+      'A trace is the whole request journey; a span is a single timed unit of work within it',
+      'They are two names for the same thing',
+      'A trace is a log line; a span is a metric',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What reconstructs the nested call tree of a trace?',
+    options: [
+      'The wall-clock timestamps on each log line',
+      'Each span recording its parent span id, plus a shared trace id, stitched together by the collector',
+      'The order in which services were deployed',
+      'The size of each request payload',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What happens if one hop fails to propagate the trace context?',
+    options: [
+      'Nothing; the collector fills in the gap automatically',
+      'The trace splits and the call tree past that hop is lost',
+      'All metrics for that service stop working',
+      'The request fails with an HTTP 500',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="observability/distributed-tracing" questions={quizTracing} />
+
+<ProgressTracker client:visible id="observability/distributed-tracing" />

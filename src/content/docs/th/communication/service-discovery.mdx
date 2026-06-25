@@ -1,0 +1,151 @@
+---
+title: Service Discovery
+description: 'เมื่อ instance ของบริการเริ่ม หยุด และย้ายที่อยู่ ผู้เรียกไม่สามารถ hard-code ที่อยู่ได้อีกต่อไป service discovery ช่วยให้ client ค้นหาตำแหน่งบนเครือข่ายของ instance ที่ยังมีชีวิตอยู่ผ่าน registry — แบบ client-side หรือ server-side'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+บริการ Order ต้องเรียกบริการ Customer ใน deployment ที่ตายตัว คุณอาจ hard-code `http://customer-service:8080` ลงไปแล้วก็จบ แต่ในสภาพแวดล้อมสมัยใหม่ บริการรันเป็น instance จำนวนมากภายใต้ autoscaling, container ถูกจัดตารางใหม่ข้ามโฮสต์ และแพลตฟอร์มกำหนดตำแหน่งบนเครือข่ายแบบไดนามิก ชุดของ instance Customer ที่ยังมีชีวิตอยู่ — รวมถึง IP address และพอร์ตของพวกมัน — เปลี่ยนไปทุกนาที ที่อยู่ที่ผู้เรียกต้องการนั้นไม่มีอยู่เป็นค่าคงที่ที่ไหนเลย
+
+## ปัญหา
+
+ผู้เรียกต้องได้มาซึ่งตำแหน่งบนเครือข่ายของ instance บริการ แต่ตำแหน่งนั้นเป็นแบบไดนามิก: instance เกิดและดับเมื่อมันขยายขนาด crash, redeploy และย้ายที่อยู่ ผู้เรียกยังต้องการกระจายคำขอของตนไปยัง instance ที่มีสุขภาพดีทั้งหมด และต้องหลีกเลี่ยงการส่งทราฟฟิกไปยัง instance ที่ตายไปแล้ว การ hard-code ที่อยู่เป็นไปไม่ได้ และไฟล์ config แบบ static ก็ล้าสมัยทันทีที่ instance รีสตาร์ทบนโฮสต์ใหม่ ผู้เรียกจะค้นหา instance ที่ยังมีชีวิตอยู่เพื่อพูดด้วยได้อย่างเชื่อถือได้อย่างไร?
+
+## ทางออก
+
+หัวใจสำคัญคือ **service registry**: ฐานข้อมูลของบริการ, instance ของพวกมัน, และตำแหน่งกับสุขภาพของแต่ละ instance instance เข้าสู่ registry ได้สองวิธี:
+
+- **Self-registration** — แต่ละ instance ลงทะเบียนตัวเองตอนเริ่มทำงาน ส่ง heartbeat เป็นระยะ และถอนการลงทะเบียนตอนปิด เรียบง่าย แต่ผูกมัดทุกบริการเข้ากับ API ของ registry
+- **Third-party registration** — registrar ที่แยกต่างหาก (มักเป็นแพลตฟอร์ม deployment) เฝ้าดู instance และอัปเดต registry แทนบริการ ดังนั้นโค้ดของบริการจึงไม่ต้องรับรู้ถึงมัน
+
+เมื่อมี registry แล้ว ผู้เรียกเข้าถึง instance ได้สองวิธี
+
+**Client-side discovery** client สอบถาม registry ได้รายการ instance ที่มีสุขภาพดี เลือกหนึ่งตัว (ทำ load-balancing ใน client เอง) แล้วเรียกมันโดยตรง
+
+export const clientSide = `sequenceDiagram
+  participant C as Client (Order Service)
+  participant R as Service Registry
+  participant I as Customer Instance
+  C->>R: where is customer-service?
+  R-->>C: [10.0.1.7:8080, 10.0.2.3:8080]
+  C->>C: pick one (load-balance)
+  C->>I: GET /customers/42
+  I-->>C: 200 OK`;
+
+<Mermaid code={clientSide} title="Client-side discovery — client สอบถาม registry และทำ load-balancing ข้าม instance ด้วยตัวเอง" />
+
+**Server-side discovery** client เรียกที่อยู่ที่เสถียร — router หรือ load balancer — ซึ่งสอบถาม registry เลือก instance และส่งต่อคำขอ client ไม่รู้อะไรเกี่ยวกับ registry เลย
+
+export const serverSide = `sequenceDiagram
+  participant C as Client (Order Service)
+  participant LB as Load Balancer / Router
+  participant R as Service Registry
+  participant I as Customer Instance
+  C->>LB: GET /customers/42
+  LB->>R: where is customer-service?
+  R-->>LB: healthy instances
+  LB->>I: forward request
+  I-->>LB: 200 OK
+  LB-->>C: 200 OK`;
+
+<Mermaid code={serverSide} title="Server-side discovery — load balancer ที่ที่อยู่ที่เสถียร resolve registry และส่งต่อคำขอ" />
+
+## ตัวอย่าง
+
+รายการ registry และบันทึกเกี่ยวกับ load-balancer registry เก็บตำแหน่งและสุขภาพของแต่ละ instance; load balancer จัดเส้นทางตามชื่อบริการไปยัง instance ใดก็ตามที่มีสุขภาพดีอยู่ในขณะนั้น
+
+```text
+# Service registry entry for customer-service
+service:   customer-service
+instances:
+  - id: customer-7a3f   address: 10.0.1.7:8080   health: passing   ttl: 10s
+  - id: customer-9b2c   address: 10.0.2.3:8080   health: passing   ttl: 10s
+  - id: customer-4d1e   address: 10.0.3.9:8080   health: critical  ttl: 10s   # excluded from routing
+
+# Load balancer routing note (server-side discovery)
+# Clients call the stable name "customer-service".
+# The LB resolves it against the registry and forwards
+# only to instances whose health == passing, spreading
+# load round-robin. An instance that misses its TTL
+# heartbeat is marked critical and dropped automatically.
+```
+
+## บริบทผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **การจัดเส้นทางที่ไดนามิกและทนทาน** ผู้เรียกเข้าถึง instance ที่มีสุขภาพดีในขณะนั้นได้เสมอ ไม่ว่า instance จะขยายขนาด crash หรือย้ายที่อยู่บ่อยแค่ไหน instance ที่ตายแล้วจะหลุดออกจากการหมุนเวียนโดยอัตโนมัติ
+- **load balancing ในตัว** คำขอกระจายไปยัง instance ที่มีสุขภาพดีทั้งหมด ไม่ว่า client (client-side) หรือ router (server-side) จะเป็นผู้กระจาย
+
+สิ่งที่คุณต้องจ่าย:
+
+- **registry เป็นโครงสร้างพื้นฐานที่สำคัญยิ่ง** มันต้องพร้อมใช้งานสูงและสอดคล้องกันมากพอที่จะเชื่อถือได้; ถ้ามันดับหรือคืนข้อมูลที่ล้าสมัย ผู้เรียกก็จะจัดเส้นทางไปยัง instance ที่ตายแล้ว มันมักถูกรันเป็น cluster ที่ทำ replication
+- **การแลกได้แลกเสียระหว่างสองรูปแบบ** client-side discovery มีประสิทธิภาพ (ไม่มี hop เพิ่ม) แต่ใส่ logic การ discovery และ load-balancing เข้าไปในทุก client และทุกภาษาที่คุณใช้ server-side discovery ทำให้ client เรียบง่าย แต่เพิ่ม network hop และองค์ประกอบอีกตัวให้ต้องดำเนินการ
+- **การปรับจูน heartbeat** health check และ TTL ต้องถูกปรับจูน: ช้าเกินไปแล้ว instance ที่ตายแล้วก็ค้างอยู่; ก้าวร้าวเกินไปแล้วการสะดุดชั่วครู่ก็ขับ instance ที่มีสุขภาพดีออกไป
+
+แพลตฟอร์มจำนวนมาก — เช่น container orchestrator ที่มี DNS ในตัวและ service mesh — มอบ server-side discovery มาให้พร้อมใช้งานทันที ดังนั้น registry และการจัดเส้นทางจึงเป็นส่วนหนึ่งของโครงสร้างพื้นฐานมากกว่าจะเป็นโค้ดแอปพลิเคชันของคุณ
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Remote Procedure Invocation](/microservices-design-from-zero-to-hero/th/communication/remote-procedure-invocation/) — การเรียกแบบ synchronous ที่ต้องการที่อยู่ instance ที่จะส่งไปหา
+- [API Gateway](/microservices-design-from-zero-to-hero/th/communication/api-gateway/) — พึ่งพา discovery เพื่อจัดเส้นทางไปยัง instance ที่ยังมีชีวิตอยู่ของบริการภายใน
+- [Backends for Frontends](/microservices-design-from-zero-to-hero/th/communication/backends-for-frontends/) — แต่ละ BFF ทำ discovery หาบริการภายในที่มันประกอบขึ้น
+
+<Callout title="คุณอาจมี discovery ฟรีอยู่แล้ว">
+ก่อนจะสร้าง registry ลองตรวจดูว่าแพลตฟอร์มของคุณให้อะไรมาบ้าง container orchestrator มักลงทะเบียนและ health-check pod และเปิดเผยพวกมันภายใต้ชื่อ DNS ที่เสถียรพร้อม load balancing ในตัว — นั่นคือ third-party registration บวกกับ server-side discovery ที่ส่งมาให้คุณ service mesh ก็เพิ่มสิ่งเดียวกันพร้อมการจัดเส้นทางและ retry ที่สมบูรณ์ยิ่งขึ้น เลือกใช้ registry library ที่ชัดเจนต่อเมื่อสภาพแวดล้อมของคุณยังไม่ได้แก้เรื่องนี้ไว้แล้วเท่านั้น
+</Callout>
+
+export const quizDiscovery = [
+  {
+    q: 'เหตุใดผู้เรียกจึงไม่สามารถ hard-code ที่อยู่ของบริการได้ง่าย ๆ?',
+    options: [
+      'เพราะที่อยู่เป็นความลับ',
+      'เพราะ instance เริ่ม หยุด ขยายขนาด และย้ายที่อยู่ ดังนั้นตำแหน่งของพวกมันจึงเปลี่ยนแบบไดนามิก',
+      'เพราะไม่อนุญาตให้ใช้ string ที่ hard-code ใน microservices',
+      'เพราะ registry ห้ามไว้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'บทบาทของ service registry คืออะไร?',
+    options: [
+      'มันเก็บข้อมูลทางธุรกิจของแต่ละบริการ',
+      'มันเป็นฐานข้อมูลของบริการ, instance, ตำแหน่ง และสุขภาพของพวกมัน ที่ผู้เรียกใช้ค้นหา instance ที่ยังมีชีวิตอยู่',
+      'มัน compile โค้ดของบริการ',
+      'มันแทนที่ message broker',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'client-side discovery แตกต่างจาก server-side discovery อย่างไร?',
+    options: [
+      'client-side เข้ารหัสทราฟฟิก; server-side ไม่ทำ',
+      'ใน client-side, client สอบถาม registry และทำ load-balancing เอง; ใน server-side, load balancer ที่ที่อยู่ที่เสถียรทำการค้นหาและส่งต่อ',
+      'client-side ทำงานได้กับ REST เท่านั้น; server-side ได้กับ gRPC เท่านั้น',
+      'ไม่มีความแตกต่าง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรแยก self-registration ออกจาก third-party registration?',
+    options: [
+      'self-registration ใช้ DNS; third-party ใช้ IP address',
+      'ใน self-registration แต่ละ instance ลงทะเบียนและ heartbeat ตัวเอง; ใน third-party registration registrar ที่แยกต่างหากอัปเดต registry แทน instance',
+      'self-registration ใช้กับฐานข้อมูลเท่านั้น',
+      'third-party registration ต้องใช้ circuit breaker',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/service-discovery" questions={quizDiscovery} />
+
+<ProgressTracker client:visible id="communication/service-discovery" />

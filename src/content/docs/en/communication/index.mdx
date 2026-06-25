@@ -1,0 +1,109 @@
+---
+title: Communication in Microservices
+description: 'How services talk to each other: synchronous vs asynchronous styles, one-to-one vs one-to-many interactions, and the patterns that route, decouple, and locate services.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Inside the monolith, two modules collaborated by calling each other's functions. The call was a method invocation on the same stack, in the same process, sharing the same memory. It never failed because of a network, never timed out, never arrived twice, and never lost a message. Latency was measured in nanoseconds and the failure modes were the ordinary failure modes of code.
+
+Once you split those modules into separate services, every collaboration that used to be a function call becomes a message crossing a network. The network is slow compared with memory, it drops and reorders packets, and the service on the other end may be deploying, overloaded, or simply gone. Communication stops being a detail and becomes one of the defining concerns of the whole system.
+
+## Problem
+
+A function call hides several decisions that a service call forces you to make explicitly. Does the caller wait for an answer, or fire and forget? Is the caller talking to exactly one service, or broadcasting to many? How does the caller even find the address of the service it wants, when instances start, stop, and move? And how do you keep a single network hiccup from cascading into an outage that takes down the whole system?
+
+There is no single right answer. The right answer depends on the interaction, and a real system uses several styles at once. This module gives you a vocabulary for those styles and the patterns that implement them.
+
+## Solution
+
+Service interactions vary along two independent axes.
+
+The first axis is **synchronous vs asynchronous**. In a synchronous interaction the caller sends a request and blocks until it receives a response; the two services are coupled in time, because both must be available at the same instant. In an asynchronous interaction the caller hands a message to an intermediary and moves on; the recipient processes it whenever it is ready, so the two services need never be up simultaneously.
+
+The second axis is **one-to-one vs one-to-many**. A one-to-one interaction is a request handled by exactly one instance of one service. A one-to-many interaction is a message that fans out to every interested consumer, so one event can drive many independent reactions.
+
+export const overviewDiagram = `flowchart LR
+  subgraph Sync[Synchronous: caller waits]
+    A[Service A] -->|request| B[Service B]
+    B -->|response| A
+  end
+  subgraph Async[Asynchronous: caller moves on]
+    P[Producer] -->|message| Broker[(Broker)]
+    Broker --> C1[Consumer 1]
+    Broker --> C2[Consumer 2]
+  end`;
+
+<Mermaid code={overviewDiagram} title="Two communication styles — synchronous request/response and asynchronous messaging through a broker" />
+
+Crossing the two axes gives a simple map of interaction styles:
+
+- **Synchronous, one-to-one** — a request/response call to a single service. This is **Remote Procedure Invocation (RPI)**, over REST or gRPC.
+- **Asynchronous, one-to-one** — a command sent to one consumer through a queue, processed when it is ready.
+- **Asynchronous, one-to-many** — an event published to a topic and delivered to every subscriber. Both async styles are **Messaging**.
+
+On top of these raw styles sit patterns that organise communication for the system as a whole:
+
+- **Remote Procedure Invocation** — the simplest style: a typed request/response call, easy to reason about but coupled in time.
+- **Messaging** — communication through a broker, decoupling services in time and enabling broadcast.
+- **API Gateway** — a single entry point that routes, aggregates, and offloads cross-cutting concerns for external clients.
+- **Backends for Frontends** — a separate gateway per client type, each tailored and owned by the client team.
+- **Service Discovery** — how a caller finds the network location of a service instance when instances come and go.
+
+## What this module covers
+
+We begin with the two raw interaction styles — Remote Procedure Invocation and Messaging — because every higher pattern is built from them. Then we look at how external clients reach the system through an API Gateway, how that idea specialises into Backends for Frontends, and finally how any caller locates a live instance through Service Discovery. Each lesson follows the same shape: the situation that leads to the pattern, the forces in tension, what the pattern does, a diagram, an example, and an honest look at what it costs.
+
+## Related patterns
+
+- [Remote Procedure Invocation](/microservices-design-from-zero-to-hero/en/communication/remote-procedure-invocation/) — start here, the simplest style.
+- [Messaging](/microservices-design-from-zero-to-hero/en/communication/messaging/) — the asynchronous alternative.
+
+<Callout title="There is no single best style">
+A mature system mixes styles deliberately. A user clicking "place order" wants an immediate answer, so the edge of the system is often synchronous. But the work that order triggers — billing, shipping, notifications — fans out asynchronously so a slow notification service can never block a sale. Pick the style per interaction, not per system.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does the synchronous vs asynchronous axis describe?',
+    options: [
+      'Whether the message is encrypted in transit',
+      'Whether the caller blocks waiting for a response, coupling the two services in time',
+      'Whether the services are written in the same language',
+      'Whether the data is stored in the same database',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which interaction style is one-to-many?',
+    options: [
+      'A REST request to a single service',
+      'A gRPC call returning one response',
+      'An event published to a topic and delivered to every subscriber',
+      'A command sent to a single queue consumer',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why does a service call differ fundamentally from a function call?',
+    options: [
+      'Because it is always slower to write',
+      'Because it crosses a network that can be slow, drop messages, and find the other side unavailable',
+      'Because it requires a different programming language',
+      'Because functions cannot return values across services',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="communication/index" />

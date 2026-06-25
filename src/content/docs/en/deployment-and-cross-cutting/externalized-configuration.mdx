@@ -1,0 +1,145 @@
+---
+title: Externalized Configuration
+description: 'Keep configuration — endpoints, credentials, feature flags — out of the image and inject it at runtime through environment variables, a config server, or a secrets store, so one immutable artifact runs unchanged in every environment.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You now package each service as an immutable image and promote that exact image from development through staging to production. But a service needs different settings in each of those places: a different database URL, a different message-broker address, different credentials, and feature flags that are on in staging and off in production.
+
+If those settings are baked into the image, you no longer have one artifact — you have one image per environment, each built from the same code but with different values compiled in. The image you tested in staging is not the image you run in production. Worse, baking in a database password means your secret is now sitting in an image layer in a registry, readable by anyone who can pull it.
+
+## Problem
+
+You want a single built image to run unchanged in every environment, so that what you tested is exactly what you ship. That means the environment-specific values — endpoints, credentials, feature flags — cannot live inside the image; they must come from outside it, supplied when the service starts in a particular place. And the sensitive ones, like passwords and tokens, must be handled as secrets, not as plain text sitting in an image or a repository.
+
+So the forces are: one immutable, environment-agnostic artifact, but correct, environment-specific, and secret-safe settings at runtime.
+
+## Solution
+
+Adopt **externalized configuration**: the image contains only code and sensible defaults, and every environment-specific value is **injected at runtime**. The service reads its configuration when it starts (and, for some sources, while it runs) rather than from constants compiled into the build.
+
+There are three common injection mechanisms, often used together:
+
+- **Environment variables** — the platform sets values like a database URL into the service's environment at launch. Simple, universal, and the most common form.
+- **A configuration server** — the service fetches its settings from a central config service at startup, which keeps configuration for the whole fleet in one governed place and can push updates.
+- **A secrets store** — sensitive values live in a dedicated secrets manager and are mounted or fetched at runtime, never written into the image or source control.
+
+The same image, started in staging, picks up staging's values; started in production, it picks up production's. The artifact is identical; only the injected configuration differs.
+
+export const configDiagram = `flowchart LR
+  subgraph Sources[Config sources per environment]
+    Env[Environment variables]
+    CfgSrv[Config server]
+    Sec[Secrets store]
+  end
+  Img[Immutable image: code + defaults] --> Svc[Service at startup]
+  Env -->|inject| Svc
+  CfgSrv -->|fetch| Svc
+  Sec -->|mount / fetch| Svc
+  Svc --> Run[Running service, configured for this environment]`;
+
+<Mermaid code={configDiagram} title="One immutable image; environment variables, a config server, and a secrets store inject per-environment values at startup" />
+
+## Example
+
+The image carries no environment values. The deployment for each environment injects them: plain settings come from environment variables, while the database password is referenced from a secret so it never appears in the manifest or the image.
+
+```yaml
+# Production deployment — same image as staging, different injected values.
+env:
+  - name: SERVICE_ENV
+    value: production
+  - name: ORDER_DB_URL
+    value: postgres://orders-db.prod.internal:5432/orders
+  - name: BROKER_URL
+    value: kafka://broker.prod.internal:9092
+  - name: FEATURE_NEW_CHECKOUT
+    value: "false"
+  - name: ORDER_DB_PASSWORD
+    valueFrom:
+      secretRef:
+        name: order-db-credentials
+        key: password
+```
+
+The service reads these on startup. Promoting to production means deploying the *same* image with this manifest instead of staging's; the password is resolved from the secrets store at launch and never lands in the image layers.
+
+## Resulting context
+
+What you gain:
+
+- **One image, every environment.** A single immutable artifact is promoted unchanged from staging to production, so the thing you tested is exactly the thing you run — no per-environment rebuilds.
+- **Safer secrets.** Credentials live in a secrets store and are injected at runtime, keeping them out of image layers and source control.
+- **Centralized, changeable settings.** With a config server, configuration for the whole fleet lives in one governed place, and some values can be changed without rebuilding or even redeploying.
+
+What it costs you:
+
+- **Secret management is now a real system.** You must operate a secrets store, control access to it, and rotate credentials — externalizing config does not make secrets easy, it makes them explicit.
+- **A startup-time dependency.** If the service fetches config from a server or secrets store, that source becomes something the service depends on to start; it must be highly available and have sensible fallbacks.
+- **Config sprawl and drift.** Settings scattered across env vars, a config server, and secrets can drift between environments. You need conventions, validation at startup, and a single source of truth per concern.
+
+## Related patterns
+
+- [Service per Container](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-per-container/) — externalized configuration is what makes the immutable container image truly environment-agnostic.
+- [Microservice Chassis](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/microservice-chassis/) — the chassis is typically the component that reads and validates the injected configuration.
+- [Serverless Deployment](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/serverless-deployment/) — functions take their settings the same way, from injected values rather than baked-in constants.
+
+<Callout title="Build the artifact once, configure it per place">
+The discipline is simple to state: code and defaults go in the image; everything that changes between environments comes from outside it. Get this right and a single tested artifact flows from staging to production untouched, with secrets supplied safely at the edge. Bake configuration in, and you give up the central promise of immutable deploys.
+</Callout>
+
+export const quizConfig = [
+  {
+    q: 'What is the core idea of externalized configuration?',
+    options: [
+      'Compile a different image for each environment',
+      'Keep environment-specific values out of the image and inject them at runtime, so one image runs everywhere',
+      'Store all configuration in the source code',
+      'Disable configuration entirely in production',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is baking a database password into the image a problem?',
+    options: [
+      'It makes the image too large to deploy',
+      'The secret ends up in an image layer in the registry, readable by anyone who can pull it, and ties the image to one environment',
+      'Passwords cannot be stored as text at all',
+      'It prevents the service from starting',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a common mechanism for injecting configuration at runtime?',
+    options: [
+      'Recompiling the service on each host',
+      'Environment variables, a configuration server, or a secrets store',
+      'Editing the running binary in place',
+      'Hard-coding values in the Dockerfile',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine cost of externalizing configuration?',
+    options: [
+      'You can no longer use the same image across environments',
+      'You must operate a secrets store and a possibly-required config source, and guard against configuration drift between environments',
+      'Feature flags become impossible',
+      'The service can never read configuration at startup',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/externalized-configuration" questions={quizConfig} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/externalized-configuration" />

@@ -1,0 +1,125 @@
+---
+title: What Is Microservices Architecture?
+description: 'A microservices architecture builds an application as a set of small, independently deployable services organized around business capabilities, each owning its own data and collaborating over the network.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+You are about to build, or already operate, a non-trivial server-side application. It exposes APIs to web and mobile clients, runs business logic, and persists data. As the product grows, more developers join, more features ship, and the codebase swells. At some point someone says the word *microservices* in a planning meeting, and you have to decide what that actually means before you can decide whether you want it.
+
+So the first job of this course is plain: agree on what a microservices architecture *is*, before we argue about when it is worth the trouble.
+
+## Problem
+
+The term gets used loosely. People reach for it to mean "small services", "services that talk over HTTP", or simply "the new system we are building". None of those definitions are precise enough to make decisions with. If a microservice just means a small service, how small? If it means services over HTTP, is a monolith calling a third-party API now a microservice?
+
+We need a definition that names the properties that actually matter — the ones that change how you organize teams, deploy code, and store data — rather than a definition based on lines of code or transport protocol.
+
+## Solution
+
+A **microservices architecture** structures an application as a collection of services that are:
+
+- **Organized around business capabilities.** Each service owns a slice of the domain — orders, payments, inventory — rather than a technical layer like "the database tier" or "the UI tier".
+- **Independently deployable.** Each service can be built, tested, and released on its own schedule, without coordinating a lock-step deployment of the whole system.
+- **Loosely coupled.** Services interact only through well-defined APIs and messages, never by reaching into one another's internals.
+- **Owners of their own data.** Each service keeps its data private and exposes it only through its API or the events it publishes. There is no shared database that everyone reads and writes.
+
+Clients usually do not call services directly. A gateway sits in front, routing each request to the service that owns the relevant capability. Behind the gateway, each service runs as its own process with its own datastore, and services collaborate by calling each other's APIs or by exchanging events.
+
+export const overviewDiagram = `flowchart TB
+  Client[Web / Mobile Client] --> GW[API Gateway]
+  GW --> OAPI
+  GW --> PAPI
+  GW --> IAPI
+  subgraph Orders[Order Service]
+    OAPI[API]
+    ODB[(Orders DB)]
+    OAPI --> ODB
+  end
+  subgraph Payments[Payment Service]
+    PAPI[API]
+    PDB[(Payments DB)]
+    PAPI --> PDB
+  end
+  subgraph Inventory[Inventory Service]
+    IAPI[API]
+    IDB[(Inventory DB)]
+    IAPI --> IDB
+  end
+  OAPI -. events .-> PAPI
+  OAPI -. events .-> IAPI`;
+
+<Mermaid code={overviewDiagram} title="A few services, each with a private database, behind a single API gateway" />
+
+Notice what the diagram does *not* show: there is no central database that all three services share, and no service reaches across into another's tables. The dotted arrows are asynchronous events, not direct calls into private data. That separation is the whole point — it is what lets each box deploy, scale, and fail on its own.
+
+## What this course covers
+
+This course works through the microservices pattern language in eight modules:
+
+1. **Intro and Principles** — the module you are reading now: what microservices are, how they compare to a monolith, the trade-offs, when to use them, and how the patterns fit together.
+2. **Decomposition** — how to slice a system into services around business capabilities and bounded contexts.
+3. **Data Management** — keeping data consistent and queryable when each service owns its own store.
+4. **Transactional Messaging** — publishing events reliably as part of a local transaction.
+5. **Communication** — synchronous and asynchronous styles, APIs, and gateways.
+6. **Reliability** — surviving the partial failures that distributed systems make routine.
+7. **Observability** — seeing what a fleet of services is actually doing.
+8. **Deployment and Cross-cutting** — shipping, running, and securing services in production.
+
+## The pattern language, in one line
+
+None of these patterns stands alone: each one solves a problem created by the previous choice, so the patterns form a connected *language* rather than a checklist. We will map that language explicitly in the final lesson of this module.
+
+## Related patterns
+
+- [Monolith vs Microservices](/microservices-design-from-zero-to-hero/en/intro-and-principles/monolith-vs-microservices/) — what you are moving away from, and why it is not the enemy.
+- [The Pattern Language](/microservices-design-from-zero-to-hero/en/intro-and-principles/the-pattern-language/) — how every pattern in this course connects.
+- [Data Management](/microservices-design-from-zero-to-hero/en/data-management/) — the module where "each service owns its data" gets hard.
+
+<Callout title="A property, not a size">
+Resist the urge to define a microservice by how small it is. The properties that matter are independence and ownership: a service you can deploy on its own, that owns its data, and that maps to a business capability. A service can be a few hundred lines or a few thousand — what makes it a microservice is the boundary around it, not the count inside it.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Which property best characterizes a microservices architecture?',
+    options: [
+      'Every service has fewer than a thousand lines of code',
+      'Services are independently deployable, loosely coupled, organized around business capabilities, and own their own data',
+      'All services communicate exclusively over HTTP',
+      'All services share one central database for consistency',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do services in this architecture access another service\'s data?',
+    options: [
+      'By querying the other service\'s database tables directly',
+      'Through the owning service\'s API or the events it publishes',
+      'Through a shared database connection pool',
+      'They cannot exchange data at all',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What role does the API gateway play in the overview diagram?',
+    options: [
+      'It stores the data for all services',
+      'It routes client requests to the service that owns the relevant capability',
+      'It runs the business logic for every service',
+      'It replaces the need for services to own their data',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="intro-and-principles/index" />

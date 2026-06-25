@@ -1,0 +1,60 @@
+:root { --sl-color-accent: #2563EB; --sl-color-accent-low: #0b1f4d; --sl-color-accent-high: #c7d8fe; }
+
+.tsgo { display: grid; gap: 1rem; grid-template-columns: 1fr; margin: 1rem 0; }
+.tsgo__col header { display:flex; justify-content:space-between; align-items:center; font-weight:600; font-size:.85rem; padding:.25rem .5rem; background:var(--sl-color-gray-6); border-radius:6px 6px 0 0; }
+.tsgo__col pre { margin:0; border-radius:0 0 6px 6px; white-space:pre; overflow:auto; }
+.tsgo__copy { cursor:pointer; font-size:.75rem; border:1px solid var(--sl-color-gray-5); border-radius:4px; padding:.1rem .5rem; background:var(--sl-color-bg); color:inherit; }
+.quiz__q { border:1px solid var(--sl-color-gray-5); border-radius:6px; margin:.5rem 0; padding:.25rem .75rem; }
+.quiz label { display:block; padding:.15rem .25rem; cursor:pointer; } .quiz label.ok { color:var(--sl-color-green-high); font-weight:600; } .quiz label.bad { color:var(--sl-color-red-high); }
+.quiz__score { font-weight:700; }
+.pt { margin:2rem 0; padding:.5rem 1rem; border-radius:6px; border:1px solid var(--sl-color-accent); background:var(--sl-color-bg); cursor:pointer; color:inherit; }
+.pt--done { background:var(--sl-color-accent); color:#001; }
+/* inline code chips inside the No-TS-equivalent callout: dark text on light chip */
+.rs-only :not(pre) > code { background-color:#eceff4; color:#24292f; }
+.tr { margin:1rem 0; border:1px solid var(--sl-color-gray-5); border-radius:8px; overflow:hidden; }
+.tr__code { margin:0; border:0; border-radius:0; white-space:pre; overflow:auto; }
+.tr__btn { display:block; width:100%; cursor:pointer; font-size:.82rem; font-weight:600; border:0; border-top:1px solid var(--sl-color-gray-5); padding:.5rem .8rem; background:var(--sl-color-accent); color:#fff; }
+.tr__btn:hover { filter:brightness(1.08); }
+.rr { margin:1.25rem 0; border:1px solid var(--sl-color-accent); border-radius:10px; padding:1rem 1.1rem; background:var(--sl-color-accent-low); color:var(--sl-color-accent-high); }
+.rr__label { font-weight:800; margin:0 0 .25rem; color:var(--sl-color-accent-high); font-size:1.05rem; }
+.rr__hint { margin:0 0 .5rem; font-size:.9rem; color:var(--sl-color-accent-high); opacity:.95; }
+.rr__code { margin:0 0 .5rem; white-space:pre; overflow:auto; background:transparent; }
+.rr__code, .rr__code code { color:var(--sl-color-accent-high); background:transparent; }
+.rr__note { margin:0; font-size:.82rem; color:var(--sl-color-accent-high); opacity:.95; }
+.rr__note a { color:#fff; text-decoration:underline; }
+.rr__hint code, .rr__note code { color:var(--sl-color-accent-low); background:var(--sl-color-accent-high); font-weight:600; border:0; padding:.05rem .35rem; border-radius:5px; }
+
+/* Mermaid */
+.mermaid-figure { margin: 1.5rem 0; }
+.mermaid { display: flex; justify-content: center; overflow-x: auto; background: transparent; border: 0; padding: 0; }
+.mermaid svg { max-width: 100%; height: auto; }
+.mermaid-cap { text-align: center; font-size: .85rem; color: var(--sl-color-gray-3); margin-top: .4rem; }
+
+/* Read-mode toggle button */
+.readmode-toggle {
+  position: fixed; right: 1rem; bottom: 1rem; z-index: 100;
+  font-size: .8rem; font-weight: 600; cursor: pointer;
+  padding: .45rem .8rem; border-radius: 999px;
+  border: 1px solid var(--sl-color-gray-5);
+  background: var(--sl-color-bg-nav, var(--sl-color-black)); color: var(--sl-color-text);
+  box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.readmode-toggle:hover { border-color: var(--sl-color-accent); color: var(--sl-color-accent-high); }
+
+/* Read mode: hide chrome, widen content */
+html.read-mode .sidebar,
+html.read-mode .sidebar-pane,
+html.read-mode .right-sidebar-container,
+html.read-mode .right-sidebar,
+html.read-mode starlight-toc,
+html.read-mode mobile-starlight-toc { display: none !important; }
+html.read-mode .main-frame { padding-inline-start: 0 !important; padding-top: 0 !important; }
+html.read-mode .main-pane { width: 100%; }
+html.read-mode .sl-container,
+html.read-mode .sl-markdown-content { max-width: 50rem; margin-inline: auto; }
+
+/* inline code chips inside the .callout dark box: dark text on a light chip for contrast */
+.callout :not(pre) > code { background: var(--sl-color-accent-high); color: var(--sl-color-accent-low); border: 0; padding: .05rem .35rem; border-radius: 5px; font-weight: 600; }
+
+/* Runner toolbar buttons: cancel Starlight flow margin so buttons stay aligned */
+.sl-markdown-content :is([class*="__run"],[class*="__open"],[class*="__copy"],[class*="__btn"],[class*="__fork"]) { margin-top: 0; }

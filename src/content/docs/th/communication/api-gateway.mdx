@@ -1,0 +1,156 @@
+---
+title: API Gateway
+description: 'มอบจุดเข้าจุดเดียวให้ client ภายนอกที่จัดเส้นทางคำขอไปยังบริการที่ถูกต้อง รวมหลายการเรียกเข้าเป็นหนึ่งเดียว และจัดการ cross-cutting concerns อย่างการยืนยันตัวตนและการจำกัดอัตราในที่เดียว'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+คุณมีบริการนับสิบ แต่ละบริการมี API ของตัวเองและที่อยู่บนเครือข่ายของตัวเอง แอปมือถือหรือ single-page web client ต้องการข้อมูลจากหลายบริการเพื่อแสดงหน้าจอเดียว — เพียงสรุปคำสั่งซื้ออย่างเดียวก็แตะถึง Orders, Inventory และ Customer ถ้า client พูดกับแต่ละบริการโดยตรง มันต้องรู้ที่อยู่ของทุกบริการ ต้องวิ่งไปกลับหลายรอบบนเครือข่ายมือถือที่ช้า และต้องทำการยืนยันตัวตนกับแต่ละบริการ
+
+## ปัญหา
+
+การเปิดเผยบริการภายในต่อ client ภายนอกโดยตรงทำให้ client เหล่านั้นผูกมัดกับโครงสร้างภายในของคุณ client ต้องค้นหาและเรียก endpoint มากมาย และทุกครั้งที่คุณแยกหรือรวมบริการ client ทุกตัวก็จะพัง ที่แย่กว่านั้นคือ cross-cutting concerns — การยืนยันตัวตน การ terminate TLS การจำกัดอัตรา การ logging คำขอ — จะต้องถูก implement ในทุกบริการหรือในทุก client และ client ที่พูดมากบนการเชื่อมต่อที่มี latency สูงต้องจ่ายค่าวิ่งไปกลับหนึ่งรอบต่อหนึ่งบริการเพียงเพื่อเติมข้อมูลหน้าจอเดียว คุณจะให้ client ภายนอกมีที่เรียกที่เดียวที่เสถียร มีประสิทธิภาพ และปลอดภัยได้อย่างไร โดยไม่รั่วไหลโครงสร้างภายในของคุณ?
+
+## ทางออก
+
+**API Gateway** คือเซิร์ฟเวอร์เดียวที่อยู่ระหว่าง client ภายนอกกับบริการภายใน มันเป็นจุดเข้าจุดเดียวสู่ระบบ และมันทำงานสามอย่าง:
+
+- **Routing (การจัดเส้นทาง)** — มันรับทุกคำขอจากภายนอกแล้วส่งต่อไปยังบริการที่เหมาะสม โดยจับคู่ path สาธารณะกับที่อยู่ภายใน client รู้จักเพียง gateway เท่านั้น
+- **Aggregation (การรวมผลลัพธ์)** — สำหรับคำขอที่ต้องการข้อมูลจากหลายบริการ gateway สามารถกระจายออกไป เรียกแต่ละบริการ และประกอบเป็นการตอบกลับเดียว ดังนั้น client จึงเรียกครั้งเดียวแทนหลายครั้ง
+- **การรับภาระ cross-cutting concerns** — การยืนยันตัวตน การอนุญาต การ terminate TLS การจำกัดอัตรา การ logging คำขอ และการ caching ทั้งหมดเกิดขึ้นครั้งเดียวที่ขอบ แทนที่จะถูกทำซ้ำในทุกบริการ
+
+export const gatewayDiagram = `flowchart LR
+  Web[Web Client] --> GW
+  Mobile[Mobile Client] --> GW
+  ThirdParty[Third-party API client] --> GW
+  GW[API Gateway<br/>routing - aggregation - auth - rate limit]
+  GW --> O[Order Service]
+  GW --> I[Inventory Service]
+  GW --> C[Customer Service]`;
+
+<Mermaid code={gatewayDiagram} title="API Gateway — จุดเข้าจุดเดียวที่จัดเส้นทาง รวมผลลัพธ์ และรับภาระ cross-cutting concerns" />
+
+## ตัวอย่าง
+
+พฤติกรรมของ gateway เป็น configuration ไม่ใช่โค้ดแอปพลิเคชัน: คุณประกาศ route และนโยบายที่ใช้กับมัน แล้วเอนจินของ gateway ก็บังคับใช้ตามนั้น นี่คือ configuration ของ route ที่จับคู่ path สาธารณะกับบริการภายใน และแนบการยืนยันตัวตนและการจำกัดอัตราเข้ากับแต่ละ route
+
+```yaml
+# api-gateway.yaml — routes external paths to internal services
+listen: ":443"
+tls:
+  cert: /etc/gateway/tls.crt
+  key: /etc/gateway/tls.key
+
+routes:
+  - path: /api/orders/*
+    upstream: http://order-service
+    methods: [GET, POST]
+    auth:
+      type: jwt
+      issuer: https://auth.example.com
+    rate_limit:
+      requests_per_minute: 120
+
+  - path: /api/customers/*
+    upstream: http://customer-service
+    methods: [GET]
+    auth:
+      type: jwt
+      issuer: https://auth.example.com
+    rate_limit:
+      requests_per_minute: 60
+
+  # An aggregating route: the gateway fans out and composes one response.
+  - path: /api/order-summary/:id
+    aggregate:
+      - get: http://order-service/orders/:id        # as "order"
+        as: order
+      - get: http://customer-service/customers/:customerId
+        as: customer
+      - get: http://inventory-service/stock/:sku
+        as: stock
+    auth:
+      type: jwt
+      issuer: https://auth.example.com
+```
+
+## บริบทผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **จุดเข้าที่เรียบง่ายจุดเดียว** client รู้จัก host เดียวและ API สาธารณะที่เสถียร บริการภายในสามารถถูกแยก รวม เปลี่ยนชื่อ หรือย้ายได้โดยไม่ทำให้ client ตัวใดพัง
+- **cross-cutting concerns ในที่เดียว** การยืนยันตัวตน TLS การจำกัดอัตรา และการ logging ถูกตั้งค่าครั้งเดียวที่ขอบ แทนที่จะถูก implement ใหม่ในทุกบริการ
+- **วิ่งไปกลับน้อยลง** การรวมผลลัพธ์ช่วยให้ client เติมข้อมูลทั้งหน้าจอได้ด้วยคำขอเดียว ซึ่งสำคัญที่สุดบนการเชื่อมต่อมือถือที่มี latency สูง
+
+สิ่งที่คุณต้องจ่าย:
+
+- **องค์ประกอบใหม่ที่ต้องสร้างและดำเนินการ** gateway เองต้องพร้อมใช้งานสูงและขยายขนาดได้ เพราะมันอยู่บนเส้นทางวิกฤตของทุกคำขอ ถ้ามันล่ม ระบบก็ล่ม
+- **มันอาจกลายเป็นคอขวดหรือ God-object** เมื่อกฎการจัดเส้นทาง การแปลงข้อมูล และการรวมผลลัพธ์สะสมมากขึ้น gateway ก็เติบโตเป็นองค์ประกอบใหญ่ที่ใช้ร่วมกันซึ่งทุกทีมต้องแก้ — และเป็นคอขวดในการพัฒนาเมื่อการเปลี่ยนแปลงของทีมหนึ่งต้องรออยู่หลังของอีกทีม
+- **ความเสี่ยงของการทำให้ทั่วไปเกินไป** gateway เดียวที่พยายามให้บริการ web app, mobile app และ third-party integration ให้ดีเท่ากันทั้งหมด มักให้บริการไม่ดีกับใครเลย เพราะความต้องการของแต่ละฝ่ายต่างกัน
+
+ต้นทุนข้อสุดท้ายนั้นคือแรงจูงใจของ pattern ถัดไป: แทนที่จะมี gateway เดียวสำหรับทุกคน ให้ client แต่ละชนิดมี gateway ของตัวเอง ดู [Backends for Frontends](/microservices-design-from-zero-to-hero/th/communication/backends-for-frontends/)
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Backends for Frontends](/microservices-design-from-zero-to-hero/th/communication/backends-for-frontends/) — gateway ที่ปรับแต่งหนึ่งตัวต่อ client หนึ่งชนิด แก้ปัญหาความเสี่ยงของ God-object
+- [Service Discovery](/microservices-design-from-zero-to-hero/th/communication/service-discovery/) — วิธีที่ gateway ค้นหา instance ที่ยังมีชีวิตอยู่ของบริการที่มันจัดเส้นทางไปหา
+- [API Composition](/microservices-design-from-zero-to-hero/th/data-management/api-composition/) — เทคนิคการรวมผลลัพธ์ที่ gateway ใช้เพื่อรวมข้อมูลจากหลายบริการ
+
+<Callout title="gateway จัดเส้นทาง; มันไม่ได้เป็นเจ้าของ business logic">
+มันน่าดึงดูดที่จะดัน business logic "นิดเดียว" เข้าไปใน gateway — การคำนวณส่วนลดตรงนี้ การตรวจสอบคำสั่งซื้อตรงนั้น จงต้านทานมันไว้ หน้าที่ของ gateway คือการจัดเส้นทาง การรวมผลลัพธ์ และ cross-cutting concerns กฎทางธุรกิจเป็นของบริการที่เป็นเจ้าของ เมื่อมันรั่วไหลเข้าไปใน gateway คุณก็ได้สร้าง distributed monolith ขึ้นมาใหม่โดยมี gateway เป็นแกนกลางที่ซ่อนอยู่
+</Callout>
+
+export const quizGateway = [
+  {
+    q: 'จุดประสงค์หลักของ API Gateway คืออะไร?',
+    options: [
+      'เพื่อเก็บฐานข้อมูลของแต่ละบริการ',
+      'เพื่อเป็นจุดเข้าจุดเดียวที่จัดเส้นทางคำขอจากภายนอก รวมการเรียก และจัดการ cross-cutting concerns',
+      'เพื่อแทนที่ message broker',
+      'เพื่อรัน business logic ของทุกบริการ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การรวมคำขอ (aggregation) ช่วย mobile client อย่างไร?',
+    options: [
+      'มันเข้ารหัสการตอบกลับ',
+      'มันให้ client เรียกครั้งเดียวแทนหลายครั้ง ดังนั้นจึงจ่ายค่าวิ่งไปกลับหนึ่งรอบเพื่อเติมหน้าจอที่ครอบหลายบริการ',
+      'มัน cache ฐานข้อมูลไว้บนอุปกรณ์',
+      'มันขจัดความจำเป็นในการยืนยันตัวตน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'cross-cutting concern ใดเหมาะกับ gateway โดยธรรมชาติ?',
+    options: [
+      'การเลือก database schema ของแต่ละบริการ',
+      'การยืนยันตัวตน การ terminate TLS และการจำกัดอัตรา ที่จัดการครั้งเดียวที่ขอบ',
+      'การเขียน domain model ของแต่ละบริการ',
+      'การนิยาม saga compensation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความเสี่ยงสำคัญของ API Gateway เดียวคืออะไร?',
+    options: [
+      'มันบังคับให้ทุกบริการใช้ฐานข้อมูลร่วมกัน',
+      'มันอาจกลายเป็นคอขวดหรือ God-object ที่ทุกทีมต้องแก้และให้บริการ client ชนิดใดไม่ได้ดีเลย',
+      'มันทำให้การเรียกแบบ synchronous เป็นไปไม่ได้',
+      'มันป้องกันไม่ให้ client ใช้ HTTPS',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/api-gateway" questions={quizGateway} />
+
+<ProgressTracker client:visible id="communication/api-gateway" />

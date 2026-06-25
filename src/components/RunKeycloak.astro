@@ -1,0 +1,14 @@
+---
+const cmd = `docker run --name keycloak -p 8080:8080 \\
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \\
+  -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \\
+  quay.io/keycloak/keycloak:latest start-dev`;
+const { script = cmd } = Astro.props;
+---
+<aside class="rr">
+  <p class="rr__label">🔐 Run Keycloak with Docker first</p>
+  <p class="rr__hint">Start Keycloak in dev mode:</p>
+  <pre class="rr__code"><code>{script}</code></pre>
+  <p class="rr__hint">Then open <code>http://localhost:8080</code> and sign in to the admin console with <code>admin</code> / <code>admin</code>.</p>
+  <p class="rr__note"><code>start-dev</code> uses an in-memory database — perfect for learning. Use a real database and <code>start</code> for production.</p>
+</aside>

@@ -1,0 +1,146 @@
+---
+title: Backends for Frontends
+description: 'Instead of one API Gateway for everyone, give each client type its own: a web BFF, a mobile BFF, a third-party BFF — each tailored to its client and owned by the team that builds that client.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You introduced an [API Gateway](/microservices-design-from-zero-to-hero/en/communication/api-gateway/) and it worked. But your clients are not the same. The web app runs on a fast connection and wants rich, detailed responses to render a wide dashboard. The mobile app runs on a flaky cellular link and wants small, compact responses with only the fields the small screen shows. A third-party integration wants stable, conservative, versioned endpoints that rarely change. A single gateway trying to satisfy all three keeps growing conditional logic and "include this field only for mobile" special cases.
+
+## Problem
+
+One gateway shared by every client type becomes a contested, ever-growing component. Every client team must coordinate its changes through that one shared codebase, so the mobile team waits on the web team and vice versa. The API drifts toward a lowest-common-denominator shape that fits no client well — too heavy for mobile, too thin for web. And ownership is muddy: who owns the gateway when three teams depend on it? How do you keep the benefits of a single entry point while letting each client evolve its own API at its own pace?
+
+## Solution
+
+**Backends for Frontends (BFF)** applies the gateway pattern once per client type. Instead of one gateway, you run a **separate gateway for each kind of client** — a web BFF, a mobile BFF, a third-party BFF. Each BFF exposes an API shaped precisely for its client: the mobile BFF returns trimmed payloads, the web BFF returns rich aggregates, the third-party BFF exposes a stable, slowly-versioned contract.
+
+The decisive change is ownership. Each BFF is **owned by the team that builds that client**. The mobile team owns the mobile BFF and ships changes to the client and its backend together, with no cross-team coordination. The shared internal services stay untouched behind all the BFFs.
+
+export const bffDiagram = `flowchart LR
+  Web[Web App] --> WBFF[Web BFF]
+  Mobile[Mobile App] --> MBFF[Mobile BFF]
+  Third[Third-party client] --> TBFF[Third-party BFF]
+  WBFF --> O[Order Service]
+  WBFF --> C[Customer Service]
+  MBFF --> O
+  MBFF --> I[Inventory Service]
+  TBFF --> O
+  TBFF --> C`;
+
+<Mermaid code={bffDiagram} title="Backends for Frontends — one tailored gateway per client type, each owned by that client’s team, over shared internal services" />
+
+## Example
+
+Each BFF is its own deployable with its own configuration, tuned to its client. Here are two BFF route configurations over the same internal services — note how the mobile BFF trims fields and tightens limits while the web BFF returns rich aggregates.
+
+```yaml
+# mobile-bff.yaml — small payloads, conservative limits for cellular clients
+listen: ":443"
+routes:
+  - path: /m/order/:id
+    aggregate:
+      - get: http://order-service/orders/:id
+        as: order
+      - get: http://inventory-service/stock/:sku
+        as: stock
+    response_shape:
+      fields: [order.id, order.status, order.total, stock.available]  # trimmed
+    rate_limit:
+      requests_per_minute: 60
+---
+# web-bff.yaml — rich aggregates for a fast connection and a wide screen
+listen: ":443"
+routes:
+  - path: /w/order/:id
+    aggregate:
+      - get: http://order-service/orders/:id
+        as: order
+      - get: http://customer-service/customers/:customerId
+        as: customer
+      - get: http://inventory-service/stock/:sku
+        as: stock
+    response_shape:
+      fields: [order, customer, stock]  # full objects
+    rate_limit:
+      requests_per_minute: 240
+```
+
+## Resulting context
+
+What you gain:
+
+- **Tailored APIs.** Each client gets responses shaped exactly for its screen, network, and needs — small for mobile, rich for web, stable for third parties — with no compromise to fit the others.
+- **Clear ownership and autonomy.** Each client team owns its BFF and ships client and backend changes together, removing the cross-team coordination that a shared gateway forces.
+- **Smaller blast radius.** A change or bug in the mobile BFF cannot break the web client, because they are separate deployables.
+
+What it costs you:
+
+- **Some duplication.** Routing rules, authentication wiring, and aggregation logic recur across BFFs. Common concerns can be factored into a shared library, but you accept more moving parts than a single gateway has.
+- **More components to operate.** Several BFFs mean several things to deploy, monitor, and keep available, instead of one.
+- **A boundary to police.** Each BFF must stay a thin tailoring layer. If client-specific BFFs start absorbing business logic, you re-create the God-object problem the pattern was meant to solve — just spread across several places.
+
+## Related patterns
+
+- [API Gateway](/microservices-design-from-zero-to-hero/en/communication/api-gateway/) — the single-gateway pattern that BFF specialises per client type.
+- [Service Discovery](/microservices-design-from-zero-to-hero/en/communication/service-discovery/) — how each BFF locates the internal services it calls.
+- [API Composition](/microservices-design-from-zero-to-hero/en/data-management/api-composition/) — the aggregation each BFF performs to compose a client-shaped response.
+
+<Callout title="BFF is a team-shaping pattern as much as a technical one">
+The real win of BFF is not a smaller payload — it is removing a coordination bottleneck. When the mobile team owns its BFF, it ships at its own pace without queuing behind every other client team. If your organisation has one platform team that would own all the BFFs anyway, a single well-factored gateway may serve you better; BFF pays off when client teams are distinct and want autonomy.
+</Callout>
+
+export const quizBff = [
+  {
+    q: 'What is the core idea of Backends for Frontends?',
+    options: [
+      'Run one shared gateway with many configuration flags',
+      'Run a separate, tailored gateway for each client type, owned by that client’s team',
+      'Move all business logic into the gateway',
+      'Replace gateways with direct service calls',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What problem with a single shared gateway does BFF primarily solve?',
+    options: [
+      'It eliminates the need for authentication',
+      'It removes the cross-team coordination bottleneck and the lowest-common-denominator API shape',
+      'It makes the database faster',
+      'It removes the need for service discovery',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Who owns a given BFF?',
+    options: [
+      'A central platform team that owns all of them',
+      'The team that builds the client that BFF serves',
+      'The database team',
+      'No one; it is generated automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine cost of the BFF pattern?',
+    options: [
+      'It forces every client to use the same response shape',
+      'Some duplication of routing, auth, and aggregation logic across the several BFFs',
+      'It makes tailored APIs impossible',
+      'It requires all clients to share one deployment',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/backends-for-frontends" questions={quizBff} />
+
+<ProgressTracker client:visible id="communication/backends-for-frontends" />

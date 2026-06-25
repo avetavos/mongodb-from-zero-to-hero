@@ -1,0 +1,219 @@
+---
+title: Application Metrics
+description: 'Expose counters, gauges, and histograms — request rate, error rate, and latency, the RED and USE signals — so dashboards summarize the health of the whole fleet and alerts fire before users notice.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Logs and traces are detailed and per-request — perfect once you know something is wrong and want to investigate one request. But they answer the wrong question for the other half of operations: *is the system healthy right now, overall?* You cannot watch a million log lines a minute to notice that the error rate just doubled, and you cannot open a trace to know whether p99 latency across the whole fleet is creeping up over the afternoon. You need a summary that fits on a screen and a number a machine can compare against a threshold.
+
+## Problem
+
+Detailed signals do not aggregate cheaply. Counting errors by tailing logs is slow and brittle; computing latency percentiles across all replicas by reading traces is expensive and after-the-fact. And you want more than a current snapshot — you want trends over time, so you can see degradation building and alert *before* it becomes an outage rather than reading about it afterward.
+
+So how do you produce cheap, continuously updated, numeric summaries of your service's behavior — request rate, errors, latency, resource use — that a dashboard can chart and an alerting system can watch?
+
+## Solution
+
+**Application metrics** are numeric measurements your service maintains in memory and exposes for a monitoring system to collect. They come in three core shapes:
+
+- **Counter** — a value that only ever goes up (or resets to zero on restart): total requests served, total errors. You chart its *rate* of change.
+- **Gauge** — a value that goes up and down: current in-flight requests, queue depth, connection pool size, memory in use.
+- **Histogram** — a distribution of observed values bucketed by range: request durations, payload sizes. From it you compute percentiles like p50, p95, and p99 — far more honest than an average.
+
+A typical setup has each service expose its current metric values at an endpoint (for example `/metrics`), and a **scraper** poll that endpoint on an interval, storing each reading as a time series in a metrics database that powers dashboards and alerts. Two small frameworks tell you *which* metrics matter: **RED** (Rate, Errors, Duration) for request-driven services, and **USE** (Utilization, Saturation, Errors) for resources like CPU, memory, and queues.
+
+export const metricsDiagram = `flowchart LR
+  subgraph App[Service replica]
+    CODE[Request handler] -->|inc / observe| REG[In-memory registry]
+    REG --> EP[/metrics endpoint]
+  end
+  SCRAPER[Scraper] -->|poll every Ns| EP
+  SCRAPER --> TSDB[(Time-series DB)]
+  TSDB --> DASH[Dashboards]
+  TSDB --> ALERT[Alert rules]`;
+
+<Mermaid code={metricsDiagram} title="The service updates metrics in memory and exposes them; a scraper polls and stores time series that feed dashboards and alerts" />
+
+## Example
+
+The two operations you reach for most: increment a counter when a request finishes (labeled by outcome) and observe its latency in a histogram. These use a Prometheus-style client, the de facto pattern across languages.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { Counter, Histogram } from 'prom-client';
+
+    const requests = new Counter({
+      name: 'http_requests_total',
+      help: 'Total HTTP requests',
+      labelNames: ['method', 'route', 'status'],
+    });
+
+    const latency = new Histogram({
+      name: 'http_request_duration_seconds',
+      help: 'Request latency in seconds',
+      labelNames: ['route'],
+      buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+    });
+
+    app.use((req, res, next) => {
+      const stop = latency.startTimer({ route: req.path });
+      res.on('finish', () => {
+        requests.inc({ method: req.method, route: req.path, status: res.statusCode });
+        stop();
+      });
+      next();
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import time
+    from prometheus_client import Counter, Histogram
+
+    REQUESTS = Counter(
+        "http_requests_total",
+        "Total HTTP requests",
+        ["method", "route", "status"],
+    )
+    LATENCY = Histogram(
+        "http_request_duration_seconds",
+        "Request latency in seconds",
+        ["route"],
+        buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+    )
+
+    async def metrics_middleware(request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        LATENCY.labels(route=request.url.path).observe(time.perf_counter() - start)
+        REQUESTS.labels(
+            method=request.method, route=request.url.path, status=response.status_code
+        ).inc()
+        return response
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    import (
+        "time"
+
+        "github.com/prometheus/client_golang/prometheus"
+        "github.com/prometheus/client_golang/prometheus/promauto"
+    )
+
+    var requests = promauto.NewCounterVec(prometheus.CounterOpts{
+        Name: "http_requests_total",
+        Help: "Total HTTP requests",
+    }, []string{"method", "route", "status"})
+
+    var latency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+        Name:    "http_request_duration_seconds",
+        Help:    "Request latency in seconds",
+        Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+    }, []string{"route"})
+
+    func instrument(route, method string, status int, start time.Time) {
+        latency.WithLabelValues(route).Observe(time.Since(start).Seconds())
+        requests.WithLabelValues(method, route, statusText(status)).Inc()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use prometheus::{register_counter_vec, register_histogram_vec, CounterVec, HistogramVec};
+    use std::time::Instant;
+
+    static REQUESTS: once_cell::sync::Lazy<CounterVec> = once_cell::sync::Lazy::new(|| {
+        register_counter_vec!(
+            "http_requests_total",
+            "Total HTTP requests",
+            &["method", "route", "status"]
+        ).unwrap()
+    });
+
+    static LATENCY: once_cell::sync::Lazy<HistogramVec> = once_cell::sync::Lazy::new(|| {
+        register_histogram_vec!(
+            "http_request_duration_seconds",
+            "Request latency in seconds",
+            &["route"],
+            vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+        ).unwrap()
+    });
+
+    fn instrument(route: &str, method: &str, status: &str, start: Instant) {
+        LATENCY.with_label_values(&[route]).observe(start.elapsed().as_secs_f64());
+        REQUESTS.with_label_values(&[method, route, status]).inc();
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Fleet health on one screen.** Rate, errors, and duration charts summarize thousands of requests across every replica into a few lines you can read in a glance.
+- **Alerts before users complain.** Because metrics are continuous time series, you can alert on a rising error rate or a p99 crossing a threshold and act before it becomes an outage.
+- **Cheap and always on.** Counters and histograms cost almost nothing to update in memory and are collected by polling, so the overhead stays flat as traffic grows — unlike logging every request.
+
+What it costs you:
+
+- **Cardinality is a trap.** Every distinct combination of label values is a separate time series. Putting a user id or raw URL with ids in a label can explode into millions of series and overwhelm the metrics store. Keep labels low-cardinality — method, route template, status class.
+- **Aggregates hide individuals.** A metric tells you the error rate is up; it cannot tell you *which* request failed or why. You still need logs and traces to drill in. Metrics point; the other signals explain.
+- **Percentiles need histograms, not averages.** An average latency that looks fine can hide a terrible p99. Choose histogram buckets that bracket your service-level objectives, or your percentiles will be too coarse to be useful.
+
+## Related patterns
+
+- [Distributed Tracing](/microservices-design-from-zero-to-hero/en/observability/distributed-tracing/) — when a latency metric spikes, a trace shows you which hop caused it.
+- [Health Check API](/microservices-design-from-zero-to-hero/en/observability/health-check-api/) — health is a binary check; metrics reveal the gradual decline that precedes it.
+
+<Callout title="Pick the right signal for the question">
+Reach for metrics to answer "how is the system as a whole, over time?" and to drive alerts. Reach for traces and logs to answer "what happened to this one request?" A common anti-pattern is trying to recover per-request detail from metrics by adding high-cardinality labels — it bankrupts your metrics store without giving you what logs and traces already provide. Let each signal do its job.
+</Callout>
+
+export const quizMetrics = [
+  {
+    q: 'Which metric type would you use for request latency so you can compute p95 and p99?',
+    options: [
+      'A counter',
+      'A gauge',
+      'A histogram',
+      'A boolean flag',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What do the RED signals stand for?',
+    options: [
+      'Reads, Edits, Deletes',
+      'Rate, Errors, Duration',
+      'Requests, Endpoints, Databases',
+      'Retries, Errors, Downtime',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is putting a user id into a metric label dangerous?',
+    options: [
+      'It is against the Prometheus license',
+      'It creates a separate time series per distinct value, which can explode cardinality and overwhelm the metrics store',
+      'User ids cannot be converted to strings',
+      'It makes the /metrics endpoint return 503',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="observability/application-metrics" questions={quizMetrics} />
+
+<ProgressTracker client:visible id="observability/application-metrics" />

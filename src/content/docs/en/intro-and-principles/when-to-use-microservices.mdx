@@ -1,0 +1,103 @@
+---
+title: When to Use Microservices
+description: 'Microservices pay off when team size, domain complexity, and scaling needs all push past what a monolith comfortably handles. For most teams the right first move is a well-structured monolith — monolith first.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+You can define microservices and you can recite their trade-offs. Now comes the decision that actually matters on a real project: *should this system be a microservices architecture, and if so, when?* This is where good engineering judgment shows, because the wrong answer in either direction is expensive. Decompose too early and you pay distributed-system costs before you have the scale to justify them; decompose too late and you fight a monolith that has become a bottleneck for a large team.
+
+## Problem
+
+There is no universal rule, but there are signals. The mistake is to decide based on fashion ("everyone uses microservices now") or fear ("our monolith feels messy, so it must be wrong"). A messy monolith is usually a sign you need cleaner internal boundaries, not necessarily a network between your modules.
+
+So the question is: which concrete factors should push you toward microservices, and which should keep you on a monolith?
+
+## Solution
+
+Weigh three factors together — they reinforce each other, and no single one is decisive on its own:
+
+- **Team size.** A handful of developers ships fastest on one codebase. Once you have many teams contending for one codebase and one deploy pipeline, the coordination cost rises, and giving each team its own deployable service can remove the contention.
+- **Domain complexity.** A small, well-understood domain rarely needs splitting. A large domain with clear sub-areas that evolve at different rates and have natural boundaries is a candidate for decomposition along those boundaries.
+- **Scaling needs.** If the whole system scales fine as one unit, you do not need to split it to scale. If specific components have very different load profiles — one is CPU-bound, another is memory-bound, another gets ten times the traffic — independent scaling becomes a real reason to separate them.
+
+The decision flow below walks these signals in order. Notice how many paths end at "monolith": that is intentional.
+
+export const decisionDiagram = `flowchart TB
+  Start([New or growing system]) --> Q1{Large team blocked<br/>on one codebase or<br/>one pipeline?}
+  Q1 -- No --> Mono[Build / keep a<br/>modular monolith]
+  Q1 -- Yes --> Q2{Domain has clear,<br/>independent<br/>sub-areas?}
+  Q2 -- No --> Mono
+  Q2 -- Yes --> Q3{Components have<br/>very different<br/>scaling needs?}
+  Q3 -- No --> Q4{Operational maturity:<br/>CI/CD, automation,<br/>observability in place?}
+  Q3 -- Yes --> Q4
+  Q4 -- No --> Mono2[Invest in automation<br/>first; decompose later]
+  Q4 -- Yes --> Micro[Decompose into<br/>microservices]`;
+
+<Mermaid code={decisionDiagram} title="A decision flow that defaults toward the monolith and only branches to microservices when the signals line up" />
+
+### Monolith first
+
+There is a strong default here, often called **monolith first**: start with a well-structured monolith, get the product right, and learn where the real boundaries in your domain are. A young product's boundaries are guesses, and guessing them wrong is far cheaper to fix inside one codebase than across a network of services. As the system grows and you observe genuine pain — a team blocked on a shared deploy, a component that must scale on its own — you extract that piece into a service. You decompose along boundaries you have *discovered*, not boundaries you *imagined* on day one.
+
+This does not mean a sloppy monolith. The asset that makes later extraction cheap is a **modular** monolith: one with clean internal module boundaries, so that pulling a module out into a service is a mechanical refactor rather than untangling a knot.
+
+## Resulting context
+
+When the three factors line up — a large organization, a complex domain with natural seams, and components with divergent scaling needs — *and* you have the operational maturity to run many services, microservices are likely to pay off. When they do not line up, a modular monolith is almost always the better, cheaper, faster choice, and it keeps the option to decompose later open.
+
+The reassuring truth is that this is rarely an irreversible, all-or-nothing decision. You can start as a monolith and peel off services one at a time as the need becomes real — extracting the highest-pain component first and leaving the rest in the monolith for as long as it serves you.
+
+## Related patterns
+
+- [Benefits and Drawbacks](/microservices-design-from-zero-to-hero/en/intro-and-principles/benefits-and-drawbacks/) — the ledger this decision balances.
+- [Monolith vs Microservices](/microservices-design-from-zero-to-hero/en/intro-and-principles/monolith-vs-microservices/) — the two options the flow chooses between.
+- [The Pattern Language](/microservices-design-from-zero-to-hero/en/intro-and-principles/the-pattern-language/) — what to learn once you have decided to decompose.
+
+<Callout title="Most teams should start monolith-first">
+Unless you already have a large organization, a genuinely complex domain, and components with clearly divergent scaling needs, begin with a modular monolith. Get the product right, discover where the real boundaries are, and extract services one at a time when the pain is concrete. Premature decomposition is one of the most expensive mistakes in this field — you pay the full cost of distribution to solve problems you do not yet have.
+</Callout>
+
+export const quizWhen = [
+  {
+    q: 'Which combination of factors most justifies adopting microservices?',
+    options: [
+      'A small team, a simple domain, and uniform scaling needs',
+      'A large organization, a complex domain with natural boundaries, divergent scaling needs, and operational maturity',
+      'A messy monolith that simply feels hard to work in',
+      'A desire to use the latest architectural trend',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "monolith first" advise?',
+    options: [
+      'Never use microservices under any circumstances',
+      'Start with a well-structured monolith, discover the real domain boundaries, and extract services as concrete pain appears',
+      'Build every service as a monolith internally',
+      'Always rewrite the monolith before adding any service',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is a modular monolith a good starting point even if you may decompose later?',
+    options: [
+      'Because modules cannot be tested',
+      'Because clean internal boundaries make extracting a service later a mechanical refactor rather than untangling a knot',
+      'Because it forces you to use microservices immediately',
+      'Because it removes the need for any database',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/when-to-use-microservices" questions={quizWhen} />
+
+<ProgressTracker client:visible id="intro-and-principles/when-to-use-microservices" />

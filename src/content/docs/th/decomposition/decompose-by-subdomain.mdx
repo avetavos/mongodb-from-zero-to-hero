@@ -1,0 +1,120 @@
+---
+title: Decompose by Subdomain
+description: 'ใช้ Domain-Driven Design เพื่อค้นหาเส้นแบ่งของ service: ระบุ subdomain ต่าง ๆ ของธุรกิจ ให้แต่ละตัวมี bounded context ของตัวเองพร้อมโมเดลที่สอดคล้องกันหนึ่งเดียว แล้วทำให้แต่ละ context เป็น service'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## บริบท (Context)
+
+คุณมีการแบ่ง service ครั้งแรกแล้ว — อาจวาดด้วย business capability — และเส้นแบ่งก็รู้สึกถูกต้องพอประมาณ แต่ *โมเดล* รั่วไหลข้ามเส้นเหล่านั้น คำว่า "customer" หมายถึง billing account ใน service หนึ่ง, ผู้รับสินค้าในอีก service หนึ่ง, และ marketing lead ในอันที่สาม แต่ทั้งหมดกลับพยายามใช้ object `Customer` ที่อ้วนบวมตัวเดียวร่วมกัน ทุกทีมที่ไปแตะมันต้องเข้าใจกฎของทุกทีมอื่น คุณต้องการวิธีที่มีวินัยมากกว่าในการตัดสินไม่เพียงว่า service อยู่ตรงไหน แต่ว่าโมเดลของแต่ละ service จริง ๆ แล้ว *คือ* อะไร
+
+## ปัญหา (Problem)
+
+domain model เดียวที่ครอบคลุมทั้งระบบนั้นน่าหลงใหลและแทบจะเป็นกับดักเสมอ เมื่อมีแนวคิดและกฎเพิ่มขึ้นเรื่อย ๆ บน entity ที่ใช้ร่วมกัน โมเดลก็ยิ่งคลุมเครือ คำเดียวกันมีความหมายต่างกันสำหรับส่วนต่าง ๆ ของธุรกิจ และการพยายามประนีประนอมพวกมันก็ให้ class ที่ไม่ทำให้ใครพอใจและเปลี่ยนแปลงตลอดเวลา นี่คือปัญหา *large monolithic domain model* ความคลุมเครือไม่ใช่อุบัติเหตุที่จะมาเก็บกวาดทีหลัง มันสะท้อนข้อเท็จจริงแท้จริงที่ว่าส่วนต่าง ๆ ของธุรกิจคิดเกี่ยวกับคำเดียวกันในแบบที่ต่างกันอย่างชอบธรรม
+
+ดังนั้นแรงต่าง ๆ คือ คุณต้องการให้แต่ละ service มีโมเดลที่ชัดเจน สอดคล้องกันภายใน และเล็กพอที่จะใช้เหตุผลกับมันได้ — แต่คุณก็ต้องยอมรับด้วยว่าไม่มีโมเดลเดียวใดที่จะรับใช้ทั้งธุรกิจได้โดยไม่กลายเป็นสิ่งไร้ความหมาย
+
+## วิธีแก้ (Solution)
+
+**Domain-Driven Design (DDD)** ให้คำศัพท์แก่ปัญหานี้ พื้นที่ปัญหาโดยรวม — ทุกอย่างที่ธุรกิจเกี่ยวข้องด้วย — คือ *domain* มันถูกแบ่งออกเป็น **subdomain** ต่าง ๆ ซึ่งเป็นพื้นที่ความเชี่ยวชาญที่แตกต่างกันภายในนั้น เช่น การรับ order, inventory, billing, การจัดส่ง subdomain มาในหลายรูปแบบที่ชี้นำการลงทุน คือ subdomain แบบ **core** เป็นสิ่งที่สร้างความแตกต่างให้ธุรกิจและสมควรได้วิศวกรที่ดีที่สุดของคุณ, subdomain แบบ **supporting** จำเป็นแต่ไม่โดดเด่น, และ subdomain แบบ **generic** (เช่น authentication หรือ payments) มักซื้อได้แทนที่จะสร้างเอง
+
+แนวคิด DDD ที่สำคัญสำหรับการ decompose คือ **bounded context** ซึ่งเป็นเส้นแบ่งที่ชัดเจนซึ่งภายในนั้น domain model หนึ่ง ๆ มีผลและทุกคำมีความหมายที่แม่นยำเพียงหนึ่งเดียว ภายใน billing context "customer" หมายถึง billing account อย่างแน่นอน โดยไม่ต้องขอโทษและไม่ต้องมีคำนิยามที่ใช้ร่วมกัน ภายนอกมัน คำนี้อาจหมายถึงอย่างอื่น และนั่นก็ไม่เป็นไร เพราะเส้นแบ่งทำให้ความแตกต่างนั้นชัดเจน
+
+pattern นี้คือการ **จัดให้แต่ละ bounded context สอดคล้องกับ subdomain หนึ่ง และ implement แต่ละ bounded context เป็น service** ที่ใดที่สอง context ต้องทำงานร่วมกัน คุณนิยามการแปลระหว่างโมเดลของพวกมันอย่างจงใจ — ผ่าน published contract หรือ anti-corruption layer — แทนที่จะปล่อยให้โมเดลหนึ่งซึมเข้าไปในอีกอันหนึ่ง
+
+export const contextDiagram = `flowchart TB
+  subgraph Domain[Domain: e-commerce]
+    direction LR
+    subgraph BCOrder[Bounded Context: Ordering<br/>core]
+      OCust[Customer = buyer placing an order]
+      OOrder[Order, OrderLine]
+    end
+    subgraph BCBill[Bounded Context: Billing<br/>supporting]
+      BCust[Customer = billing account]
+      BInv[Invoice, Payment]
+    end
+    subgraph BCShip[Bounded Context: Delivery<br/>supporting]
+      SCust[Customer = recipient address]
+      SShip[Shipment, Tracking]
+    end
+  end
+  BCOrder -. published contract .-> BCBill
+  BCOrder -. published contract .-> BCShip`;
+
+<Mermaid code={contextDiagram} title="แต่ละ bounded context เป็นเจ้าของโมเดลที่สอดคล้องกันหนึ่งเดียว คำว่า 'customer' มีความหมายที่แม่นยำภายในแต่ละอัน และการแปลระหว่างกันนั้นชัดเจน" />
+
+## เปรียบเทียบกับการ decompose ด้วย business capability
+
+สองกลยุทธ์นี้เสริมกันมากกว่าจะแข่งกัน และมักเห็นพ้องกัน ทั้งคู่มักให้ชุด service ที่คล้ายกัน เพราะ business capability และ subdomain มักบรรยายส่วนเดียวกันของธุรกิจจากสองมุมมอง — capability ถามว่า "ธุรกิจ *ทำ* อะไร?" ส่วน subdomain ถามว่า "นั่นต้องใช้ *พื้นที่ความรู้ใด* และโมเดลใดมีผลที่นั่น?" ความแตกต่างในทางปฏิบัติเป็นเรื่องของความเข้มงวดและการเน้นย้ำ
+
+- **ด้วย business capability** เป็นจุดเริ่มต้นที่เร็วกว่าและเข้าถึงได้ง่ายกว่า มันให้การแบ่งครั้งแรกที่สมเหตุสมผลจากมุมมองเชิงองค์กร แต่หยุดก่อนจะนิยามโมเดลภายในของแต่ละ service
+- **ด้วย subdomain** มีวินัยมากกว่าและขับเคลื่อนด้วยโมเดล มันทำงานพิเศษด้วยการตรึงโมเดลที่ไม่กำกวมหนึ่งเดียวต่อ context ซึ่งเป็นสิ่งที่ป้องกันการรั่วไหลของโมเดลร่วม (shared-model leakage) ที่การ decompose ด้วย capability เพียงอย่างเดียวทิ้งไว้โดยไม่ได้แก้
+
+แนวทางที่พบบ่อยและได้ผลคือใช้ capability สำหรับร่างแรก และใช้ DDD เพื่อทำให้มันละเอียดขึ้น โดยเฉพาะรอบ ๆ core subdomain ที่การวางโมเดลให้ถูกต้องมีความสำคัญมากที่สุด
+
+## บริบทที่ได้ตามมา (Resulting context)
+
+สิ่งที่คุณได้:
+
+- **โมเดลที่ชัดเจนหนึ่งเดียวต่อ service** ภายใน bounded context ทุกคำไม่กำกวม ดังนั้น code จึงเล็กลง กฎอยู่ในที่ของมัน และทีมหยุดเถียงกันเรื่องคำนิยามร่วมที่ไม่มีวันทำให้ทุกคนพอใจ
+- **เส้นแบ่งที่ชัดเจนและมีหลักการ** DDD ทำให้การวาดเส้นเป็นการตัดสินใจเชิงโมเดลที่คุณปกป้องได้ และมันบังคับให้ความสัมพันธ์ระหว่าง service ถูกออกแบบมากกว่าจะถูกค้นพบ
+- **คำแนะนำเรื่องการลงทุน** การจัด subdomain เป็น core, supporting, หรือ generic บอกคุณว่าควรสร้างหรือซื้อตรงไหน และควรวางคนที่เก่งที่สุดของคุณไว้ที่ใด
+
+สิ่งที่คุณต้องจ่าย:
+
+- **เส้นโค้งการเรียนรู้ที่แท้จริง** DDD มีคำศัพท์จำนวนมากและต้องการความร่วมมืออย่างลึกซึ้งกับ domain expert ทีมที่เพิ่งเริ่มกับมันมักนำแนวคิดไปใช้ผิดในตอนแรก
+- **งานแปล** เพราะแต่ละ context ปกป้องโมเดลของตัวเอง การร่วมมือข้าม context จึงต้องการการแมปอย่างชัดเจน — published contract หรือ anti-corruption layer — ซึ่งเป็นความพยายามล่วงหน้าที่มากกว่าการใช้โมเดลเดียวร่วมกัน
+- **เส้นแบ่งก็ยังขยับได้** subdomain ชัดเจนกว่า capability แต่ก็ไม่ได้ภูมิคุ้มกันต่อการเปลี่ยนแปลงเมื่อความเข้าใจ domain ลึกซึ้งขึ้น คุณควรคาดหวังว่าจะต้องปรับ context ขณะที่คุณเรียนรู้
+
+## pattern ที่เกี่ยวข้อง
+
+- [Decompose by Business Capability](/microservices-design-from-zero-to-hero/th/decomposition/decompose-by-business-capability/) — กลยุทธ์เสริมที่ให้การแบ่งครั้งแรกอย่างรวดเร็ว แล้ว DDD จึงทำให้มันละเอียดขึ้น
+- [Self-Contained Service](/microservices-design-from-zero-to-hero/th/decomposition/self-contained-service/) — bounded context ให้โมเดลในที่ (local model) ที่แต่ละ service ต้องใช้ในการตอบ request ด้วยตัวเอง
+- [ภาพรวมการ decompose](/microservices-design-from-zero-to-hero/th/decomposition/) — กลยุทธ์นี้อยู่ตรงไหนในภาพใหญ่
+
+<Callout title="ปล่อยให้คำเดียวกันมีความหมายต่างกัน">
+แนวคิดที่ปลดปล่อยที่สุดเพียงหนึ่งเดียวใน pattern นี้คือการอนุญาตให้คำหนึ่งมีความหมายต่างกันใน context ที่ต่างกัน คำนิยามที่ "ถูกต้อง" ร่วมกันของ `Customer` ทั่วทั้งบริษัทไม่ใช่เป้าหมายที่ควรค่าแก่การไล่ตาม มันคือสิ่งที่สร้างโมเดล monolithic ขึ้นมาเสียเอง bounded context ปล่อยให้ billing, ordering, และ delivery ต่างเก็บความหมายที่แม่นยำที่มันต้องการจริง ๆ ไว้ และเปลี่ยนรอยต่อระหว่างกันให้เป็น contract ที่จงใจและนิยามไว้อย่างดี
+</Callout>
+
+export const quizSubdomain = [
+  {
+    q: 'In Domain-Driven Design, what is a bounded context?',
+    options: [
+      'network firewall รอบ ๆ service หนึ่ง',
+      'เส้นแบ่งที่ชัดเจนซึ่งภายในนั้น domain model หนึ่งมีผลและทุกคำมีความหมายที่แม่นยำเพียงหนึ่งเดียว',
+      'database schema ที่ทุก service ใช้ร่วมกัน',
+      'จำนวน service สูงสุดที่ทีมหนึ่งสามารถเป็นเจ้าของได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What problem does decomposing by subdomain primarily solve that capability decomposition leaves open?',
+    options: [
+      'มันกำจัดความจำเป็นในการสื่อสารระหว่าง service ใด ๆ',
+      'มันตรึงโมเดลที่ไม่กำกวมหนึ่งเดียวต่อ service ป้องกันโมเดลร่วมที่อ้วนบวมซึ่งคำหนึ่งหมายถึงสิ่งที่ต่างกัน',
+      'มันรับประกันว่า service จะไม่ต้องเปลี่ยนแปลงอีกเลย',
+      'มันบังคับให้ทุก service ใช้ภาษาโปรแกรมเดียวกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do decomposition by subdomain and by business capability relate?',
+    options: [
+      'พวกมันเป็นคู่แข่งกัน คุณต้องเลือกอันใดอันหนึ่งเท่านั้นและไม่ใช้อีกอัน',
+      'พวกมันเสริมกันและมักเห็นพ้องกัน capability ให้การแบ่งครั้งแรกอย่างรวดเร็ว DDD ทำให้โมเดลละเอียดขึ้น',
+      'การ decompose ด้วย subdomain แทนที่การ decompose ด้วย capability เพราะ capability ล้าสมัยแล้ว',
+      'พวกมันใช้กับระบบคนละชนิดกันโดยสิ้นเชิงและไม่เคยทับซ้อนกัน',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/decompose-by-subdomain" questions={quizSubdomain} />
+
+<ProgressTracker client:visible id="decomposition/decompose-by-subdomain" />

@@ -1,0 +1,120 @@
+---
+title: The Pattern Language
+description: 'pattern ของ microservices ก่อตัวเป็นภาษาที่เชื่อมโยงกัน: scale cube อธิบายว่าทำไมคุณถึง decompose และจากนั้นการ decompose ก็ไหลต่อไปเป็นปัญหาด้าน data, communication, reliability, observability และ deployment — แต่ละปัญหาถูกแก้โดยกลุ่ม pattern ของมันเอง'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+ถึงตอนนี้คุณตัดสินใจได้แล้วว่า *ควรหรือไม่ควร* ใช้ microservices ถ้าคำตอบคือใช่ คุณจะเผชิญกับรายการ pattern ที่ยาวเหยียด — กลยุทธ์ decomposition, saga, gateway, circuit breaker, tracing และอื่น ๆ — และมันก็ชวนให้มองพวกมันเป็นเมนูของลูกเล่นอิสระ พวกมันไม่ใช่อย่างนั้น แต่ละ pattern มีอยู่เพราะการตัดสินใจก่อนหน้าสร้างปัญหาที่มันแก้ มองแบบนั้นแล้ว pattern ทั้งหลายก่อตัวเป็น **ภาษา** ที่เชื่อมโยงกัน และการเรียนรู้ความเชื่อมโยงนั้นมีค่ามากกว่าการท่องจำรายการใดรายการหนึ่ง
+
+## Problem
+
+คุณจะทำความเข้าใจ pattern หลายสิบตัวได้อย่างไรโดยไม่จมไปกับมัน? คุณต้องการแผนที่: วิธีที่จะมองเห็นว่าทำไม decomposition ถึงคุ้มค่าที่จะทำตั้งแต่แรก และการเลือกหนึ่งครั้งนั้นกระเพื่อมออกไปสู่ตระกูลของปัญหาที่คอร์สที่เหลือพูดถึงได้อย่างไร
+
+เราต้องการสองสิ่ง: โมเดลสำหรับ *ทำไมคุณถึงแยก* ระบบ และโมเดลสำหรับ *การแยกสร้างอะไรขึ้นมา* ที่ pattern ทั้งหลายต้องแก้ตามมา
+
+## Solution
+
+### ทำไมคุณถึงแยก: scale cube
+
+วิธีที่มีประโยชน์ในการคิดเรื่อง scaling คือคิดไปตามแกนอิสระสามแกน ซึ่งมักวาดเป็นลูกบาศก์ (cube):
+
+- **แกน X — horizontal duplication** รันสำเนาที่เหมือนกันของแอปพลิเคชันจำนวนมากหลัง load balancer นี่คือการ scale แบบคลาสสิกที่ง่าย และใช้ได้กับ monolith ด้วย มัน scale throughput แต่ไม่ scale ความซับซ้อน: ทุกสำเนายังบรรจุทั้งระบบ
+- **แกน Y — functional decomposition** แยกแอปพลิเคชันตาม *สิ่งที่มันทำ* ออกเป็น service รอบ business capability นี่คือแกนที่นิยาม microservices มัน scale การพัฒนา — โดยให้ทีมและ component วิวัฒน์อย่างอิสระ — ไม่ใช่แค่ traffic
+- **แกน Z — data partitioning** แยกตาม *ข้อมูลใด* ที่ request แตะต้อง โดยส่งต่อแต่ละ request ไปยัง partition (หรือ shard) ที่ถือข้อมูลของมัน โค้ดเหมือนกันทุกที่ แต่แต่ละ instance ให้บริการข้อมูลส่วนหนึ่ง
+
+แกน Y คือแกนที่คอร์สนี้พูดถึงเป็นหลัก เพราะ functional decomposition คือสิ่งที่เปลี่ยนแอปพลิเคชันหนึ่งให้กลายเป็น service จำนวนมาก — และการเลือกครั้งเดียวนั้นคือต้นตอของกลุ่มปัญหาอื่น ๆ ทั้งหมดด้านล่าง
+
+export const cubeDiagram = `flowchart LR
+  Mono[Single Application] --> X[X-axis<br/>Run many identical copies]
+  Mono --> Y[Y-axis<br/>Split by business capability]
+  Mono --> Z[Z-axis<br/>Partition by data]
+  Y --> Decomp[Functional decomposition<br/>= microservices]`;
+
+<Mermaid code={cubeDiagram} title="scale cube — แกน scaling อิสระสามแกน โดยการ decompose ตามแกน Y นำไปสู่ microservices" />
+
+### การแยกสร้างอะไรขึ้นมา: กลุ่มของ pattern
+
+ชั่วขณะที่คุณ decompose ไปตามแกน Y โซ่ของปัญหาใหม่ ๆ ก็ปรากฏขึ้น และกลุ่มปัญหาแต่ละกลุ่มถูกแก้โดยตระกูลของ pattern พวกมันตามกันมาในลำดับที่เป็นธรรมชาติ:
+
+export const groupsDiagram = `flowchart TB
+  Decomp[Decomposition<br/>split into services] --> Data[Data Management<br/>consistency without a shared DB]
+  Data --> Msg[Transactional Messaging<br/>publish events reliably]
+  Msg --> Comm[Communication<br/>how services talk]
+  Comm --> Rel[Reliability<br/>survive partial failure]
+  Rel --> Obs[Observability<br/>see across services]
+  Obs --> Deploy[Deployment and Cross-cutting<br/>ship, run, secure]`;
+
+<Mermaid code={groupsDiagram} title="decomposition ไหลต่อเป็นโซ่ของกลุ่มปัญหา แต่ละกลุ่มถูกแก้โดยตระกูล pattern ของมันเอง" />
+
+อ่านโซ่นี้เป็นเรื่องราว:
+
+- **Decomposition** แยกระบบออกเป็น service — แต่ตอนนี้ service เหล่านั้นต้องรักษาข้อมูลให้สอดคล้องกัน
+- **Data Management** ฟื้นความสอดคล้องและความสามารถในการ query โดยไม่ต้องมีฐานข้อมูลที่ใช้ร่วมกัน — แต่ความสอดคล้องที่เชื่อถือได้ขึ้นอยู่กับการเผยแพร่ event ในฐานะส่วนหนึ่งของ transaction
+- **Transactional Messaging** ทำให้การเผยแพร่ event นั้นเชื่อถือได้ — แต่ service ก็ยังต้องคุยกันอยู่ดี
+- **Communication** นิยามว่าพวกมันคุยกันอย่างไร ทั้งแบบ synchronous และ asynchronous ผ่าน API และ gateway — แต่เครือข่ายที่พวกมันคุยผ่านล้มเหลวในแบบที่เป็นบางส่วนและน่าประหลาดใจ
+- **Reliability** ทำให้ระบบยังทำงานต่อได้ผ่าน partial failure เหล่านั้น — แต่คุณแก้สิ่งที่คุณมองไม่เห็นข้ามกองทัพ service ไม่ได้
+- **Observability** ทำให้คุณมองเห็นข้ามพวกมันทั้งหมดได้ — และในที่สุดทุกอย่างก็ต้องถูก ship, รัน และรักษาความปลอดภัยบน production
+- **Deployment and Cross-cutting** จัดการช่วงสุดท้ายนั้น
+
+ทุกลูกศรคือปัญหาที่ถูกส่งต่อไปข้างหน้า นั่นคือสิ่งที่ทำให้นี่เป็น *ภาษา* มากกว่ารายการ: คุณไม่สามารถเข้าใจ saga ได้อย่างสมบูรณ์โดยปราศจาก data boundary ที่ทำให้มันจำเป็น และคุณไม่สามารถรัน saga ได้อย่างปลอดภัยโดยปราศจาก messaging ที่เชื่อถือได้รองรับอยู่ข้างใต้ pattern ทั้งหลายอ้างอิงและพึ่งพากันและกัน
+
+## Resulting context
+
+ด้วยแผนที่นี้ คุณสามารถวางตำแหน่ง pattern แต่ละตัวได้ เมื่อคุณเจอตัวใหม่ จงถามว่ามันอยู่ในกลุ่มไหน และการตัดสินใจก่อนหน้าใดที่สร้างปัญหาที่มันจัดการ นิสัยเดียวนั้นเปลี่ยนแคตตาล็อกที่กระจัดกระจายให้เป็นโครงสร้างที่นำทางได้ — และมันก็บอกคุณว่าต้องเรียนอะไรต่อไป เพราะกลุ่มต่าง ๆ ต่อยอดกันและกันตามลำดับ
+
+จุดเริ่มต้นที่เป็นธรรมชาติในการนำสิ่งนี้ไปใช้คือปัญหาแรกที่ decomposition สร้างขึ้น: การรักษาข้อมูลให้สอดคล้องเมื่อทุก service เป็นเจ้าของ store ของตัวเอง
+
+## Related patterns
+
+- [What Is Microservices Architecture?](/microservices-design-from-zero-to-hero/th/intro-and-principles/) — รากฐานที่ทั้งภาษาตั้งอยู่บน
+- [When to Use Microservices](/microservices-design-from-zero-to-hero/th/intro-and-principles/when-to-use-microservices/) — การตัดสินใจที่จะ decompose ซึ่งเริ่มต้นโซ่นี้ให้เคลื่อนไหว
+- [Data Management](/microservices-design-from-zero-to-hero/th/data-management/) — กลุ่มปัญหาแรกที่ decomposition สร้างขึ้น และเป็นโมดูลถัดไปที่ต้องอ่าน
+
+<Callout title="เรียนรู้ความเชื่อมโยง ไม่ใช่แค่แคตตาล็อก">
+pattern ที่อยู่โดดเดี่ยวคือเกร็ดความรู้ pattern ที่อยู่ในตำแหน่งของมันคือเครื่องมือที่คุณรู้ว่าควรหยิบมาใช้เมื่อไร scale cube บอกคุณว่า *ทำไม* ถึง decompose และโซ่ของกลุ่มปัญหาบอกคุณว่า decomposition จะยื่นอะไรให้คุณต่อไป จงพกแผนที่นี้ไปตลอดคอร์สที่เหลือ แล้ว pattern ใหม่แต่ละตัวจะลงล็อกในโครงสร้างที่คุณเข้าใจอยู่แล้ว
+</Callout>
+
+export const quizLanguage = [
+  {
+    q: 'Which axis of the scale cube corresponds to splitting an application into microservices?',
+    options: [
+      'แกน X — รันสำเนาที่เหมือนกันจำนวนมากหลัง load balancer',
+      'แกน Y — functional decomposition ตาม business capability',
+      'แกน Z — partition request ตามข้อมูลที่มันแตะต้อง',
+      'ไม่มีแกนใดเกี่ยวข้องกับ microservices',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What makes the microservices patterns a "language" rather than a list?',
+    options: [
+      'พวกมันเขียนด้วยภาษาโปรแกรมเดียวกันทั้งหมด',
+      'แต่ละ pattern แก้ปัญหาที่เกิดจากการตัดสินใจก่อนหน้า ดังนั้น pattern ทั้งหลายจึงอ้างอิงและพึ่งพากันและกัน',
+      'ต้องถูกนำไปใช้ตามลำดับตัวอักษร',
+      'พวกมันไม่เกี่ยวข้องกันและเรียนรู้ในชุดผสมใดก็ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which problem group does decomposition create first, according to the chain?',
+    options: [
+      'Deployment และ cross-cutting concern',
+      'Data management — การรักษาข้อมูลให้สอดคล้องโดยไม่ต้องมีฐานข้อมูลที่ใช้ร่วมกัน',
+      'Observability ข้าม service',
+      'การเลือกภาษาโปรแกรม',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/the-pattern-language" questions={quizLanguage} />
+
+<ProgressTracker client:visible id="intro-and-principles/the-pattern-language" />

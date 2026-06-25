@@ -1,0 +1,109 @@
+---
+title: Observability in Microservices
+description: 'You cannot debug a distributed system by SSHing into one box. Observability rebuilds the visibility you lost: structured logs, metrics, traces, and health checks that together explain what your services are doing.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+In the monolith, debugging was almost physical. A request came in, ran through one process, touched one log file, and either returned or threw a stack trace you could read end to end. When something went wrong you opened a terminal, tailed `app.log`, attached a profiler, and watched the whole story unfold in one place.
+
+Then you split that process into twenty services running on dozens of replicas behind a load balancer. A single user click now fans out into a tree of calls across machines you may never log into, replicas that come and go with every deploy, and processes whose local log files vanish the moment a container is recycled.
+
+## Problem
+
+The old habit — SSH into the box and look around — has quietly stopped working. Which box? The request touched eight of them. The replica that served it was killed by the autoscaler two minutes ago, taking its logs with it. The error your customer reported is an HTTP 500 returned by a gateway whose only clue is a downstream timeout it cannot name.
+
+So the central question of this module is this: when no single machine holds the whole truth, how do you understand what your system is doing — well enough to debug an incident at 3 a.m., and well enough to notice trouble before a customer does?
+
+## Solution
+
+The answer is **observability**: instrumenting every service so that its behavior can be reconstructed from the outside, from signals it emits, without logging into anything. Those signals come in four complementary forms, and you want all four.
+
+export const overviewDiagram = `flowchart LR
+  subgraph Services
+    A[Order Service]
+    B[Payment Service]
+    C[Inventory Service]
+  end
+  A -->|logs| LOG[(Log Store)]
+  B -->|logs| LOG
+  C -->|logs| LOG
+  A -->|metrics| MET[(Metrics Store)]
+  B -->|metrics| MET
+  C -->|metrics| MET
+  A -->|traces| TR[(Trace Store)]
+  B -->|traces| TR
+  C -->|traces| TR
+  A -.->|/health| ORCH[Orchestrator]
+  B -.->|/health| ORCH
+  C -.->|/health| ORCH
+  LOG --> DASH[Dashboards & Alerts]
+  MET --> DASH
+  TR --> DASH`;
+
+<Mermaid code={overviewDiagram} title="Every service emits logs, metrics, traces, and health signals to central collectors that feed dashboards and alerts" />
+
+The patterns in this module each cover one of those signals:
+
+- **Health Check API** — every service exposes an endpoint that reports whether it is alive and ready to serve, so orchestrators and load balancers can route around sick instances automatically.
+- **Log Aggregation** — ship structured logs from every replica to a central, searchable store, tied together by a correlation id so one request reads as one story.
+- **Distributed Tracing** — give each external request a trace id, propagate it across every hop, and reconstruct the full call tree with timing so you can see where latency and errors actually live.
+- **Application Metrics** — expose counters, gauges, and histograms for request rate, errors, and latency, so dashboards and alerts can summarize the health of the whole fleet at a glance.
+- **Audit Logging** — record who did what and when as durable, tamper-evident records, kept separate from debug logs because they answer a different question.
+
+## What this module covers
+
+We start with the cheapest, most operational signal (Health Check API), move through the three pillars that explain behavior (logs, traces, metrics), and finish with the specialized record that satisfies security and compliance (Audit Logging). Each lesson follows the same shape: the situation that leads to the pattern, the forces in tension, what the pattern does, a diagram, runnable instrumentation code or a concrete log example, and an honest look at what it costs you.
+
+## Related patterns
+
+- [Health Check API](/microservices-design-from-zero-to-hero/en/observability/health-check-api/) — start here; it is the simplest signal and the one your platform depends on first.
+- [Distributed Tracing](/microservices-design-from-zero-to-hero/en/observability/distributed-tracing/) — the pattern that most directly replaces "read one stack trace" in a distributed world.
+
+<Callout title="Monitoring is not observability">
+Monitoring answers questions you already knew to ask — "is CPU over 80 percent?" Observability is the property that lets you ask *new* questions about your system after it is already running, without shipping new code. The four signals here are the raw material; the goal is to be able to debug a failure you have never seen before from the outside.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Why does "SSH into the box and tail the log" break down in a microservice system?',
+    options: [
+      'SSH is disabled on all production servers by policy',
+      'A single request spans many short-lived replicas, so no one machine or log file holds the whole story',
+      'Log files are encrypted and cannot be read locally',
+      'Microservices do not produce logs at all',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which four signals does observability combine?',
+    options: [
+      'CPU, memory, disk, and network',
+      'Logs, metrics, traces, and health checks',
+      'Unit tests, integration tests, load tests, and chaos tests',
+      'Firewalls, proxies, load balancers, and caches',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What distinguishes observability from plain monitoring?',
+    options: [
+      'Observability lets you ask new questions about a running system without shipping new code; monitoring checks predefined conditions',
+      'Observability only works in the cloud',
+      'Monitoring requires distributed tracing but observability does not',
+      'They are different words for exactly the same thing',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="observability/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="observability/index" />

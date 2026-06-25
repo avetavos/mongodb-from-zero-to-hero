@@ -1,0 +1,248 @@
+---
+title: Polling Publisher
+description: 'The simple way to drain the outbox: a relay periodically queries the outbox table for unpublished rows, publishes them to the broker, and marks them sent — no change-data-capture infrastructure required.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You have a [Transactional Outbox](/microservices-design-from-zero-to-hero/en/transactional-messaging/transactional-outbox/) and you need a relay to deliver its rows. [Transaction Log Tailing](/microservices-design-from-zero-to-hero/en/transactional-messaging/transaction-log-tailing/) is efficient but brings a CDC stack — replication slots, a connector, log retention — that may be more than your team wants to run, especially early on. You want a relay you can build and operate with nothing but your application and its database.
+
+## Problem
+
+Without access to the transaction log, the only way to learn about new outbox rows is to ask the database for them. But a naive loop has pitfalls: it can pick up the same row twice if two relay instances run, it can publish a row and then forget to mark it sent, and it can hammer the database if it polls too aggressively.
+
+So the forces are: you want the simplest possible relay with no extra infrastructure, you must still publish every row at least once and avoid publishing a row twice from a single relay, and you want to keep the polling cost and latency reasonable.
+
+## Solution
+
+Run a **polling publisher**: a background loop that, on a fixed interval, selects a batch of unsent rows from the outbox (oldest first), publishes each to the broker, and marks it sent once the broker acknowledges. Select with a row lock that skips already-locked rows so that multiple relay instances can run safely without claiming the same rows. After publishing, delete the row or set a `published_at` timestamp so it is not picked up again.
+
+Delivery is still at least once: if the relay crashes after publishing but before marking the row sent, the next poll re-publishes it. That is acceptable — the [Idempotent Consumer](/microservices-design-from-zero-to-hero/en/transactional-messaging/idempotent-consumer/) on the other end absorbs the duplicate.
+
+export const pollingDiagram = `sequenceDiagram
+  participant R as Polling Relay
+  participant DB as Outbox Table
+  participant B as Message Broker
+  loop every interval
+    R->>DB: SELECT unsent rows FOR UPDATE SKIP LOCKED
+    DB-->>R: batch of rows
+    R->>B: publish each message
+    B-->>R: ack
+    R->>DB: mark rows as sent (or delete)
+  end`;
+
+<Mermaid code={pollingDiagram} title="The relay polls the outbox on an interval, publishes unsent rows, then marks them sent" />
+
+## Example
+
+The loop claims a batch with `FOR UPDATE SKIP LOCKED` so concurrent relays do not collide, publishes each row, and marks it sent in the same transaction that locked it.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    async function pollOnce(pool: Pool, broker: Broker): Promise<void> {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const { rows } = await client.query(
+          `SELECT id, event_type, payload FROM outbox
+             WHERE published_at IS NULL
+             ORDER BY created_at
+             LIMIT 100
+             FOR UPDATE SKIP LOCKED`,
+        );
+
+        for (const row of rows) {
+          await broker.publish(row.event_type, row.payload, { key: row.id });
+          await client.query(
+            'UPDATE outbox SET published_at = now() WHERE id = $1',
+            [row.id],
+          );
+        }
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    setInterval(() => pollOnce(pool, broker).catch(console.error), 1000);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import time
+
+    def poll_once(conn, broker) -> None:
+        with conn:  # one transaction: claim, publish, mark sent
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, event_type, payload FROM outbox
+                         WHERE published_at IS NULL
+                         ORDER BY created_at
+                         LIMIT 100
+                         FOR UPDATE SKIP LOCKED"""
+                )
+                rows = cur.fetchall()
+                for row_id, event_type, payload in rows:
+                    broker.publish(event_type, payload, key=row_id)
+                    cur.execute(
+                        "UPDATE outbox SET published_at = now() WHERE id = %s",
+                        (row_id,),
+                    )
+
+    while True:
+        poll_once(conn, broker)
+        time.sleep(1)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func pollOnce(ctx context.Context, db *sql.DB, broker Broker) error {
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil {
+            return err
+        }
+        defer tx.Rollback()
+
+        rows, err := tx.QueryContext(ctx,
+            `SELECT id, event_type, payload FROM outbox
+               WHERE published_at IS NULL
+               ORDER BY created_at
+               LIMIT 100
+               FOR UPDATE SKIP LOCKED`)
+        if err != nil {
+            return err
+        }
+
+        type msg struct{ id, eventType string; payload []byte }
+        var batch []msg
+        for rows.Next() {
+            var m msg
+            if err := rows.Scan(&m.id, &m.eventType, &m.payload); err != nil {
+                rows.Close()
+                return err
+            }
+            batch = append(batch, m)
+        }
+        rows.Close()
+
+        for _, m := range batch {
+            if err := broker.Publish(m.eventType, m.payload, m.id); err != nil {
+                return err
+            }
+            if _, err := tx.ExecContext(ctx,
+                `UPDATE outbox SET published_at = now() WHERE id = $1`, m.id); err != nil {
+                return err
+            }
+        }
+        return tx.Commit()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use sqlx::{Pool, Postgres, Row};
+
+    async fn poll_once(pool: &Pool<Postgres>, broker: &Broker) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?; // claim, publish, mark sent in one tx
+
+        let rows = sqlx::query(
+            "SELECT id, event_type, payload FROM outbox \
+             WHERE published_at IS NULL \
+             ORDER BY created_at LIMIT 100 \
+             FOR UPDATE SKIP LOCKED",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for row in rows {
+            let id: uuid::Uuid = row.get("id");
+            let event_type: String = row.get("event_type");
+            let payload: serde_json::Value = row.get("payload");
+
+            broker.publish(&event_type, &payload, id).await?;
+            sqlx::query("UPDATE outbox SET published_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Simplicity.** No CDC connector, no replication slot, no log retention to tune — just a loop, a query, and your existing database connection. This is often the right first relay.
+- **Portability.** The pattern is plain SQL, so it works on any relational database and is trivial to reason about and test.
+- **Safe concurrency.** `FOR UPDATE SKIP LOCKED` lets several relay instances share the work without publishing the same row twice.
+
+What it costs you:
+
+- **Polling latency.** A message waits, on average, half a polling interval before it is published. Shortening the interval improves latency but raises load.
+- **Database load.** Every poll runs a query whether or not there is work to do, so the outbox table and its index take constant traffic — exactly the overhead log tailing avoids.
+- **Still at-least-once.** A crash between publish and mark-sent causes a re-publish, so consumers must be idempotent.
+
+A practical rule: start with a **polling publisher** because it is simple and dependency-free; move to **transaction log tailing** when polling latency or load becomes a real problem.
+
+## Related patterns
+
+- [Transactional Outbox](/microservices-design-from-zero-to-hero/en/transactional-messaging/transactional-outbox/) — produces the rows this relay polls.
+- [Transaction Log Tailing](/microservices-design-from-zero-to-hero/en/transactional-messaging/transaction-log-tailing/) — the lower-latency, higher-complexity relay.
+- [Idempotent Consumer](/microservices-design-from-zero-to-hero/en/transactional-messaging/idempotent-consumer/) — required because polling delivers at least once.
+
+<Callout title="Mark sent in the same transaction that publishes">
+The dangerous version of this pattern publishes a row and then marks it sent in a separate step. Do the claim and the mark in one transaction with `FOR UPDATE SKIP LOCKED`, and accept that a crash mid-loop will re-publish a row. Trying to make polling exactly-once usually just moves the race somewhere subtler — lean on idempotent consumers instead.
+</Callout>
+
+export const quizPolling = [
+  {
+    q: 'How does a polling publisher discover new outbox rows?',
+    options: [
+      'It tails the database transaction log',
+      'It periodically queries the outbox table for unpublished rows',
+      'The broker pushes new rows to it',
+      'It receives a callback from the application on every insert',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why use FOR UPDATE SKIP LOCKED when selecting rows to publish?',
+    options: [
+      'To make the query run faster on a single relay',
+      'So multiple relay instances can run concurrently without publishing the same row twice',
+      'To guarantee exactly-once delivery to the broker',
+      'To avoid writing to the database at all',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the main trade-off of polling versus log tailing?',
+    options: [
+      'Polling loses messages while log tailing does not',
+      'Polling is simpler and dependency-free but adds latency and constant database load',
+      'Polling requires a CDC connector while log tailing does not',
+      'Polling guarantees exactly-once delivery while log tailing does not',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactional-messaging/polling-publisher" questions={quizPolling} />
+
+<ProgressTracker client:visible id="transactional-messaging/polling-publisher" />

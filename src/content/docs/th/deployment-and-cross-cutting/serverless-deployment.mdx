@@ -1,0 +1,141 @@
+---
+title: Serverless Deployment
+description: 'รัน service เป็น function บน platform ที่จัดการ server ให้คุณ: code รันเฉพาะเมื่อตอบสนองต่อ request หรือ event scale จากศูนย์ไปหลาย instance โดยอัตโนมัติ และคุณจ่ายต่อ invocation — แลกกับ cold start ข้อจำกัด runtime และ platform lock-in'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+บาง service ของคุณทำงานจริงแต่เป็นแบบ bursty (พุ่งเป็นช่วง) service ที่ทำ thumbnail รูปจะรันเฉพาะเมื่อมีคนอัปโหลดรูป webhook handler ทำงานไม่กี่ครั้งต่อชั่วโมง report generator รายคืนรันวันละครั้ง ด้วยโมเดล container แต่ละตัวเหล่านี้ยังต้องมีอย่างน้อยหนึ่ง replica รันตลอดเวลา กิน memory และยึดช่องใน cluster รองานที่มาเป็นช่วงพุ่ง
+
+คุณกำลังจ่าย — ทั้งเงินและความใส่ใจด้าน operation — เพื่อรักษา process ที่ว่างอยู่ให้อุ่นไว้ และเพื่อ patch เครื่องที่อยู่ข้างใต้มัน สำหรับ workload ที่ขับเคลื่อนด้วย event และพุ่งเป็นช่วง นั่นรู้สึกเหมือนเป็นค่าเริ่มต้นที่ผิด คุณอยากให้ service ไม่ต้องมีอยู่เลยจนกว่าจะมีงานให้มันทำ
+
+## ปัญหา
+
+คุณต้องการรันชิ้นส่วนของ business logic โดยไม่ต้อง provision, patch หรือ scale server ใด ๆ ด้วยตัวเอง คุณต้องการให้มัน scale ลงไปถึง **ศูนย์** เมื่อว่าง เพื่อให้มันไม่มีค่าใช้จ่าย และ scale **ขึ้นโดยอัตโนมัติ** หนึ่ง instance ต่อหนึ่ง request ที่เกิดขึ้นพร้อมกัน เมื่อมีการพุ่งเข้ามา — โดยที่คุณไม่ต้องตั้งค่า autoscaler และคุณต้องการจ่ายเฉพาะเวลาที่ code รันจริง ไม่ใช่จ่ายสำหรับ capacity ที่จองไว้
+
+ดังนั้นแรงที่ขัดแย้งกันคือ: กำจัด operation ของ server และค่าใช้จ่ายขณะว่างให้หมดไปเลย ในขณะที่ยัง scale แบบยืดหยุ่นตาม demand ได้ — โดยยอมรับว่าคุณยกการควบคุม runtime ให้ไปเป็นการแลกเปลี่ยน
+
+## ทางออก
+
+รับเอา **serverless deployment** มาใช้ หรือที่เรียกว่า Functions as a Service (FaaS) คุณ package logic ของคุณเป็น **function** แล้วมอบให้ platform เช่น AWS Lambda, Google Cloud Functions หรือ Azure Functions คุณไม่จัดการ server ใด ๆ platform เป็นผู้ provision, patch และ scale สภาพแวดล้อมการรันให้คุณ
+
+function ผูกกับ **trigger** — HTTP request, message บน queue, การอัปโหลดไฟล์, timer เมื่อ trigger ทำงาน platform จะปั้น instance ของ function ขึ้นมา รันมัน แล้วรื้อทิ้ง (หรือเก็บมันอุ่นไว้สั้น ๆ เพื่อนำกลับมาใช้ใหม่) เมื่อมี trigger หลายตัวทำงานพร้อมกัน platform จะรันหลาย instance ขนานกัน หนึ่งตัวต่อหนึ่ง invocation ที่เกิดขึ้นพร้อมกัน เมื่อไม่มี trigger ทำงาน ก็ไม่มีอะไรรันและคุณไม่ต้องจ่ายอะไรเลย
+
+invocation แรกหลังจากว่างต้องจ่าย **cold start**: platform ต้องสร้างสภาพแวดล้อมการรันและ initialize runtime ของคุณก่อนที่ code จะรัน invocation ถัด ๆ ไปบน instance ที่อุ่นแล้วจะข้ามต้นทุนนั้นไป
+
+export const serverlessDiagram = `flowchart LR
+  Up[Image uploaded] -->|event| Plat[FaaS platform]
+  Plat -->|invoke| F1[function instance 1]
+  Plat -->|invoke| F2[function instance 2]
+  Plat -->|invoke| F3[function instance 3]
+  F1 --> Store[(Thumbnail store)]
+  F2 --> Store
+  F3 --> Store
+  Idle[No events] -.->|scales to zero| Plat`;
+
+<Mermaid code={serverlessDiagram} title="event ทริกเกอร์ platform ซึ่งปั้น function instance หนึ่งตัวต่อหนึ่ง invocation ที่เกิดขึ้นพร้อมกัน และ scale กลับลงไปถึงศูนย์เมื่อว่าง" />
+
+## ตัวอย่าง
+
+คุณอธิบาย function เชิงประกาศ: runtime ของมัน, handler entry point, trigger และ resource limit ของมัน platform จัดการต่อจากนั้น — ไม่มี server, จำนวน replica หรือ operating system ให้คุณจัดการ
+
+```yaml
+functions:
+  generate-thumbnail:
+    runtime: nodejs20
+    handler: src/handler.onUpload
+    memory: 512MB
+    timeout: 30s
+    environment:
+      THUMBNAIL_BUCKET: thumbnails-prod
+    trigger:
+      type: object-storage
+      bucket: uploads-prod
+      event: object.created
+    concurrency:
+      maxInstances: 100
+      reservedInstances: 0   # scale all the way to zero when idle
+```
+
+platform อ่านสิ่งนี้และในแต่ละ event `object.created` ใน uploads bucket จะ invoke `onUpload` โดย scale จากศูนย์ขึ้นไปถึง 100 instance ขนานกันตามอัตราการอัปโหลดที่ต้องการ แล้วกลับลงไปถึงศูนย์เมื่อ bucket เงียบลง
+
+## บริบทที่ได้
+
+สิ่งที่คุณได้:
+
+- **ไม่มี operation ของ server** ไม่มี host ให้ provision, patch หรือ scale platform เป็นเจ้าของ operating system, การ upgrade runtime และการวางแผน capacity
+- **scale ลงถึงศูนย์ จ่ายตามการใช้งาน** workload ที่ว่างไม่มีค่าใช้จ่าย และคุณจ่ายตามเวลาการรันแทนที่จะจ่ายตาม capacity ที่จองไว้ — เข้ากันได้ดีกับงานที่ bursty, ขับเคลื่อนด้วย event หรือเกิดไม่บ่อย
+- **ยืดหยุ่นโดยค่าเริ่มต้น** การพุ่งของ traffic ถูกรองรับด้วย instance ที่มากขึ้นโดยอัตโนมัติ โดยไม่มี autoscaler ให้ปรับจูน
+
+สิ่งที่คุณต้องเสีย:
+
+- **cold start** request แรกหลังจากว่างต้องรอขณะที่ platform initialize สภาพแวดล้อม ซึ่งกระทบ endpoint ที่ไวต่อ latency และถูก invoke ไม่บ่อย
+- **ข้อจำกัด runtime** function เผชิญเพดานด้านเวลาการรัน, memory และขนาด package และมักเป็นแบบ stateless และอายุสั้น — workload ที่รันยาวหรือมี state เข้ากันได้ไม่ดี
+- **lock-in และการทดสอบ local ที่ยากขึ้น** trigger, การ package และ API เป็นแบบเฉพาะ platform ดังนั้น portability และการจำลอง local ที่ซื่อตรงจึงอ่อนกว่า container ธรรมดา
+
+กฎที่ใช้ได้จริง: เอื้อมไปหา serverless เมื่องานขับเคลื่อนด้วย event, พุ่งเป็นช่วง หรือเกิดไม่บ่อย และความทนทานต่อ latency อยู่ในเกณฑ์ที่รับได้ ส่วน service ที่คงที่ วิกฤตต่อ latency หรือรันยาว ให้เก็บไว้บน container
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Service per Container](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/service-per-container/) — โมเดล runtime ทางเลือกสำหรับ service ที่คงที่ อยู่ยาว ที่คุณอยากควบคุมเอง
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/externalized-configuration/) — function ก็ยังรับการตั้งค่าจากค่า environment ที่ inject เข้ามา ไม่ใช่จากค่าคงที่ที่ฝังไว้
+- [Microservice Chassis](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/microservice-chassis/) — แม้แต่ function ก็ได้ประโยชน์จาก baseline ร่วมด้าน logging, metric และ config
+
+<Callout title="Serverless เป็นทางเลือก runtime ไม่ใช่ architecture">
+"Serverless" ไม่ได้หมายความว่าไม่มี server — มันหมายความว่าคุณไม่จัดการมัน มันเป็นวิธีหนึ่งในการรัน service ที่อยู่เคียงข้าง container ไม่ใช่ตัวแทนของ service boundary ที่ดี เลือกมันตาม workload: thumbnailer หรือ webhook handler เข้ากันได้ดีมาก ส่วน request path ที่ latency ต่ำซึ่งต้องอุ่นอยู่เสมอมักจะไม่
+</Callout>
+
+export const quizServerless = [
+  {
+    q: '"serverless" จริง ๆ แล้วหมายความว่าอะไร?',
+    options: [
+      'ไม่มี server เข้ามาเกี่ยวข้องเลย',
+      'คุณรัน logic ของคุณเป็น function บน platform ที่ provision, patch และ scale server ให้คุณ',
+      'service รันทั้งหมดใน browser',
+      'คุณต้องจัดการ autoscaler ของตัวเอง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'cold start คืออะไร?',
+    options: [
+      'function ที่ล้มเหลวในการรันครั้งแรก',
+      'latency ของการ initialize สภาพแวดล้อมการรันใหม่ก่อนที่ code ของคุณจะรัน หลังจากช่วงเวลาที่ว่าง',
+      'การ deploy ที่เกิดขึ้นนอกเวลาทำงาน',
+      'function ที่ memory หมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'workload ใดเข้ากันได้ดีที่สุดกับ serverless deployment?',
+    options: [
+      'request path ที่วิกฤตต่อ latency ซึ่งต้องตอบสนองภายในหลักหน่วยมิลลิวินาทีเสมอ',
+      'process ที่มี state รันยาวซึ่งถือ connection ไว้หลายชั่วโมง',
+      'งานที่ bursty ขับเคลื่อนด้วย event เช่นการสร้าง thumbnail เมื่อมีการอัปโหลดไฟล์',
+      'service ที่ต้องรันต่อเนื่องที่โหลดคงที่ตายตัว',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'ข้อใดคือข้อเสียจริงของ serverless?',
+    options: [
+      'คุณต้อง patch operating system เอง',
+      'cold start, ข้อจำกัด runtime และ lock-in เฉพาะ platform ที่ทำให้ portability อ่อนลง',
+      'มันไม่สามารถ scale เกินหนึ่ง instance ได้เลย',
+      'มันมีค่าใช้จ่ายมากกว่า container เสมอแม้ขณะว่าง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/serverless-deployment" questions={quizServerless} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/serverless-deployment" />

@@ -1,0 +1,112 @@
+---
+title: Benefits and Drawbacks
+description: 'Microservices buy you independent deployment and scaling, team autonomy, fault isolation, and technology diversity — and charge you in distributed-system complexity, harder consistency, operational overhead, and tougher testing.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+You understand what a microservices architecture is and how it contrasts with a monolith. Before deciding whether to adopt it, you need an honest ledger: what the architecture actually gives you, and what it actually charges you. Marketing and conference talks tend to list the benefits and skip the bill. This lesson keeps both columns side by side, because you only get the benefits *by* paying the costs — they are two faces of the same decision.
+
+## Problem
+
+The danger is adopting microservices for the upside while underestimating the downside. Teams hear "scale independently" and "deploy faster" and move, only to discover that a request now crosses five services, a single transaction has become a multi-step workflow, and a simple bug now requires correlating logs from three processes.
+
+So the question this lesson answers is: for each benefit microservices promise, what is the matching cost, and how do you weigh the two?
+
+## Solution
+
+Lay the trade-off out as two connected columns. Every benefit on the left has a corresponding cost on the right — they come together, not separately.
+
+export const tradeoffDiagram = `flowchart LR
+  subgraph Benefits[Benefits]
+    B1[Independent deploy and scale]
+    B2[Team autonomy]
+    B3[Fault isolation]
+    B4[Technology diversity]
+  end
+  subgraph Costs[Drawbacks]
+    C1[Distributed-system complexity]
+    C2[Data consistency is harder]
+    C3[Operational overhead]
+    C4[Testing across services]
+  end
+  B1 -.- C1
+  B2 -.- C3
+  B3 -.- C2
+  B4 -.- C4`;
+
+<Mermaid code={tradeoffDiagram} title="Each benefit of microservices is paid for by a matching cost" />
+
+### The benefits
+
+- **Independent deployment and scaling.** Each service ships on its own schedule, so a small change to one service does not require redeploying the whole system. You can also run more instances of just the service that needs them, instead of scaling the entire application.
+- **Team autonomy.** A team can own a service end to end — its code, its data, its release pipeline — and make local decisions without coordinating a shared codebase or a shared deploy with everyone else.
+- **Fault isolation.** A failure can be contained to one service. If the recommendations service falls over, the checkout service can keep taking orders, provided you have designed the boundaries to degrade gracefully.
+- **Technology diversity.** Each service can choose the language, framework, or datastore that fits its job, and you can adopt a new technology in one service without rewriting everything.
+
+### The drawbacks
+
+- **Distributed-system complexity.** The network is now in the middle of your application. Calls can be slow, fail, time out, or arrive twice. Behavior that was a deterministic function call becomes a request that must handle partial failure.
+- **Data consistency is harder.** With each service owning its data, you lose the single atomic transaction. Keeping data consistent across services means eventual consistency, sagas, and compensating actions — a whole module of this course exists because of this one cost.
+- **Operational overhead.** You now deploy, monitor, and secure many services instead of one. This demands real investment in automation, CI/CD, container orchestration, and centralized logging and tracing before the architecture pays off.
+- **Testing across services.** Unit tests are unchanged, but verifying that services work *together* now involves the network, contracts between services, and the failure modes of distributed calls. End-to-end testing gets meaningfully harder.
+
+## Resulting context
+
+The honest summary is that microservices move complexity, they do not remove it. In a monolith the complexity lives inside the code, where a compiler and a debugger can help you. In microservices a large share of it moves into the spaces *between* services — the network, the data, the operations — where your tools are weaker and your failure modes are messier.
+
+That trade is worth making when the benefits target a problem you actually have: teams blocked on one another, components with wildly different scaling needs, or a fault-isolation requirement you cannot meet in one process. It is a bad trade when you adopt the costs to chase benefits you do not yet need. The next lesson turns this judgment into a concrete decision.
+
+## Related patterns
+
+- [Monolith vs Microservices](/microservices-design-from-zero-to-hero/en/intro-and-principles/monolith-vs-microservices/) — the two architectures these trade-offs sit between.
+- [When to Use Microservices](/microservices-design-from-zero-to-hero/en/intro-and-principles/when-to-use-microservices/) — turning this ledger into a decision.
+- [Data Management](/microservices-design-from-zero-to-hero/en/data-management/) — the module devoted to the consistency cost.
+
+<Callout title="Microservices move complexity, they don't delete it">
+The complexity does not vanish when you decompose; it relocates from inside your code to the network, the data, and your operations. Adopt microservices when that relocation buys you something concrete — independent scaling, fault isolation, team autonomy — and only after you have the automation to pay the operational bill. Otherwise you keep all the complexity and lose the debugger.
+</Callout>
+
+export const quizTradeoff = [
+  {
+    q: 'Which of these is a benefit of microservices?',
+    options: [
+      'A single atomic transaction across all services',
+      'Independent deployment and scaling of individual services',
+      'Simpler end-to-end testing',
+      'Fewer moving parts to operate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is data consistency harder in microservices?',
+    options: [
+      'Because databases are slower than in monoliths',
+      'Because each service owns its data, so you lose the single atomic transaction and must use eventual consistency and compensating actions',
+      'Because microservices cannot use relational databases',
+      'Because services are not allowed to store any data',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the most honest summary of the microservices trade-off?',
+    options: [
+      'Microservices remove complexity from your system',
+      'Microservices move complexity from inside the code into the network, data, and operations between services',
+      'Microservices have benefits but no real drawbacks',
+      'Microservices are always slower than monoliths',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/benefits-and-drawbacks" questions={quizTradeoff} />
+
+<ProgressTracker client:visible id="intro-and-principles/benefits-and-drawbacks" />

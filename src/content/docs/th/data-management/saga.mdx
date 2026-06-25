@@ -1,0 +1,346 @@
+---
+title: Saga
+description: 'รักษาข้อมูลให้สอดคล้องข้าม service โดยไม่ต้องใช้ distributed transaction: ร้อย local transaction เข้าด้วยกัน ประสานงานด้วย event หรือ orchestrator ส่วนกลาง และยกเลิกด้วย compensating transaction เมื่อ step ใด step หนึ่งล้มเหลว'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท (Context)
+
+ตอนนี้แต่ละ service เป็นเจ้าของฐานข้อมูลของตัวเองแล้ว แต่การสั่งซื้อหนึ่งครั้งเป็นการดำเนินงานทางธุรกิจหนึ่งเดียวที่พาดข้ามถึงสามตัว: Order service บันทึก order, Customer service จองเครดิตของผู้ซื้อ และ Inventory service กันสต๊อกไว้ ใน monolith นี่เป็น transaction เดียว — การเปลี่ยนแปลงทั้งสามอย่าง commit พร้อมกัน หรือไม่มีอะไร commit เลย เมื่อมีฐานข้อมูลส่วนตัวสามตัว transaction เดียวนั้นเป็นไปไม่ได้
+
+## ปัญหา (Problem)
+
+คุณอาจคว้า distributed transaction มาใช้ กลไกคลาสสิกอย่าง two-phase commit (2PC) สั่งให้ผู้เข้าร่วมทุกคน prepare แล้วบอกให้ทุกคน commit มันให้ atomicity กับคุณจริง แต่ด้วยราคาที่แพง: ผู้เข้าร่วมทุกคนถือ lock ไว้ตลอดระยะเวลา ผู้เข้าร่วมที่ช้าหรือ crash เพียงหนึ่งรายทำให้ทุกคนค้าง และ data store และ message broker สมัยใหม่จำนวนมากไม่รองรับมันเลย 2PC แลก availability และ scalability กับ strong consistency — ตรงข้ามกับสิ่งที่คุณแยกระบบออกมาเพื่อให้ได้
+
+ดังนั้นแรงที่ขัดแย้งกันคือ: คุณต้องการให้การดำเนินงานที่พาดหลาย service ทำสำเร็จทั้งหมด หรือย้อนกลับทั้งหมด แต่คุณถือ global lock ไม่ได้ คุณสมมติไม่ได้ว่าทุก service ใช้ transaction manager ร่วมกัน และคุณต้องคง available ไว้แม้ตอนที่ service หนึ่งช้า
+
+## วิธีแก้ (Solution)
+
+**saga** คือลำดับของ local transaction แต่ละ step ทำงานทั้งหมดภายใน service เดียว commit ลงฐานข้อมูลของ service นั้นเอง แล้วจึง trigger step ถัดไป เพราะแต่ละ step commit อย่างอิสระ จึงไม่มี global lock และไม่มี transaction manager ร่วม
+
+ปมอยู่ที่การ rollback เมื่อ local transaction commit แล้ว คุณไม่สามารถ roll back มันทีหลังได้ง่าย ๆ แทนที่จะทำเช่นนั้น แต่ละ step มี **compensating transaction** — local transaction ที่เป็นด้านกลับเชิงความหมายซึ่งยกเลิกผลของมัน ถ้า step หนึ่งล้มเหลวระหว่างทางของ saga, saga จะรัน compensation สำหรับทุก step ที่สำเร็จไปแล้ว ในลำดับย้อนกลับ เพื่อนำระบบกลับสู่สถานะที่สอดคล้องกัน
+
+มีสองวิธีในการประสานงาน step เหล่านี้:
+
+- **Choreography** — ไม่มีตัวประสานงานส่วนกลาง แต่ละ service ฟัง event จาก step ก่อนหน้าและตอบสนองด้วยการทำ local transaction ของตัวเองและ publish event ของตัวเองออกมา workflow คือผลรวมของ subscription ทั้งหมด
+- **Orchestration** — มีตัวประสานงานหนึ่งตัว (orchestrator) คอยบอกแต่ละ service ว่าต้องทำอะไรและรอผลตอบกลับ ขับเคลื่อน saga ทีละ step และตัดสินใจว่าเมื่อใดควร compensate
+
+### Choreography: service ต่าง ๆ ตอบสนองต่อ event ของกันและกัน
+
+export const choreographyDiagram = `sequenceDiagram
+  participant O as Order Service
+  participant C as Customer Service
+  participant I as Inventory Service
+  O->>O: create order (PENDING)
+  O-->>C: OrderCreated
+  C->>C: reserve credit
+  C-->>I: CreditReserved
+  I->>I: reserve stock
+  alt stock available
+    I-->>O: StockReserved
+    O->>O: approve order (CONFIRMED)
+  else out of stock
+    I-->>C: StockReservationFailed
+    C->>C: release credit (compensate)
+    C-->>O: CreditReleased
+    O->>O: reject order (CANCELLED)
+  end`;
+
+<Mermaid code={choreographyDiagram} title="Choreography saga — แต่ละ service ตอบสนองต่อ event; การ compensate ไหลย้อนกลับเป็นทอด ๆ เมื่อล้มเหลว" />
+
+### Orchestration: ตัวประสานงานขับเคลื่อนแต่ละ step
+
+export const orchestrationDiagram = `sequenceDiagram
+  participant SO as Order Saga Orchestrator
+  participant O as Order Service
+  participant C as Customer Service
+  participant I as Inventory Service
+  SO->>O: createOrder()
+  O-->>SO: ok (order PENDING)
+  SO->>C: reserveCredit()
+  C-->>SO: ok
+  SO->>I: reserveStock()
+  alt stock available
+    I-->>SO: ok
+    SO->>O: approveOrder()
+    O-->>SO: order CONFIRMED
+  else out of stock
+    I-->>SO: failed
+    SO->>C: releaseCredit() (compensate)
+    C-->>SO: ok
+    SO->>O: rejectOrder() (compensate)
+    O-->>SO: order CANCELLED
+  end`;
+
+<Mermaid code={orchestrationDiagram} title="Orchestration saga — ตัวประสานงานส่วนกลางออกคำสั่งและ trigger การ compensate เมื่อล้มเหลว" />
+
+## ตัวอย่าง (Example)
+
+นี่คือ orchestration saga สำหรับ flow การสั่งซื้อ orchestrator รัน step ไปข้างหน้าตามลำดับ ถ้า step ใด throw มันจะรัน compensation สำหรับ step ที่สำเร็จไปแล้ว ในลำดับย้อนกลับ แต่ละตัวอย่างเป็นอิสระในตัวเองและเขียนตามแนวทางเฉพาะของภาษานั้น ๆ
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type Ctx = { orderId: string; customerId: string; amount: number; sku: string };
+
+    interface Step {
+      name: string;
+      action: (ctx: Ctx) => Promise<void>;
+      compensate: (ctx: Ctx) => Promise<void>;
+    }
+
+    async function runSaga(ctx: Ctx, steps: Step[]): Promise<void> {
+      const done: Step[] = [];
+      try {
+        for (const step of steps) {
+          await step.action(ctx);
+          done.push(step);
+        }
+      } catch (err) {
+        // Undo completed steps in reverse order.
+        for (const step of done.reverse()) {
+          await step.compensate(ctx).catch((e) =>
+            console.error(`compensation failed for ${step.name}`, e),
+          );
+        }
+        throw err;
+      }
+    }
+
+    const orderSaga: Step[] = [
+      {
+        name: 'createOrder',
+        action: (c) => orderSvc.create(c.orderId, c.customerId),
+        compensate: (c) => orderSvc.reject(c.orderId),
+      },
+      {
+        name: 'reserveCredit',
+        action: (c) => customerSvc.reserveCredit(c.customerId, c.amount),
+        compensate: (c) => customerSvc.releaseCredit(c.customerId, c.amount),
+      },
+      {
+        name: 'reserveStock',
+        action: (c) => inventorySvc.reserve(c.sku),
+        compensate: (c) => inventorySvc.release(c.sku),
+      },
+    ];
+
+    await runSaga(ctx, orderSaga);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from dataclasses import dataclass
+    from typing import Awaitable, Callable
+
+    @dataclass
+    class Ctx:
+        order_id: str
+        customer_id: str
+        amount: int
+        sku: str
+
+    @dataclass
+    class Step:
+        name: str
+        action: Callable[[Ctx], Awaitable[None]]
+        compensate: Callable[[Ctx], Awaitable[None]]
+
+    async def run_saga(ctx: Ctx, steps: list[Step]) -> None:
+        done: list[Step] = []
+        try:
+            for step in steps:
+                await step.action(ctx)
+                done.append(step)
+        except Exception:
+            # Undo completed steps in reverse order.
+            for step in reversed(done):
+                try:
+                    await step.compensate(ctx)
+                except Exception as e:
+                    print(f"compensation failed for {step.name}: {e}")
+            raise
+
+    order_saga = [
+        Step("createOrder",
+             lambda c: order_svc.create(c.order_id, c.customer_id),
+             lambda c: order_svc.reject(c.order_id)),
+        Step("reserveCredit",
+             lambda c: customer_svc.reserve_credit(c.customer_id, c.amount),
+             lambda c: customer_svc.release_credit(c.customer_id, c.amount)),
+        Step("reserveStock",
+             lambda c: inventory_svc.reserve(c.sku),
+             lambda c: inventory_svc.release(c.sku)),
+    ]
+
+    await run_saga(ctx, order_saga)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type Ctx struct {
+        OrderID    string
+        CustomerID string
+        Amount     int
+        SKU        string
+    }
+
+    type Step struct {
+        Name       string
+        Action     func(Ctx) error
+        Compensate func(Ctx) error
+    }
+
+    func RunSaga(ctx Ctx, steps []Step) error {
+        var done []Step
+        for _, step := range steps {
+            if err := step.Action(ctx); err != nil {
+                // Undo completed steps in reverse order.
+                for i := len(done) - 1; i >= 0; i-- {
+                    if cerr := done[i].Compensate(ctx); cerr != nil {
+                        log.Printf("compensation failed for %s: %v", done[i].Name, cerr)
+                    }
+                }
+                return err
+            }
+            done = append(done, step)
+        }
+        return nil
+    }
+
+    orderSaga := []Step{
+        {"createOrder",
+            func(c Ctx) error { return orderSvc.Create(c.OrderID, c.CustomerID) },
+            func(c Ctx) error { return orderSvc.Reject(c.OrderID) }},
+        {"reserveCredit",
+            func(c Ctx) error { return customerSvc.ReserveCredit(c.CustomerID, c.Amount) },
+            func(c Ctx) error { return customerSvc.ReleaseCredit(c.CustomerID, c.Amount) }},
+        {"reserveStock",
+            func(c Ctx) error { return inventorySvc.Reserve(c.SKU) },
+            func(c Ctx) error { return inventorySvc.Release(c.SKU) }},
+    }
+
+    if err := RunSaga(ctx, orderSaga); err != nil {
+        log.Printf("order saga rolled back: %v", err)
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::future::Future;
+    use std::pin::Pin;
+
+    type BoxFut = Pin<Box<dyn Future<Output = Result<(), String>>>>;
+
+    struct Step {
+        name: &'static str,
+        action: Box<dyn Fn(&Ctx) -> BoxFut>,
+        compensate: Box<dyn Fn(&Ctx) -> BoxFut>,
+    }
+
+    #[derive(Clone)]
+    struct Ctx {
+        order_id: String,
+        customer_id: String,
+        amount: i64,
+        sku: String,
+    }
+
+    async fn run_saga(ctx: &Ctx, steps: &[Step]) -> Result<(), String> {
+        let mut done: Vec<&Step> = Vec::new();
+        for step in steps {
+            if let Err(e) = (step.action)(ctx).await {
+                // Undo completed steps in reverse order.
+                for s in done.iter().rev() {
+                    if let Err(ce) = (s.compensate)(ctx).await {
+                        eprintln!("compensation failed for {}: {ce}", s.name);
+                    }
+                }
+                return Err(e);
+            }
+            done.push(step);
+        }
+        Ok(())
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เป็นผลลัพธ์ (Resulting context)
+
+สิ่งที่คุณได้รับ:
+
+- **ความสอดคล้องโดยไม่ต้องใช้ 2PC.** การดำเนินงานที่พาดหลาย service ทำสำเร็จทั้งหมด หรือย้อนกลับผ่านการ compensation โดยไม่มี global lock และไม่มี transaction manager ร่วม — service ยังคง available และ loosely coupled
+- **ใช้ได้กับทุกอย่าง.** เพราะแต่ละ step เป็นเพียง local transaction ธรรมดาบวกข้อความ saga จึงทำงานได้ข้ามฐานข้อมูลและ broker ทุกชนิดที่ผสมกัน
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **eventual consistency ไม่ใช่ isolation.** ระหว่าง step ระบบอยู่ในสถานะบางส่วน transaction อื่นอาจสังเกตเห็น order ที่เครดิตถูกจองแล้วแต่สต๊อกยังไม่ได้ยืนยัน คุณต้องออกแบบรองรับสถานะกลางเหล่านี้ (เช่น ด้วย semantic lock อย่างสถานะ `PENDING`) แทนที่จะพึ่งพา isolation ของฐานข้อมูล
+- **คุณต้องออกแบบ compensation.** ทุก step ที่มีผลกระทบที่สังเกตเห็นได้ต้องการด้านกลับที่สมเหตุสมผล และ compensation ต้อง **idempotent** และรับมือกับการถูก retry ได้
+- **ความซับซ้อนของการประสานงาน.** choreography กระจาย workflow ไปตาม subscription จำนวนมากและอาจตามได้ยากเมื่อ step เพิ่มขึ้น ส่วน orchestration รวมศูนย์ logic ไว้แต่เพิ่ม component ที่ตัวมันเองต้องน่าเชื่อถือและกู้คืนได้
+
+กฎเชิงปฏิบัติ: ใช้ **choreography** สำหรับ flow ที่สั้นและเรียบง่ายโดยมีผู้เข้าร่วมไม่กี่ตัว และใช้ **orchestration** เมื่อ flow มี branch มีหลาย step หรือต้องการให้คิดวิเคราะห์ในภาพรวมได้
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Database per Service](/microservices-design-from-zero-to-hero/th/data-management/database-per-service/) — ขอบเขตที่ทำให้ saga จำเป็น
+- [Event Sourcing](/microservices-design-from-zero-to-hero/th/data-management/event-sourcing/) — วิธีที่น่าเชื่อถือในการ publish event ที่ saga พึ่งพา
+- [CQRS](/microservices-design-from-zero-to-hero/th/data-management/cqrs/) — มักใช้เพื่อ query สถานะกลางที่ saga สร้างขึ้น
+
+<Callout title="การ compensate ไม่ใช่การ rollback">
+compensating transaction เป็น business action ใหม่ ไม่ใช่ `ROLLBACK` ของฐานข้อมูล การปล่อยเครดิตที่จองไว้ การยกเลิก shipment หรือการคืนเงิน ทิ้งร่องรอยไว้ใน audit log — และบางครั้งคุณก็ไม่สามารถยกเลิก step หนึ่งได้อย่างสมบูรณ์จริง ๆ (อีเมลถูกส่งออกไปแล้ว) การออกแบบ compensation ที่ดี และการยอมรับว่าบางตัวเป็นเพียงค่าประมาณ คืองานจริงของการสร้าง saga
+</Callout>
+
+export const quizSaga = [
+  {
+    q: 'แก่นแท้ของ saga คืออะไร?',
+    options: [
+      'distributed two-phase commit ข้ามหลายฐานข้อมูล',
+      'ลำดับของ local transaction แต่ละตัวอยู่ใน service เดียว พร้อม compensating transaction เพื่อยกเลิกเมื่อล้มเหลว',
+      'transaction ของฐานข้อมูลร่วมที่เปิดค้างไว้ข้าม service',
+      'read model ที่ถูกซิงค์ให้ตรงกันด้วย event',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'saga ยกเลิกงานที่ commit ไปแล้วใน step ก่อนหน้าได้อย่างไร?',
+    options: [
+      'มันสั่ง ROLLBACK ของฐานข้อมูลบน service ปลายทาง',
+      'มันรัน compensating transaction — local transaction ที่เป็นด้านกลับเชิงความหมาย',
+      'มันลบ row โดยตรงผ่าน SQL',
+      'มันยกเลิกอะไรไม่ได้เลยเมื่อ commit ไปแล้ว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรที่แยก orchestration ออกจาก choreography?',
+    options: [
+      'orchestration ใช้ตัวประสานงานส่วนกลางที่ออกคำสั่ง ส่วน choreography ให้ service ตอบสนองต่อ event ของกันและกันโดยไม่มีตัวประสานงาน',
+      'orchestration หลีกเลี่ยง compensating transaction',
+      'choreography ต้องการ two-phase commit',
+      'orchestration ทำงานได้กับ service เดียวเท่านั้น',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ข้อใดเป็นข้อเสียที่แท้จริงของ saga เมื่อเทียบกับ ACID transaction เดียว?',
+    options: [
+      'มันต้องการให้ทุก service ใช้ฐานข้อมูลเดียวร่วมกัน',
+      'มันไม่ให้ความสอดคล้องเลยแม้แต่น้อย',
+      'ไม่มี isolation ระหว่าง step ดังนั้นการดำเนินงานอื่นอาจสังเกตเห็นสถานะกลางที่ยังไม่สมบูรณ์',
+      'มันใช้กับ message broker ไม่ได้',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="data-management/saga" questions={quizSaga} />
+
+<ProgressTracker client:visible id="data-management/saga" />

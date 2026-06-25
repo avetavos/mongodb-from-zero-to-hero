@@ -1,0 +1,220 @@
+---
+title: Distributed Tracing
+description: 'ให้ trace id แก่ทุกคำขอจากภายนอก, propagate มันพร้อม span id ข้ามทุก hop และสร้าง call tree เต็มรูปแบบพร้อม timing ขึ้นใหม่ เพื่อให้คุณเห็นได้อย่างชัดเจนว่าคำขอที่ช้าหรือล้มเหลวใช้เวลาไปที่ใด'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+logs ที่ถูกรวบรวมและเชื่อมโยงทำให้คุณค้นหาทุกบรรทัดของคำขอหนึ่งและอ่านมันตามลำดับได้ นั่นตอบว่า *เกิดอะไรขึ้น* แต่มีคำถามที่ logs ตอบได้ไม่ดี คือ *เวลาหายไปที่ไหน?* checkout ที่ใช้เวลาสี่วินาทีข้าม gateway, order service, payment service และ inventory service แต่ละตัวอาจเรียก database หรือ cache ด้วย ที่ไหนสักแห่งในต้นไม้ของการเรียกที่ซ้อนกันนั้น สามในสี่วินาทีถูกใช้ไป — แต่รายการบรรทัด log แบบแบน ๆ ต่อให้เชื่อมโยงได้อย่างสมบูรณ์แบบ ก็ไม่แสดงรูปร่างของต้นไม้หรือระยะเวลาของแต่ละกิ่งให้คุณดู
+
+## ปัญหา
+
+correlation id บอกคุณว่า log บรรทัดชุดหนึ่งเป็นพวกเดียวกัน แต่ไม่ได้บอกว่ามัน *เกี่ยวข้องกัน* อย่างไร มันไม่ได้บอกว่าการเรียก payment เกิดขึ้น *ภายใน* การเรียก order, ว่าการเรียก inventory รัน *หลังจาก* payment คืนค่ากลับ หรือว่า database query ใต้ inventory ใช้เวลา 2.8 จาก 4 วินาทีของคำขอ หากปราศจากโครงสร้างที่เป็นเชิงสาเหตุและมี timing นั้น คุณก็กลับไปเพ่งมอง timestamp ข้ามบริการเพื่อเดา critical path — และ timestamp จากเครื่องที่ต่างกันก็ไม่ได้ตรงกันเป๊ะ ๆ ด้วยซ้ำ
+
+แล้วคุณจะสร้าง nested call tree เต็มของคำขอหนึ่งขึ้นใหม่ได้อย่างไร พร้อมระยะเวลาของทุก hop ข้ามบริการที่แต่ละตัวเห็นเฉพาะส่วนของตัวเองเท่านั้น
+
+## ทางออก
+
+**Distributed tracing** สร้างแบบจำลองคำขอเป็น **trace** ที่ประกอบขึ้นจาก **spans** trace คือการเดินทางทั้งหมดของคำขอจากภายนอกหนึ่งคำขอ; span คือหน่วยงานเดียวภายในนั้น — คำขอขาเข้าที่ถูกจัดการ, การเรียกขาออกที่ถูกทำ, query ที่ถูกรัน แต่ละ span บันทึก start time, duration และชื่อ และพก id สองตัว คือ **trace id** ที่ทุก span ในคำขอใช้ร่วมกัน และ **span id** ที่ไม่ซ้ำเป็นของตัวมันเอง แต่ละ span ยังระบุ **parent span id** ของมันด้วย และ parent link เหล่านั้นคือสิ่งที่สร้างต้นไม้ขึ้นใหม่
+
+กลไกที่ทำให้สิ่งนี้ทำงานได้ข้ามขอบเขตของโปรเซสคือ **context propagation** เมื่อบริการทำการเรียกขาออก มันฉีด trace id ปัจจุบันและ span id ของตัวเองลงในคำขอ — โดยทั่วไปเป็น header ตามมาตรฐานอย่าง W3C Trace Context (`traceparent`) บริการที่รับอ่าน header เหล่านั้น, ปฏิบัติต่อ span id ขาเข้าเป็น parent ของมัน, เริ่ม span ใหม่ใต้มัน และต่อ ๆ ไปตามต้นไม้ลงมา ทุกบริการรายงาน span ของมันไปยัง collector กลาง ซึ่งเย็บมันกลับเข้าด้วยกันด้วย trace id และ parent link ให้เป็น waterfall ที่มี timing เดียว
+
+export const traceDiagram = `sequenceDiagram
+  participant GW as Gateway
+  participant O as Order Service
+  participant P as Payment Service
+  participant I as Inventory Service
+  GW->>O: POST /checkout\\ntraceparent: trace=abc, span=1
+  Note over O: start span 2 (parent 1)
+  O->>P: charge()\\ntraceparent: trace=abc, span=2
+  Note over P: start span 3 (parent 2)
+  P-->>O: ok (span 3 ends, 120ms)
+  O->>I: reserve()\\ntraceparent: trace=abc, span=2
+  Note over I: start span 4 (parent 2)
+  I-->>O: ok (span 4 ends, 2800ms)
+  O-->>GW: 200 (span 2 ends, 2950ms)`;
+
+<Mermaid code={traceDiagram} title="แต่ละ hop อ่าน traceparent ขาเข้า, เริ่ม child span และ propagate trace พร้อม span id ของตัวเองต่อไป — collector สร้างต้นไม้ขึ้นใหม่จาก trace id และ parent link" />
+
+## ตัวอย่าง
+
+หัวใจของ tracing คือ propagation: อ่าน trace context จากคำขอขาเข้า และฉีดมันลงในทุกการเรียกขาออก ตัวอย่างเหล่านี้อ่าน `traceparent` header ขาเข้าและส่งต่อมันไป ซึ่งเป็นขั้นต่ำที่ทำให้ trace ไม่ขาดข้าม hop
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import express from 'express';
+    import { fetch } from 'undici';
+
+    const app = express();
+
+    app.post('/checkout', async (req, res) => {
+      // Read incoming trace context (or start a new trace at the edge).
+      const incoming = req.header('traceparent') ?? newTraceparent();
+      const { traceId, parentSpanId } = parseTraceparent(incoming);
+
+      // This service's own span becomes the parent of downstream calls.
+      const mySpanId = randomSpanId();
+      const outgoing = formatTraceparent(traceId, mySpanId);
+
+      // Propagate on every outbound call.
+      await fetch('http://payment/charge', {
+        method: 'POST',
+        headers: { traceparent: outgoing },
+      });
+
+      res.sendStatus(200);
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import httpx
+    from fastapi import FastAPI, Request
+
+    app = FastAPI()
+
+    @app.post("/checkout")
+    async def checkout(request: Request):
+        # Read incoming trace context (or start a new trace at the edge).
+        incoming = request.headers.get("traceparent") or new_traceparent()
+        trace_id, parent_span_id = parse_traceparent(incoming)
+
+        # This service's own span becomes the parent of downstream calls.
+        my_span_id = random_span_id()
+        outgoing = format_traceparent(trace_id, my_span_id)
+
+        # Propagate on every outbound call.
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                "http://payment/charge",
+                headers={"traceparent": outgoing},
+            )
+
+        return {"status": "ok"}
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func checkout(w http.ResponseWriter, r *http.Request) {
+        // Read incoming trace context (or start a new trace at the edge).
+        incoming := r.Header.Get("traceparent")
+        if incoming == "" {
+            incoming = newTraceparent()
+        }
+        traceID, parentSpanID := parseTraceparent(incoming)
+        _ = parentSpanID
+
+        // This service's own span becomes the parent of downstream calls.
+        mySpanID := randomSpanID()
+        outgoing := formatTraceparent(traceID, mySpanID)
+
+        // Propagate on every outbound call.
+        req, _ := http.NewRequest("POST", "http://payment/charge", nil)
+        req.Header.Set("traceparent", outgoing)
+        http.DefaultClient.Do(req)
+
+        w.WriteHeader(http.StatusOK)
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use axum::http::HeaderMap;
+
+    async fn checkout(headers: HeaderMap) -> axum::http::StatusCode {
+        // Read incoming trace context (or start a new trace at the edge).
+        let incoming = headers
+            .get("traceparent")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .unwrap_or_else(new_traceparent);
+        let (trace_id, _parent_span_id) = parse_traceparent(&incoming);
+
+        // This service's own span becomes the parent of downstream calls.
+        let my_span_id = random_span_id();
+        let outgoing = format_traceparent(&trace_id, &my_span_id);
+
+        // Propagate on every outbound call.
+        let client = reqwest::Client::new();
+        let _ = client
+            .post("http://payment/charge")
+            .header("traceparent", outgoing)
+            .send()
+            .await;
+
+        axum::http::StatusCode::OK
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+ในทางปฏิบัติคุณแทบไม่ต้องเขียน propagation นี้ด้วยมือ: instrumentation library (เช่นที่สร้างบน OpenTelemetry) ฉีดและ extract trace context, จับเวลา span และ export มันให้คุณ การเข้าใจกลไกนี้มีความสำคัญที่สุดเมื่อ trace ขาดอย่างลึกลับที่ hop ใด hop หนึ่ง
+
+## บริบทที่ได้ผลลัพธ์
+
+สิ่งที่คุณได้รับ:
+
+- **Critical path ที่ถูกทำให้มองเห็นได้** trace waterfall แสดงระยะเวลาของทุก hop ดังนั้นคุณจึงเห็นได้ในพริบตาว่า 2.8 จาก 4 วินาทีถูกใช้ไปใน inventory query หนึ่ง แทนการเดาข้าม log timestamp
+- **โครงสร้างเชิงสาเหตุ ไม่ใช่แค่ correlation** parent link สร้างขึ้นใหม่ว่า *การเรียกใดเกิดขึ้นภายในการเรียกใด* กู้คืนมุมมองแบบซ้อนที่ stack trace เดียวให้คุณใน monolith
+- **การระบุที่มาของข้อผิดพลาดข้ามบริการ** เมื่อคำขอล้มเหลว trace ชี้ไปยัง span และบริการที่มันพังพอดี ไม่ใช่แค่ gateway `500` แบบทั่ว ๆ ไป
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **Propagation ต้องไม่ขาด** hop เดียวที่ทำ trace context หล่นหาย — client ที่ไม่ได้ instrument, queue ที่ไม่พก header, ขอบเขตของ thread — จะแยก trace ออกเป็นสองและซ่อนต้นไม้ที่อยู่เลยจุดนั้นไป
+- **Sampling มักเป็นข้อบังคับ** การบันทึกทุก span ของทุกคำขอที่ทราฟฟิกสูงนั้นแพง คุณจึง sample เลือกกลยุทธ์ sampling ของคุณอย่างตั้งใจ เพราะ head-based sample อาจพลาดคำขอที่ล้มเหลวซึ่งหายากแต่คุณอยากเห็นที่สุด
+- **ความพยายามในการ instrument** ทุกบริการ, client library และขอบเขต async ต้องมีส่วนร่วม; ภาษาและ framework ที่ปะปนกันทำให้การครอบคลุมที่สม่ำเสมอเป็นงานจริง ๆ
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Log Aggregation](/microservices-design-from-zero-to-hero/th/observability/log-aggregation/) — ใส่ trace id ลงในทุกบรรทัด log แล้ว traces และ logs ก็อ้างอิงถึงกันและกัน
+- [Application Metrics](/microservices-design-from-zero-to-hero/th/observability/application-metrics/) — metrics บอกคุณว่า latency เพิ่มขึ้น; traces บอกคุณว่ามันเพิ่มขึ้น *ที่ไหน*
+
+<Callout title="Logs, traces และ metrics คือชุดเครื่องมือเดียวกัน">
+สัญญาณทั้งสามนี้ตอบคำถามที่ต่างกันและแข็งแกร่งที่สุดเมื่ออยู่ด้วยกัน metrics เตือนคุณว่า p99 latency พุ่งขึ้น trace จากคำขอที่ช้าแสดงให้คุณเห็น hop ที่ก่อให้เกิดมัน logs ที่ถูกรวบรวมและ filter ด้วย id ของ trace นั้นแสดงให้คุณเห็นข้อความ error ภายใน hop นั้น ประทับ trace id เดียวกันลงในทั้งสามแล้วคุณก็เคลื่อนไหวระหว่างมันได้อย่างลื่นไหลระหว่างเหตุการณ์ แทนการเริ่มการสืบสวนแต่ละครั้งจากศูนย์
+</Callout>
+
+export const quizTracing = [
+  {
+    q: 'What is the relationship between a trace and a span?',
+    options: [
+      'span คือคำขอทั้งหมด; trace คือหน่วยงานหนึ่งภายในมัน',
+      'trace คือการเดินทางของคำขอทั้งหมด; span คือหน่วยงานเดียวที่มี timing ภายในมัน',
+      'มันเป็นสองชื่อสำหรับสิ่งเดียวกัน',
+      'trace คือบรรทัด log; span คือ metric',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What reconstructs the nested call tree of a trace?',
+    options: [
+      'wall-clock timestamp บนแต่ละบรรทัด log',
+      'แต่ละ span บันทึก parent span id ของมัน บวกกับ trace id ที่ใช้ร่วมกัน เย็บเข้าด้วยกันโดย collector',
+      'ลำดับที่บริการถูก deploy',
+      'ขนาดของ payload ของแต่ละคำขอ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What happens if one hop fails to propagate the trace context?',
+    options: [
+      'ไม่มีอะไรเกิดขึ้น; collector เติมช่องว่างให้โดยอัตโนมัติ',
+      'trace แยกออกและ call tree ที่อยู่เลย hop นั้นไปก็สูญหาย',
+      'metrics ทั้งหมดสำหรับบริการนั้นหยุดทำงาน',
+      'คำขอล้มเหลวด้วย HTTP 500',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="observability/distributed-tracing" questions={quizTracing} />
+
+<ProgressTracker client:visible id="observability/distributed-tracing" />

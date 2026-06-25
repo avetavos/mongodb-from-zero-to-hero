@@ -1,0 +1,128 @@
+---
+title: Audit Logging
+description: 'บันทึกว่าใครทำอะไรและเมื่อใด เป็น business record ที่คงทนและตรวจจับการดัดแปลงได้ — แยกออกจาก debug logs อย่างจงใจ เพราะมันตอบคำถามด้านความปลอดภัย การกำกับดูแล และความรับผิดชอบ มากกว่าการวินิจฉัย'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+operational logs — บรรทัดที่มีโครงสร้างและถูกรวบรวมจากบทเรียน log-aggregation — มีอยู่เพื่อช่วยคุณดีบัก มันมีเสียงรบกวน, ถูก sample, อายุสั้น และเขียนได้โดยใครก็ตามในทีม นั่นถูกต้องเป๊ะ ๆ สำหรับการวินิจฉัย แต่บางเหตุการณ์ไม่เกี่ยวกับการวินิจฉัยเลย ผู้ดูแลระบบเปลี่ยน permission ของลูกค้า ผู้ใช้ export รายการข้อมูลส่วนบุคคล ใครบางคนอนุมัติการคืนเงินหนึ่งหมื่นดอลลาร์ หลายเดือนต่อมา การสืบสวนด้านความปลอดภัย, ผู้กำกับดูแล หรือข้อพิพาทจะถามคำถามที่เฉพาะเจาะจง คือ *ใครทำสิ่งนี้ เมื่อใดกันแน่ และจากที่ไหน?*
+
+## ปัญหา
+
+debug logs เป็นเครื่องมือที่ผิดสำหรับคำถามนั้นในทุกมิติ มันถูกเก็บไว้เป็นวัน ไม่ใช่เป็นปีอย่างที่การกำกับดูแลมักเรียกร้อง มันถูก sample ดังนั้นเหตุการณ์เดียวที่สำคัญอาจไม่เคยถูกบันทึก มันอยู่ใน store ที่วิศวกรสามารถแก้ไขหรือลบได้ ดังนั้นมันจึงไม่น่าเชื่อถือพอที่จะเป็นหลักฐาน และมันถูกเขียนเพื่อผู้ปฏิบัติการ ไม่ใช่ผู้ตรวจสอบ — เต็มไปด้วย stack trace และ request timing ขาดตัวตนของผู้กระทำและบริบทการอนุญาตที่ audit ต้องการ การพยายามตอบคำขอด้านการกำกับดูแลด้วยการ grep debug logs ล้มเหลวทั้งเรื่อง retention, ความครบถ้วน และความสมบูรณ์ของข้อมูลพร้อมกันหมด
+
+แล้วคุณจะจับ record ที่น่าเชื่อถือและคงทนของการกระทำที่เกี่ยวกับความปลอดภัยและการกำกับดูแลได้อย่างไร — record ที่อยู่รอด, ไม่สามารถถูกแก้ไขอย่างเงียบ ๆ และตอบ *ใคร อะไร เมื่อใด* ได้อย่างแน่นอน
+
+## ทางออก
+
+**Audit logging** ปฏิบัติต่อเหตุการณ์เหล่านี้เป็น record ชนิดหนึ่งที่แตกต่าง มี pipeline และกฎเป็นของตัวเอง audit record ถูกเขียนอย่างจงใจ ณ จุดที่ business action สำคัญสำเร็จ และมันจับข้อเท็จจริงที่ผู้ตรวจสอบต้องการ คือ **actor** (ใคร), **action** (อะไร), **target** (กับอะไร), **timestamp** (เมื่อใด) และ **context** (จากที่ไหน ภายใต้การอนุญาตอะไร) record เหล่านี้ไปยัง **store ของตัวเองที่ append-only และตรวจจับการดัดแปลงได้** — ไม่เคยถูกลบ, ไม่เคยถูกอัปเดต, มักเขียนได้ครั้งเดียวและถูกผูกเป็นลูกโซ่ด้วยการเข้ารหัสเพื่อให้ตรวจจับการเปลี่ยนแปลงใด ๆ ได้ — และถูกเก็บไว้นานเท่าที่นโยบายกำหนด
+
+หลักการที่นิยามมันคือ **การแยกออกจากกัน** audit logs ไม่ใช่ log level บน debug logs ของคุณ; มันเป็น stream แยกต่างหากที่มีการรับประกันแข็งแกร่งกว่า คือ ความครบถ้วน (ไม่เคยถูก sample), ความคงทน (retention ยาว) และความสมบูรณ์ของข้อมูล (เปลี่ยนแปลงไม่ได้และตรวจสอบได้)
+
+export const auditDiagram = `flowchart LR
+  ACTOR[Admin / User] -->|performs action| SVC[Service]
+  SVC -->|on success: emit audit record| AUDIT[(Append-only\\nTamper-evident\\nAudit Store)]
+  AUDIT --> REVIEW[Compliance / Security review]
+  SVC -. debug only .-> OPS[(Operational Log Store\\nsampled, short retention)]`;
+
+<Mermaid code={auditDiagram} title="การกระทำที่สำคัญปล่อย audit record ที่คงทนไปยัง store ที่ append-only แยกต่างหาก แตกต่างจาก operational logs ที่ถูก sample" />
+
+## ตัวอย่าง
+
+audit record ที่ถูกเขียนเมื่อผู้ดูแลระบบเปลี่ยน role ของผู้ใช้คนอื่น สังเกตว่ามันมีอะไรและละเว้นอะไรไว้อย่างจงใจ: มันบันทึก actor, action, target, ค่า before/after และบริบทการอนุญาต — แต่ไม่มีความลับและไม่มี request payload เต็ม มันเป็นข้อเท็จจริงทางธุรกิจ ไม่ใช่ debug dump
+
+```json
+{
+  "auditId": "a7e2c5b1-04d9-4f3a-9c88-1b2e6f0a7d33",
+  "timestamp": "2026-06-25T09:14:22.108Z",
+  "actor": {
+    "userId": "usr_admin_204",
+    "email": "admin@example.com",
+    "ipAddress": "203.0.113.42",
+    "sessionId": "sess_9f1c"
+  },
+  "action": "user.role.update",
+  "target": {
+    "type": "user",
+    "userId": "usr_88213"
+  },
+  "before": { "role": "viewer" },
+  "after": { "role": "admin" },
+  "authorization": {
+    "via": "rbac",
+    "grantedBy": "policy_admin_management"
+  },
+  "result": "success",
+  "correlationId": "c1f4e9a2-8b3d-4e77-9a01-2f6c5d8e1b04"
+}
+```
+
+`correlationId` ทำให้ผู้สืบสวนสามารถอ้างอิงข้าม audit record นี้กับ operational logs และ traces ของคำขอเดียวกัน — แต่ตัว audit record เองยืนอยู่ได้ลำพังในฐานะคำบอกเล่าที่เป็นทางการว่า *ใครเปลี่ยนใคร เป็นอะไร และเมื่อใด*
+
+## บริบทที่ได้ผลลัพธ์
+
+สิ่งที่คุณได้รับ:
+
+- **คำตอบที่น่าเชื่อถือต่อ "ใครทำอะไร"** เพราะ store เป็น append-only และตรวจจับการดัดแปลงได้ audit record จึงเป็นหลักฐานที่รับฟังได้ในการตรวจสอบด้านความปลอดภัย, ข้อพิพาท หรือการสอบสวนของผู้กำกับดูแล — สิ่งที่ debug logs ไม่มีวันเป็นได้
+- **Compliance by design** retention ยาวและความครบถ้วนที่รับประกันได้ตอบสนองภาระผูกพัน (การตรวจสอบ access, กฎระเบียบการจัดการข้อมูล) ที่ operational logs ที่ถูก sample ทำไม่ได้
+- **การแยกความรับผิดชอบที่ชัดเจน** ผู้ปฏิบัติการเก็บ debug logs ที่มีเสียงรบกวนและอายุสั้นของพวกเขาไว้; ผู้ตรวจสอบได้ stream ที่สะอาดและคงทน — ไม่มีฝ่ายใดบั่นทอนอีกฝ่าย
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **คุณต้องตัดสินใจว่าอะไร auditable** การ audit ทุกอย่างทำให้ปัญหาเสียงรบกวนเกิดซ้ำใน store ที่แพงกว่า; การ audit น้อยเกินไปทิ้งช่องว่างที่การสืบสวนจะตกลงไป กำหนดการกระทำที่เกี่ยวกับความปลอดภัยและการกำกับดูแลอย่างชัดเจน
+- **ความสมบูรณ์ของข้อมูลคืองานวิศวกรรมจริง ๆ** การจัดเก็บแบบ append-only, การ hash-chaining หรือ media ที่เขียนได้ครั้งเดียว และการควบคุม access ที่ป้องกันแม้แต่ผู้ดูแลระบบไม่ให้แก้ไข record อย่างเงียบ ๆ นั้นไม่ใช่เรื่องง่าย — และคุณค่าทั้งหมดพังทลายหาก store สามารถถูกเปลี่ยนแปลงได้
+- **ความตึงเครียดด้านความเป็นส่วนตัว** audit record คงทนและอยู่ยาว แต่มักมีข้อมูลส่วนบุคคล คุณต้องปรับ retention ให้สอดคล้องกับกฎความเป็นส่วนตัว (เช่น สิทธิในการถูกลบ) อย่างจงใจ แทนที่จะปล่อยให้ log ที่เปลี่ยนแปลงไม่ได้กลายเป็นแฟ้มประวัติถาวรโดยบังเอิญ
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Log Aggregation](/microservices-design-from-zero-to-hero/th/observability/log-aggregation/) — operational logs คือคู่หูด้านการวินิจฉัย; audit logs จงใจไม่แชร์ pipeline หรือการรับประกันของมัน
+- [Distributed Tracing](/microservices-design-from-zero-to-hero/th/observability/distributed-tracing/) — แชร์ correlation หรือ trace id เพื่อให้ audit record สามารถถูกผูกกลับไปยังคำขอที่ผลิตมันได้
+
+<Callout title="audit log คือหลักฐาน ไม่ใช่ debug log ที่มีชื่อหรู">
+สิ่งล่อใจคือการเพิ่ม level `AUDIT` ลงใน logger ที่มีอยู่ของคุณแล้วถือว่าเสร็จ นั่นล้มเหลวในวินาทีที่ความสมบูรณ์ของข้อมูลสำคัญ: ใครก็ตามที่เขียน debug logs ได้สามารถปลอมหรือลบ "หลักฐาน" ของคุณได้ และ retention ที่สั้นของคุณก็ลบมันก่อนที่ผู้ตรวจสอบจะมาถึง audit logging ได้ชื่อของมันมาผ่าน *การแยกออกจากกันและการรับประกัน* เท่านั้น — store แบบ append-only ของมันเอง, retention ของมันเอง, การควบคุม access ของมันเอง ถ้า record สามารถถูกเปลี่ยนอย่างเงียบ ๆ ได้ มันก็ไม่ใช่ audit record
+</Callout>
+
+export const quizAudit = [
+  {
+    q: 'Why are ordinary debug logs unsuitable as audit records?',
+    options: [
+      'มันถูกเขียนใน JSON ซึ่งผู้ตรวจสอบอ่านไม่ได้',
+      'มันถูก sample, อายุสั้น และแก้ไขได้ ดังนั้นมันจึงล้มเหลวเรื่องความครบถ้วน, retention และความสมบูรณ์ของข้อมูล',
+      'มันไม่เคยมี timestamp',
+      'มันเขียนช้าเกินไป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which facts should an audit record capture?',
+    options: [
+      'การใช้ CPU และ memory ในขณะที่เกิดการกระทำ',
+      'actor, action, target, timestamp และบริบทการอนุญาต — ใครทำอะไร เมื่อใด และมันถูกอนุญาตอย่างไร',
+      'request และ response payload เต็มรวมถึงความลับใด ๆ',
+      'เฉพาะ HTTP status code ที่ถูกคืนค่ากลับมา',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "tamper-evident, append-only" storage give an audit log?',
+    options: [
+      'ประสิทธิภาพ query เร็วกว่า relational database',
+      'ความสามารถในการ undo การกระทำใด ๆ ที่ถูกบันทึก',
+      'ความสมบูรณ์ของข้อมูล — record ไม่สามารถถูกแก้ไขหรือลบอย่างเงียบ ๆ ได้ ดังนั้นมันจึงน่าเชื่อถือในฐานะหลักฐาน',
+      'การลบ record โดยอัตโนมัติหลังจากหนึ่งวัน',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="observability/audit-logging" questions={quizAudit} />
+
+<ProgressTracker client:visible id="observability/audit-logging" />

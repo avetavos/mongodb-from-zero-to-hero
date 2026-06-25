@@ -1,0 +1,219 @@
+---
+title: Messaging
+description: 'ให้บริการสื่อสารกันผ่าน broker แทนที่จะเรียกหากันโดยตรง: producer เผยแพร่ข้อความ consumer ประมวลผลตามตารางเวลาของตัวเอง และทั้งสองฝั่งไม่จำเป็นต้องทำงานพร้อมกัน'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+เมื่อลูกค้าสั่งซื้อ มีหลายอย่างที่ต้องเกิดขึ้น: การเรียกเก็บเงินต้องตัดบัตร คลังสินค้าต้องเตรียมจัดส่ง และอีเมลยืนยันต้องถูกส่งออกไป ไม่มีอันใดเลยที่ต้องเสร็จก่อนที่ผู้ซื้อจะเห็นคำว่า "สั่งซื้อสำเร็จ" ถ้าบริการ Order เรียกแต่ละบริการปลายน้ำแบบ synchronous ผู้ให้บริการอีเมลที่ช้าอาจทำให้ขั้นตอนชำระเงินค้าง และบริการใดบริการหนึ่งล่มก็จะทำให้การขายล้มเหลวทันที
+
+## ปัญหา
+
+คุณต้องการให้บริการหนึ่งจุดชนวนงานในบริการอื่นโดยไม่ต้องรอพวกมัน และไม่ต้องผูกมัดกับว่าพวกมันพร้อมใช้งานอยู่หรือไม่ในขณะนั้น งานบางส่วนควรกระจายออกไป — event การสั่งซื้อหนึ่งครั้งควรขับเคลื่อนการเรียกเก็บเงิน การจัดส่ง และการแจ้งเตือนอย่างอิสระ และคุณอยากเพิ่มปฏิกิริยาที่สี่ในภายหลังได้โดยไม่ต้องแตะต้องบริการ Order เลย การเรียกแบบ synchronous โดยตรงไม่ให้สิ่งเหล่านี้เลย: มันบล็อก มันผูกมัดทั้งสองบริการในเชิงเวลา และมันรู้จักผู้รับเพียงหนึ่งเดียวเท่านั้น คุณจะให้บริการทำงานร่วมกันในขณะที่ยังคงลดการผูกมัดทั้งในเชิงเวลาและในเชิงตัวตนได้อย่างไร?
+
+## ทางออก
+
+**Messaging** คือรูปแบบ asynchronous แทนที่จะเรียกบริการ **producer** จะส่งข้อความให้ **message broker** — โครงสร้างพื้นฐานที่เก็บข้อความไว้อย่างคงทนและส่งต่อไปยัง **consumer** producer ไม่รอให้งานเสร็จและไม่จำเป็นต้องรู้ด้วยซ้ำว่าใครคือ consumer broker ลดการผูกมัดของทั้งสองฝั่งในเชิงเวลา: consumer ที่ล่มอยู่ก็เพียงประมวลผลงานที่ค้างอยู่เมื่อมันกลับมา
+
+broker มีรูปแบบการส่งสองแบบ:
+
+- **Queues (point-to-point)** — แต่ละข้อความถูกส่งไปยัง consumer เพียงรายเดียว สิ่งนี้นำพา **command**: "ตัดเงินคำสั่งซื้อนี้" instance หลายตัวของ consumer แข่งกันรับข้อความ ซึ่งทำให้เกิดการกระจายโหลด
+- **Topics (publish/subscribe)** — แต่ละข้อความถูกส่งไปยังผู้สมัครรับทุกราย สิ่งนี้นำพา **event**: "มีคำสั่งซื้อถูกสร้างขึ้น" การเรียกเก็บเงิน การจัดส่ง และการแจ้งเตือนต่างก็สมัครรับอย่างอิสระ และสามารถเพิ่มผู้สมัครรับรายใหม่ได้โดยไม่ต้องเปลี่ยน producer
+
+export const messagingFlow = `flowchart LR
+  P[Order Service<br/>producer] -->|OrderPlaced| Broker[(Message Broker<br/>topic)]
+  Broker --> B[Billing Service]
+  Broker --> S[Shipping Service]
+  Broker --> N[Notification Service]
+  B -.->|buffered if down| Broker`;
+
+<Mermaid code={messagingFlow} title="Messaging — producer เผยแพร่ event หนึ่งไปยัง broker ซึ่งกระจายมันออกไปยัง consumer อิสระ" />
+
+## ตัวอย่าง
+
+wrapper เล็ก ๆ ครอบ broker ที่เผยแพร่ event `OrderPlaced` และบริโภคมันที่อีกฝั่งหนึ่ง การเรียก publish จะคืนค่าทันทีที่ broker ได้รับข้อความ consumer จะ acknowledge ก็ต่อเมื่อทำงานเสร็จแล้วเท่านั้น ดังนั้นข้อความที่ยังไม่ถูกประมวลผลจะถูกส่งซ้ำ แต่ละตัวอย่างสมบูรณ์ในตัวเองและเป็นสำนวนของภาษานั้น ๆ
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type OrderPlaced = { orderId: string; customerId: string; total: number };
+
+    // Publish: hand the event to the broker and return immediately.
+    async function publishOrderPlaced(broker: Broker, event: OrderPlaced): Promise<void> {
+      await broker.publish('orders.placed', JSON.stringify(event));
+    }
+
+    // Consume: process each message, then acknowledge it.
+    function consumeOrders(broker: Broker): void {
+      broker.subscribe('orders.placed', async (raw, ack) => {
+        const event = JSON.parse(raw) as OrderPlaced;
+        await chargeCustomer(event.customerId, event.total);
+        await ack(); // ack only after the work succeeded
+      });
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import json
+    from dataclasses import dataclass, asdict
+
+    @dataclass
+    class OrderPlaced:
+        order_id: str
+        customer_id: str
+        total: float
+
+    # Publish: hand the event to the broker and return immediately.
+    async def publish_order_placed(broker, event: OrderPlaced) -> None:
+        await broker.publish("orders.placed", json.dumps(asdict(event)))
+
+    # Consume: process each message, then acknowledge it.
+    def consume_orders(broker) -> None:
+        async def handler(raw: str, ack) -> None:
+            data = json.loads(raw)
+            await charge_customer(data["customer_id"], data["total"])
+            await ack()  # ack only after the work succeeded
+
+        broker.subscribe("orders.placed", handler)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type OrderPlaced struct {
+        OrderID    string  `json:"orderId"`
+        CustomerID string  `json:"customerId"`
+        Total      float64 `json:"total"`
+    }
+
+    // Publish: hand the event to the broker and return immediately.
+    func PublishOrderPlaced(broker Broker, e OrderPlaced) error {
+        payload, err := json.Marshal(e)
+        if err != nil {
+            return err
+        }
+        return broker.Publish("orders.placed", payload)
+    }
+
+    // Consume: process each message, then acknowledge it.
+    func ConsumeOrders(broker Broker) {
+        broker.Subscribe("orders.placed", func(raw []byte, ack func() error) {
+            var e OrderPlaced
+            _ = json.Unmarshal(raw, &e)
+            if err := ChargeCustomer(e.CustomerID, e.Total); err != nil {
+                return // not acked -> redelivered later
+            }
+            _ = ack()
+        })
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use serde::{Serialize, Deserialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct OrderPlaced {
+        order_id: String,
+        customer_id: String,
+        total: f64,
+    }
+
+    // Publish: hand the event to the broker and return immediately.
+    async fn publish_order_placed(broker: &Broker, event: &OrderPlaced) -> anyhow::Result<()> {
+        let payload = serde_json::to_vec(event)?;
+        broker.publish("orders.placed", payload).await?;
+        Ok(())
+    }
+
+    // Consume: process each message, then acknowledge it.
+    async fn consume_orders(broker: &Broker) -> anyhow::Result<()> {
+        broker.subscribe("orders.placed", |raw, ack| async move {
+            let event: OrderPlaced = serde_json::from_slice(&raw)?;
+            charge_customer(&event.customer_id, event.total).await?;
+            ack().await?; // ack only after the work succeeded
+            Ok(())
+        }).await
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **การผูกมัดแบบหลวม (loose coupling)** producer ไม่บล็อก ไม่รู้จัก consumer ของมัน และไม่พึ่งพาว่าพวกมันทำงานอยู่หรือไม่ consumer ใหม่สมัครรับได้โดยไม่ต้องเปลี่ยน producer เลย ดังนั้นระบบเติบโตด้วยการเพิ่มเข้ามามากกว่าการแก้ไข
+- **การบัฟเฟอร์และความทนทาน (buffering and resilience)** broker ดูดซับช่วงที่ทราฟฟิกพุ่งสูงและเก็บข้อความไว้ขณะที่ consumer ล่มหรือกำลัง deploy ความช้าใน consumer หนึ่งไม่มีวันแพร่กลับไปยัง producer
+- **การกระจายตามธรรมชาติ (natural fan-out)** event ที่เผยแพร่หนึ่งครั้งขับเคลื่อนปฏิกิริยาอิสระได้หลายอย่าง ซึ่งเป็นสิ่งที่การโต้ตอบแบบ one-to-many ต้องการพอดี
+
+สิ่งที่คุณต้องจ่าย:
+
+- **broker เป็นโครงสร้างพื้นฐานที่สำคัญยิ่ง** ตอนนี้ทุกอย่างขึ้นอยู่กับการที่ broker พร้อมใช้งาน คงทน และถูกดำเนินการอย่างถูกต้อง มันต้องถูกทำเป็น cluster และถูกเฝ้าติดตาม และมันกลายเป็นสิ่งใหม่ที่อาจล้มเหลวได้
+- **Eventual consistency** เพราะงานเกิดขึ้นในภายหลัง จึงมีช่วงที่คำสั่งซื้อมีอยู่แล้วแต่อีเมลยังไม่ถูกส่ง ผู้เรียกไม่สามารถอ่านผลลัพธ์กลับมาได้ทันทีในแบบที่การเรียก synchronous คืนค่ามาให้
+- **ความซับซ้อนในการดำเนินการ (operational complexity)** คุณต้องจัดการกับการส่งซ้ำ (broker ส่วนใหญ่เป็นแบบ at-least-once ดังนั้น consumer ต้อง **idempotent**) ข้อความที่มาผิดลำดับ และ poison message ที่ต้องใช้ dead-letter queue การ debug flow ที่กระจายอยู่ในหลาย publisher และ subscriber ยากกว่าการไล่ตาม call stack เดียว
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Remote Procedure Invocation](/microservices-design-from-zero-to-hero/th/communication/remote-procedure-invocation/) — ทางเลือกแบบ synchronous เมื่อผู้เรียกต้องการคำตอบทันทีจริง ๆ
+- [Saga](/microservices-design-from-zero-to-hero/th/data-management/saga/) — ใช้ messaging เพื่อประสานทรานแซกชันที่ครอบหลายบริการ
+- [Event Sourcing](/microservices-design-from-zero-to-hero/th/data-management/event-sourcing/) — วิธีที่เชื่อถือได้ในการสร้าง event ที่คุณจะเผยแพร่
+
+<Callout title="consumer ที่เป็น idempotent ไม่ใช่ทางเลือก">
+broker ส่วนใหญ่รับประกันการส่งแบบ at-least-once ซึ่งหมายความว่า consumer ของคุณจะได้เห็นข้อความเดิมซ้ำสองครั้งในที่สุด ถ้าการประมวลผล "ตัดเงินคำสั่งซื้อ 17" ไม่ idempotent การส่งซ้ำจะตัดเงินลูกค้าสองครั้ง ทำให้ consumer ปลอดภัยที่จะทำซ้ำได้ — ลบข้อมูลซ้ำโดยอ้างอิงจาก message id หรือออกแบบการทำงานให้การใช้สองครั้งมีผลเหมือนกับการใช้ครั้งเดียว
+</Callout>
+
+export const quizMessaging = [
+  {
+    q: 'messaging ลดการผูกมัดของสองบริการในเชิงเวลาได้อย่างไร?',
+    options: [
+      'มันบีบอัดข้อความเพื่อให้ส่งได้เร็วขึ้น',
+      'producer ส่งข้อความให้ broker แล้วไปต่อ ดังนั้น consumer จึงประมวลผลมันได้เมื่อพร้อม — แม้ว่ามันจะล่มอยู่ตอนที่ข้อความถูกส่งก็ตาม',
+      'มันบังคับให้ทั้งสองบริการใช้นาฬิกาเดียวกัน',
+      'มันเรียก consumer แบบ synchronous แต่ใช้ timeout ที่ยาว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความแตกต่างระหว่าง queue กับ topic คืออะไร?',
+    options: [
+      'queue เร็วกว่า; topic ช้ากว่า',
+      'queue ส่งแต่ละข้อความไปยัง consumer เพียงรายเดียว (command); topic ส่งแต่ละข้อความไปยังผู้สมัครรับทุกราย (event)',
+      'queue คงทน; topic อยู่ในหน่วยความจำเสมอ',
+      'ไม่มีความแตกต่าง; มันเป็นสองชื่อของสิ่งเดียวกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เหตุใด consumer ของ messaging มักต้องเป็น idempotent?',
+    options: [
+      'เพราะ broker เข้ารหัสข้อความ',
+      'เพราะการส่งแบบ at-least-once หมายความว่าข้อความเดิมอาจมาถึงมากกว่าหนึ่งครั้ง และการประมวลผลซ้ำต้องไม่ก่อให้เกิดอันตราย',
+      'เพราะ topic สลับลำดับข้อความตามตัวอักษร',
+      'เพราะ producer retry เฉพาะวันอังคารเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อใดเป็นต้นทุนที่แท้จริงของการนำ messaging มาใช้?',
+    options: [
+      'มันทำให้ทุกการเรียกเป็น synchronous',
+      'broker กลายเป็นโครงสร้างพื้นฐานสำคัญที่ต้องพร้อมใช้งานสูงและดำเนินการอย่างระมัดระวัง',
+      'มันป้องกันการเพิ่ม consumer ใหม่',
+      'มันขจัด eventual consistency',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/messaging" questions={quizMessaging} />
+
+<ProgressTracker client:visible id="communication/messaging" />

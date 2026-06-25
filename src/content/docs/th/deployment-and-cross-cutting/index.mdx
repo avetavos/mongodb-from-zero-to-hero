@@ -1,0 +1,102 @@
+---
+title: Deployment และ Cross-cutting Concerns
+description: 'เมื่อคุณมีหลาย service การสร้างมันขึ้นมาไม่ใช่ส่วนที่ยากอีกต่อไป — การ package การรัน และการ operate ต่างหากที่ยาก โมดูลนี้ครอบคลุมวิธีส่งมอบ service และวิธีมอบ baseline เดียวกันด้าน networking, config และความสามารถในการ operate ให้กับทุก service'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+คุณได้แยก monolith ออกเป็นชิ้น ๆ วาด service boundary ที่สะอาด มอบฐานข้อมูลของตัวเองให้แต่ละ service และเดินสายเรื่อง communication, reliability และ observability เรียบร้อยแล้ว บนกระดานไวท์บอร์ดระบบดูเหมือนเสร็จสมบูรณ์ แต่พอคุณลองรันมันจริง ๆ จากที่ monolith เคยเป็นเพียง process เดียวที่คุณ deploy ครั้งเดียว ตอนนี้คุณมียี่สิบ service แต่ละตัวอาจเขียนด้วยภาษาที่ต่างกัน แต่ละตัวต้องเริ่มทำงานในสภาพแวดล้อมที่รู้แน่ชัด หา dependency ของตัวเองเจอ และทำงานเหมือนกันทั้งใน staging และ production
+
+งานได้เปลี่ยนไปแล้ว การเขียน service ไม่ใช่ส่วนที่แพงอีกต่อไป การ package มัน วางมันลงบนเครื่อง มอบ configuration ที่ถูกต้องให้ ทำให้ traffic ระหว่าง service ปลอดภัย และทำให้ทุก service เปิดเผย health check และ metric ในแบบเดียวกัน — นั่นต่างหากที่ทีมส่วนใหญ่ทุ่มเทแรงด้าน operation ลงไปในตอนนี้
+
+## ปัญหา
+
+คำถามไม่กี่ข้อตัดสินว่าการรันหลาย service จะยั่งยืนหรือกลายเป็นไฟไหม้ประจำวัน:
+
+คุณจะ package service อย่างไรให้มันรันเหมือนกันทั้งบน laptop, ใน CI และใน production? คุณจะรันมันอย่างไรโดยไม่ต้องปรับแต่งแต่ละ host ด้วยมือ? คุณจะรักษาเรื่อง networking — encryption, retry, timeout — ให้สอดคล้องกันข้าม service ที่เขียนโดยทีมต่างกันด้วยภาษาต่างกันได้อย่างไร? และคุณจะหลีกเลี่ยงการเขียน logging, metric และ health-check แบบเดิม ๆ ซ้ำในทุก ๆ service ได้อย่างไร?
+
+ถ้าแต่ละทีมตอบคำถามเหล่านี้ต่างกัน คุณจะได้กองทัพของ snowflake: service ที่เริ่มทำงานในแบบที่ต่างกันเล็กน้อย ตั้งค่าตัวเองจากกลไกนับสิบแบบ และแต่ละตัวก็ implement เรื่อง security และ observability ผิดไปนิดหน่อย
+
+## ทางออก
+
+โมดูลนี้จัดกลุ่ม pattern ออกเป็นสองชั้น ชั้นแรกว่าด้วย **วิธีที่ service รัน** — การ package และ runtime ของมัน ชั้นที่สองว่าด้วย **cross-cutting baseline** ที่ทุก service ที่กำลังรันแชร์ร่วมกัน — networking, plumbing ส่วนกลาง และ configuration
+
+export const overviewDiagram = `flowchart TB
+  subgraph Run[How a service runs]
+    SPC[Service per Container]
+    SLD[Serverless Deployment]
+  end
+  subgraph Cross[Cross-cutting baseline]
+    SM[Service Mesh]
+    MC[Microservice Chassis]
+    EC[Externalized Configuration]
+  end
+  Img[Built artifact] --> SPC
+  Img --> SLD
+  SPC --> SM
+  SLD --> EC
+  SM --> EC
+  MC --> EC`;
+
+<Mermaid code={overviewDiagram} title="สองชั้น: วิธีที่ service รัน และ cross-cutting concerns ที่ทุก service ที่กำลังรันแชร์ร่วมกัน" />
+
+pattern ทั้งห้าในโมดูลนี้ประกอบเข้าด้วยกันแบบนี้:
+
+- **Service per Container** — package แต่ละ service เป็น container image และรันเพียง service เดียวต่อหนึ่ง container เพื่อให้มันเริ่มทำงานเร็ว คงความ isolated และ deploy เหมือนกันทุกที่ โดยมี orchestrator คอยจัดสรร container ไปตามเครื่องต่าง ๆ
+- **Serverless Deployment** — รัน service เป็น function บน platform ที่จัดการ server ให้คุณ scale ลงไปถึงศูนย์เมื่อว่าง และ scale แบบ per-request ภายใต้โหลด แลกกับ cold start และข้อจำกัดของ platform
+- **Service Mesh** — ผลักเรื่อง networking เช่น mutual TLS, retry, timeout และ traffic shaping เข้าไปไว้ใน sidecar proxy ที่อยู่ข้างแต่ละ service โดยมี control plane ส่วนกลางควบคุม เพื่อให้ทุก service ได้พฤติกรรมเดียวกันโดยไม่ต้องเขียนเอง
+- **Microservice Chassis** — เริ่มทุก service ใหม่บน framework หรือฐานร่วมที่เดินสายเรื่อง configuration, logging, metric, health check และ service discovery ไว้ให้แล้ว เพื่อให้ทีมเขียน business logic แทน plumbing
+- **Externalized Configuration** — เก็บ endpoint, credential และ feature flag ไว้นอก image และ inject เข้าไปตอน runtime เพื่อให้ artifact ที่ไม่เปลี่ยนแปลงเพียงชิ้นเดียวรันได้โดยไม่ต้องแก้ในทุกสภาพแวดล้อม
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+เราเริ่มจากโมเดล runtime สองแบบ — container และ serverless — เพราะทุกอย่างที่เหลือต้องสมมติว่ามีวิธีรัน service จริง ๆ ก่อน จากนั้นเราครอบคลุม cross-cutting concerns ที่เปลี่ยนกอง process ที่กำลังรันให้กลายเป็นกองทัพที่ operate ได้: mesh เพื่อ networking ที่สอดคล้องกัน, chassis เพื่อ plumbing ใน process ที่สอดคล้องกัน และ externalized configuration เพื่อให้ artifact เดียวเป็นกลางต่อทุกสภาพแวดล้อม แต่ละบทเรียนคงรูปแบบเดียวกัน: สถานการณ์ที่นำไปสู่ pattern, แรงที่ขัดแย้งกัน, pattern ทำอะไร, ไดอะแกรม, ตัวอย่าง config ที่เป็นรูปธรรม และการมองตามความจริงว่า pattern นั้นทำให้คุณต้องเสียอะไรบ้าง
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Service per Container](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/service-per-container/) — เริ่มที่นี่ มันคือวิธีเริ่มต้นที่ service รันกันในปัจจุบัน
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/externalized-configuration/) — pattern ที่ทำให้ artifact ที่ build แล้วเพียงชิ้นเดียวรันได้ทุกที่
+
+<Callout title="Build แก้ได้แล้ว; operate คือพรมแดนใหม่">
+ปัญหายากของระบบ microservices ที่โตเต็มที่นั้นแทบไม่เกี่ยวกับการเขียน business code เพิ่ม แต่เกี่ยวกับการทำให้ service หลายสิบตัวที่ build แยกกันเริ่มทำงานในแบบเดียวกัน คุยกันอย่างปลอดภัย รายงานสุขภาพของตัวเองในรูปแบบเดียวกัน และตั้งค่าตามสภาพแวดล้อมได้โดยไม่ต้อง build ใหม่ โมดูลนี้ว่าด้วยพรมแดนด้าน operation นั้น
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ทำไม deployment และ operation จึงกลายเป็นความท้าทายหลักเมื่อคุณมีหลาย service?',
+    options: [
+      'เพราะ microservices ช้ากว่า monolith',
+      'เพราะการเขียน service นั้นถูก แต่การ package, รัน, ทำให้ปลอดภัย และ operate หลายตัวให้สอดคล้องกันคือจุดที่แรงงานย้ายไปอยู่',
+      'เพราะ microservices ใช้ฐานข้อมูลไม่ได้',
+      'เพราะทุก service ต้องเขียนด้วยภาษาเดียวกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'โมดูลนี้จัดกลุ่ม pattern ของมันอย่างไร?',
+    options: [
+      'ตามภาษาโปรแกรม',
+      'เป็นวิธีที่ service รัน (การ package และ runtime) และ cross-cutting baseline ที่ทุก service ที่กำลังรันแชร์ร่วมกัน',
+      'ตามขนาดทีม',
+      'เป็นเรื่อง frontend และ backend',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'pattern ใดทำให้ artifact ที่ build แล้วและไม่เปลี่ยนแปลงเพียงชิ้นเดียวรันได้โดยไม่ต้องแก้ในทุกสภาพแวดล้อม?',
+    options: ['Service Mesh', 'Microservice Chassis', 'Externalized Configuration', 'Serverless Deployment'],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/index" />

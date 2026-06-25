@@ -1,0 +1,128 @@
+---
+title: Audit Logging
+description: 'Record who did what and when as durable, tamper-evident business records — kept deliberately separate from debug logs, because they answer questions of security, compliance, and accountability rather than diagnosis.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Operational logs — the structured, aggregated lines from the log-aggregation lesson — exist to help you debug. They are noisy, sampled, short-lived, and writable by anyone on the team. That is exactly right for diagnosis. But some events are not about diagnosis at all. An administrator changed a customer's permissions. A user exported a list of personal data. Someone approved a refund of ten thousand dollars. Months later a security investigation, a regulator, or a dispute will ask a precise question: *who did this, exactly when, and from where?*
+
+## Problem
+
+Debug logs are the wrong instrument for that question, in every dimension. They are retained for days, not the years compliance often demands. They are sampled, so the one event that matters may never have been recorded. They live in a store engineers can edit or delete, so they are not trustworthy as evidence. And they are written for operators, not auditors — full of stack traces and request timings, missing the actor identity and authorization context an audit needs. Trying to satisfy a compliance request by grepping debug logs fails on retention, completeness, and integrity all at once.
+
+So how do you capture a trustworthy, lasting record of security- and compliance-relevant actions — one that survives, cannot be quietly altered, and answers *who, what, when* with certainty?
+
+## Solution
+
+**Audit logging** treats these events as a distinct kind of record with its own pipeline and its own rules. An audit record is written deliberately, at the point a significant business action succeeds, and it captures the facts an auditor needs: the **actor** (who), the **action** (what), the **target** (on what), the **timestamp** (when), and the **context** (from where, under what authorization). These records go to their own **append-only, tamper-evident store** — never deleted, never updated, often write-once and cryptographically chained so any alteration is detectable — and retained for as long as policy requires.
+
+The defining principle is **separation**. Audit logs are not a log level on your debug logs; they are a separate stream with stronger guarantees: completeness (never sampled), durability (long retention), and integrity (immutable and verifiable).
+
+export const auditDiagram = `flowchart LR
+  ACTOR[Admin / User] -->|performs action| SVC[Service]
+  SVC -->|on success: emit audit record| AUDIT[(Append-only\\nTamper-evident\\nAudit Store)]
+  AUDIT --> REVIEW[Compliance / Security review]
+  SVC -. debug only .-> OPS[(Operational Log Store\\nsampled, short retention)]`;
+
+<Mermaid code={auditDiagram} title="Significant actions emit a durable audit record to a separate append-only store, distinct from sampled operational logs" />
+
+## Example
+
+An audit record written when an administrator changes another user's role. Note what it contains and what it deliberately omits: it records the actor, action, target, before/after values, and authorization context — but no secrets and no full request payload. It is a business fact, not a debug dump.
+
+```json
+{
+  "auditId": "a7e2c5b1-04d9-4f3a-9c88-1b2e6f0a7d33",
+  "timestamp": "2026-06-25T09:14:22.108Z",
+  "actor": {
+    "userId": "usr_admin_204",
+    "email": "admin@example.com",
+    "ipAddress": "203.0.113.42",
+    "sessionId": "sess_9f1c"
+  },
+  "action": "user.role.update",
+  "target": {
+    "type": "user",
+    "userId": "usr_88213"
+  },
+  "before": { "role": "viewer" },
+  "after": { "role": "admin" },
+  "authorization": {
+    "via": "rbac",
+    "grantedBy": "policy_admin_management"
+  },
+  "result": "success",
+  "correlationId": "c1f4e9a2-8b3d-4e77-9a01-2f6c5d8e1b04"
+}
+```
+
+The `correlationId` lets investigators cross-reference this audit record with the operational logs and traces of the same request — but the audit record itself stands alone as the authoritative account of *who changed whom, to what, and when*.
+
+## Resulting context
+
+What you gain:
+
+- **A trustworthy answer to "who did what."** Because the store is append-only and tamper-evident, an audit record is admissible evidence in a security review, a dispute, or a regulatory inquiry — something debug logs can never be.
+- **Compliance by design.** Long retention and guaranteed completeness satisfy obligations (access reviews, data-handling regulations) that sampled operational logs cannot.
+- **Clear separation of concerns.** Operators keep their noisy, short-lived debug logs; auditors get a clean, durable stream — neither compromises the other.
+
+What it costs you:
+
+- **You must decide what is auditable.** Auditing everything reproduces the noise problem in a more expensive store; auditing too little leaves gaps an investigation will fall into. Define the security- and compliance-relevant actions explicitly.
+- **Integrity is real engineering.** Append-only storage, hash-chaining or write-once media, and access controls that prevent even administrators from quietly editing records are non-trivial — and the whole value collapses if the store can be altered.
+- **Privacy tension.** Audit records are durable and long-lived, yet often contain personal data. You must reconcile retention with privacy rules (such as the right to erasure) deliberately, rather than letting an immutable log accidentally become a permanent dossier.
+
+## Related patterns
+
+- [Log Aggregation](/microservices-design-from-zero-to-hero/en/observability/log-aggregation/) — operational logs are the diagnostic counterpart; audit logs deliberately do not share their pipeline or guarantees.
+- [Distributed Tracing](/microservices-design-from-zero-to-hero/en/observability/distributed-tracing/) — share a correlation or trace id so an audit record can be tied back to the request that produced it.
+
+<Callout title="An audit log is evidence, not a debug log with a fancy name">
+The temptation is to add an `AUDIT` level to your existing logger and call it done. That fails the moment integrity matters: anyone who can write debug logs can forge or erase your "evidence," and your short retention deletes it before the audit arrives. Audit logging earns its name only through *separation and guarantees* — its own append-only store, its own retention, its own access controls. If a record can be quietly changed, it is not an audit record.
+</Callout>
+
+export const quizAudit = [
+  {
+    q: 'Why are ordinary debug logs unsuitable as audit records?',
+    options: [
+      'They are written in JSON, which auditors cannot read',
+      'They are sampled, short-lived, and editable, so they fail completeness, retention, and integrity',
+      'They never include timestamps',
+      'They are too slow to write',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which facts should an audit record capture?',
+    options: [
+      'CPU and memory usage at the time of the action',
+      'The actor, action, target, timestamp, and authorization context — who did what, when, and how it was permitted',
+      'Full request and response payloads including any secrets',
+      'Only the HTTP status code returned',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "tamper-evident, append-only" storage give an audit log?',
+    options: [
+      'Faster query performance than a relational database',
+      'The ability to undo any action that was recorded',
+      'Integrity — records cannot be quietly altered or deleted, so they are trustworthy as evidence',
+      'Automatic deletion of records after one day',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="observability/audit-logging" questions={quizAudit} />
+
+<ProgressTracker client:visible id="observability/audit-logging" />

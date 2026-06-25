@@ -1,0 +1,130 @@
+---
+title: Log Aggregation
+description: 'Ship structured logs from every instance to a central, searchable store, and tie the lines from one request together with a correlation id — so a request that crossed five services reads as one coherent story.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Every service writes logs — that habit survived the move to microservices intact. What changed is where those logs live. In the monolith there was one process and one `app.log`; `grep` over that file was your debugger. Now the same logical request touches five services, each running several replicas, each writing to its own local file or standard output inside a container that the scheduler may destroy at any moment.
+
+A customer reports that their checkout failed at 14:32. The relevant lines are scattered across the order replica that handled the click, the payment replica it called, and the inventory replica it called after that — three files on three machines, two of which have since been recycled and are gone.
+
+## Problem
+
+There is no single place to look, and even if you could log into every box, the logs would not connect. The order service logged an error, the payment service logged a timeout, the inventory service logged nothing at all — but nothing in those lines tells you they belonged to the *same* request. You are left correlating by timestamp and guesswork, across files that may already have rotated out of existence.
+
+So how do you make the log lines from a single request, spread across many short-lived replicas, both *findable in one place* and *connected to each other*?
+
+## Solution
+
+**Log aggregation** has two halves, and you need both.
+
+First, a **pipeline ships logs off the box**. Each service writes its logs to standard output (or a local agent tails them), and a collector forwards every line to a central, indexed store you can search across all services and all replicas at once. Because the logs leave the container immediately, they survive the replica that produced them.
+
+Second, the logs are **structured and correlated**. Instead of free-form text, each line is a self-describing record — typically JSON — with consistent fields: a timestamp, a level, the service name, and crucially a **correlation id** (sometimes called a request id) that is generated once at the system edge and attached to every line emitted while handling that request, in every service it touches. Searching for that one id pulls back every line of the request's journey, in order, regardless of which replica or service wrote it.
+
+export const pipelineDiagram = `flowchart LR
+  subgraph Replicas
+    A[Order replica\nstdout JSON]
+    B[Payment replica\nstdout JSON]
+    C[Inventory replica\nstdout JSON]
+  end
+  A --> COL[Log Collector / Agent]
+  B --> COL
+  C --> COL
+  COL --> STORE[(Central Indexed\nLog Store)]
+  STORE --> SEARCH[Search UI\nfilter by correlationId]`;
+
+<Mermaid code={pipelineDiagram} title="Each replica emits structured logs to a collector, which forwards them to a central searchable store correlated by request id" />
+
+## Example
+
+A structured log line emitted by the payment service while handling a checkout. It is a single JSON object per line, with stable field names and the correlation id that ties it to every other line of the same request:
+
+```json
+{
+  "timestamp": "2026-06-25T14:32:07.512Z",
+  "level": "error",
+  "service": "payment-service",
+  "instance": "payment-7d9f-bk2qx",
+  "correlationId": "c1f4e9a2-8b3d-4e77-9a01-2f6c5d8e1b04",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "event": "charge_failed",
+  "orderId": "ord_88213",
+  "amount": 4999,
+  "currency": "USD",
+  "reason": "gateway_timeout",
+  "durationMs": 3021,
+  "message": "payment gateway did not respond within 3s"
+}
+```
+
+Searching the central store for `correlationId = "c1f4e9a2-8b3d-4e77-9a01-2f6c5d8e1b04"` returns this line alongside the order service's line that started the request and the inventory service's lines that followed — the full story of one checkout, reassembled from three services.
+
+## Resulting context
+
+What you gain:
+
+- **One place to search, across everything.** You query all services and replicas at once, and logs outlive the containers that wrote them, so a recycled pod no longer takes your evidence with it.
+- **Requests read as stories.** Filtering by correlation id reconstructs a single request's path across service boundaries, in order — recovering the end-to-end view you had for free in the monolith.
+- **Machine-readable fields.** Structured logs can be filtered, aggregated, and alerted on by field (`level`, `service`, `reason`) instead of fragile text matching.
+
+What it costs you:
+
+- **You must propagate the correlation id.** Generate it at the edge (gateway or first service) and pass it on every outbound call — usually via a header — or the chain breaks at the first hop that forgets.
+- **Volume and cost.** Centralizing every line from every replica produces a lot of data; you will need sensible log levels, sampling for high-volume debug logs, and retention policies, or the bill and the noise both grow without bound.
+- **Discipline on fields.** The value comes from *consistent* field names across services. Without a shared logging convention, `userId` here and `user_id` there quietly defeat your queries.
+
+## Related patterns
+
+- [Distributed Tracing](/microservices-design-from-zero-to-hero/en/observability/distributed-tracing/) — a trace id is the same idea taken further, adding causal spans and timing on top of correlation.
+- [Audit Logging](/microservices-design-from-zero-to-hero/en/observability/audit-logging/) — a separate, durable record for compliance, distinct from these operational debug logs.
+
+<Callout title="Logs are an interface, not an afterthought">
+The moment logs become structured records that other systems parse, query, and alert on, their field names become a contract. Renaming `correlationId` or changing a level's meaning can silently break dashboards and alerts that depend on it. Treat your log schema with the same care you give an API: agree on field names across teams, version changes, and resist logging secrets or full payloads into a store many people can read.
+</Callout>
+
+export const quizLogs = [
+  {
+    q: 'What problem does a correlation id solve in aggregated logs?',
+    options: [
+      'It compresses log files to save storage',
+      'It ties together every log line emitted while handling one request, across all services it touched',
+      'It encrypts log lines so only admins can read them',
+      'It replaces the need for timestamps',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why prefer structured (e.g. JSON) logs over free-form text lines?',
+    options: [
+      'They are shorter and always cheaper to store',
+      'They can be filtered, aggregated, and alerted on by field instead of fragile text matching',
+      'They do not need to be shipped off the box',
+      'They make correlation ids unnecessary',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where should a correlation id typically be generated, and how does it travel?',
+    options: [
+      'In the database, and it stays inside one service',
+      'At the system edge, and it is propagated on every outbound call so every service reuses the same id',
+      'Randomly in each service, so each line gets a fresh id',
+      'Only in the log store, after the request finishes',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="observability/log-aggregation" questions={quizLogs} />
+
+<ProgressTracker client:visible id="observability/log-aggregation" />

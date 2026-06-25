@@ -1,0 +1,63 @@
+---
+title: Microservices Design Patterns — From Zero to Hero
+description: Learn the microservices pattern language from first principles — decomposition, data management, communication, reliability, observability, and deployment — each pattern as Context → Problem → Solution with architecture diagrams and examples.
+template: splash
+hero:
+  tagline: A standalone, beginner→advanced course on the microservices pattern language. When microservices help (and when they hurt), how to decompose a system, keep data consistent across services, communicate reliably, and run them in production — each pattern presented as Context → Problem → Solution with an architecture diagram and an example.
+  actions:
+    - text: Start here
+      link: /microservices-design-from-zero-to-hero/en/intro-and-principles/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to Data Management
+      link: /microservices-design-from-zero-to-hero/en/data-management/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll learn
+
+<CardGrid>
+  <Card title="Intro & Principles" icon="rocket">
+    Monolith vs microservices, the benefits and drawbacks, when to use them, and the pattern language. [Start →](/microservices-design-from-zero-to-hero/en/intro-and-principles/)
+  </Card>
+  <Card title="Decomposition" icon="puzzle">
+    Decompose by business capability and by subdomain (DDD), self-contained service, service per team. [Split →](/microservices-design-from-zero-to-hero/en/decomposition/)
+  </Card>
+  <Card title="Data Management" icon="seti:db">
+    Database per Service, Saga, API Composition, CQRS, Event Sourcing. [Manage data →](/microservices-design-from-zero-to-hero/en/data-management/)
+  </Card>
+  <Card title="Transactional Messaging" icon="seti:config">
+    The dual-write problem — Transactional Outbox, log tailing, polling publisher, idempotent consumer. [Publish reliably →](/microservices-design-from-zero-to-hero/en/transactional-messaging/)
+  </Card>
+  <Card title="Communication" icon="random">
+    RPI (REST/gRPC), messaging, API Gateway, Backends for Frontends, service discovery. [Connect →](/microservices-design-from-zero-to-hero/en/communication/)
+  </Card>
+  <Card title="Reliability" icon="approve-check">
+    Circuit Breaker, retry + timeout, bulkhead, rate limiting — surviving partial failure. [Harden →](/microservices-design-from-zero-to-hero/en/reliability/)
+  </Card>
+  <Card title="Observability" icon="seti:plan">
+    Health Check API, log aggregation, distributed tracing, metrics, audit logging. [Observe →](/microservices-design-from-zero-to-hero/en/observability/)
+  </Card>
+  <Card title="Deployment & Cross-cutting" icon="cloud-download">
+    Service per Container, serverless, service mesh, microservice chassis, externalized config. [Ship it →](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/)
+  </Card>
+</CardGrid>
+
+## How this course works
+
+<CardGrid>
+  <Card title="Context → Problem → Solution" icon="open-book">
+    Every pattern is presented the same way — the situation, the forces it must resolve, the solution, and the benefits and drawbacks it brings.
+  </Card>
+  <Card title="Diagrams that explain" icon="puzzle">
+    Architecture, sequence, and state diagrams as theme-aware Mermaid — sagas, the circuit-breaker states, service mesh, trace propagation.
+  </Card>
+  <Card title="Examples in four languages" icon="seti:default">
+    Logic patterns (Saga, Circuit Breaker, Idempotent Consumer) come with TypeScript, Python, Go, and Rust in synced tabs; infra patterns show real config.
+  </Card>
+  <Card title="Bilingual + read mode" icon="translate">
+    English and ไทย, quizzes with saved progress, and a distraction-free read mode.
+  </Card>
+</CardGrid>

@@ -1,0 +1,96 @@
+---
+title: Reliability in Microservices
+description: 'In a distributed system, partial failure is normal: a slow or failed dependency must never take you down. This module covers the resilience patterns — circuit breaker, retry with timeout, bulkhead, and rate limiting — that keep one failure from becoming an outage.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+In the monolith, a function called another function. That call either returned or threw, and it returned in nanoseconds. There was no network in the middle, no separate process that could be restarting, no queue that could be full. When you split the system into services, every one of those in-process calls that crosses a service boundary becomes a remote call — over a socket, through a load balancer, across an availability zone. The dependency you used to trust unconditionally is now a separate program that can be slow, can be overloaded, or can simply be gone.
+
+## Problem
+
+The defining fact of distributed systems is **partial failure**: at any moment, some part of the system is broken while the rest keeps running. A dependency is not simply up or down — it can be *slow*, which is worse, because a slow dependency holds your resources hostage. Picture an order service that calls a payment service on every request. The payment service starts responding in eight seconds instead of eighty milliseconds. Each order request now parks a thread waiting for payment. Threads pile up, the connection pool drains, and within seconds the order service stops answering health checks — even though *nothing about the order service itself is broken*. The failure has propagated upstream.
+
+This is a **cascading failure**: one struggling component pulls down its callers, which pull down their callers, until a single slow dependency has taken out a whole chain of healthy services.
+
+export const cascadeDiagram = `flowchart LR
+  U[Users] --> GW[API Gateway]
+  GW --> A[Order Service]
+  A --> B[Payment Service]
+  B --> X[(Slow / failing dependency)]
+  X -. "8s latency" .-> B
+  B -. "threads blocked" .-> A
+  A -. "pool exhausted" .-> GW
+  GW -. "timeouts surface to users" .-> U`;
+
+<Mermaid code={cascadeDiagram} title="Cascading failure — a slow dependency exhausts resources upstream, one hop at a time" />
+
+So the central question of this module is this: how do you stop a slow or failed dependency from consuming the resources of everything that depends on it, so that one failure stays contained instead of spreading?
+
+## Solution
+
+You cannot prevent dependencies from failing. What you *can* do is decide, in advance, how your service behaves when they do — and make that behaviour bounded, fast, and isolated. The patterns in this module are the building blocks for that behaviour. None of them is exotic; together they turn "a dependency got slow and we fell over" into "a dependency got slow and we degraded gracefully".
+
+- **Circuit Breaker** — once calls to a dependency cross an error threshold, stop calling it for a while. Fail fast instead of piling up doomed requests, and probe periodically to detect recovery.
+- **Retry + Timeout** — put a hard time bound on every remote call so it can never hang forever, and retry *transient* failures with exponential backoff and jitter, targeting only idempotent operations.
+- **Bulkhead** — isolate the resources (thread pools, connection pools, semaphores) used for each dependency, so one saturated dependency cannot drain the resources the rest of the system needs.
+- **Rate Limiting / Throttling** — cap the rate of incoming work so a traffic spike or a misbehaving client cannot push a service past the capacity it can actually serve, shedding or queuing the excess.
+
+These patterns reinforce each other. A timeout makes a circuit breaker's error counting meaningful; a circuit breaker keeps retries from becoming a retry storm; a bulkhead contains whatever the first two miss; and rate limiting protects the service from being overwhelmed in the first place.
+
+## What this module covers
+
+We begin with the **circuit breaker**, the pattern that turns a hanging dependency into a fast, predictable failure. Then we add **retry and timeout**, the per-call discipline that bounds latency and recovers from blips. Next comes the **bulkhead**, which contains damage by partitioning resources. We close with **rate limiting**, which protects a service's capacity from overload. Each lesson follows the same shape: the situation that leads to the pattern, the forces in tension, what the pattern does, a diagram, runnable example code in four languages, and an honest look at what the pattern costs you.
+
+## Related patterns
+
+- [Circuit Breaker](/microservices-design-from-zero-to-hero/en/reliability/circuit-breaker/) — start here; it is the pattern that stops a hang from becoming an outage.
+- [Retry and Timeout](/microservices-design-from-zero-to-hero/en/reliability/retry-and-timeout/) — the per-call discipline a breaker is built on.
+
+<Callout title="Design for failure, not against it">
+You will not make remote calls reliable; the network and other people's services are outside your control. The shift in mindset is to treat failure as an expected input rather than an exception. Every remote call gets a budget for time and attempts, a plan for what to return when the budget runs out, and an isolation boundary so its failure stays local. Reliability in a distributed system is not the absence of failure — it is failure that stays contained.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does "partial failure" mean in a distributed system?',
+    options: [
+      'A request that returns incomplete JSON',
+      'At any moment some components are broken or slow while others keep running normally',
+      'A database transaction that only partly commits',
+      'A deployment that rolls out to half the servers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is a slow dependency often more dangerous than one that is fully down?',
+    options: [
+      'It returns incorrect data without any error',
+      'It holds caller resources (threads, connections) hostage while they wait, which can exhaust the caller',
+      'It is impossible to detect with monitoring',
+      'It always corrupts the database',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a cascading failure?',
+    options: [
+      'A single service crashing and restarting on its own',
+      'One struggling component exhausting its callers, which in turn exhaust their callers, spreading the outage',
+      'A disk filling up across every node at once',
+      'A failed deployment that must be rolled back',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="reliability/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="reliability/index" />

@@ -1,0 +1,149 @@
+---
+title: Database per Service
+description: 'ให้ทุก service มีฐานข้อมูลส่วนตัวของตัวเองที่มีเพียงมันเท่านั้นที่แตะได้โดยตรง — ขอบเขตที่ทำให้ service ยังคง loosely coupled และทำให้ pattern จัดการข้อมูลอื่น ๆ จำเป็น'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## บริบท (Context)
+
+คุณได้แยกระบบของคุณออกเป็นหลาย service ที่จัดเรียงตามความสามารถทางธุรกิจ — orders, inventory, payments, shipping แต่ละ service มี codebase ของตัวเองและทีมของตัวเอง ตอนนี้คุณต้องตัดสินใจว่าข้อมูลของแต่ละ service จะอยู่ที่ไหน เส้นทางที่ง่ายที่สุดคือชี้ทุกตัวไปที่ฐานข้อมูลเดียวกันที่คุณมีอยู่แล้ว มันใช้งานได้ในวันแรก และมันค่อย ๆ ทำลายทุกสิ่งที่การแยกส่วนควรจะมอบให้คุณอย่างเงียบ ๆ
+
+## ปัญหา (Problem)
+
+เมื่อ service ใช้ฐานข้อมูลร่วมกัน พวกมันก็ใช้ schema ร่วมกัน ทีม shipping เพิ่มคอลัมน์ลงในตาราง orders ทำให้ query ของทีม orders พัง ทีม inventory อยากเปลี่ยนตารางจาก PostgreSQL ไปเป็น document store แต่ทำไม่ได้ เพราะมีอีกสี่ service อ่านมันโดยตรง รายงานที่ทำงานช้าของ service หนึ่งดูด connection pool ที่ทุก service อื่นพึ่งพาจนหมด
+
+การใช้ฐานข้อมูลร่วมกันคือการสร้าง monolith ขึ้นมาใหม่ที่ชั้นข้อมูล ดังนั้นแรงที่กำลังทำงานอยู่คือ: คุณจะให้แต่ละ service พัฒนาโมเดลข้อมูลของตัวเอง เลือกเทคโนโลยีการจัดเก็บของตัวเอง และ scale ตามตารางเวลาของตัวเองได้อย่างไร โดยที่ service อื่นไม่แอบไปพึ่งพาตารางภายในของมัน?
+
+## วิธีแก้ (Solution)
+
+ให้แต่ละ service เป็นเจ้าของข้อมูลของตัวเองแต่เพียงผู้เดียว ข้อมูลอยู่ในฐานข้อมูลส่วนตัว — เป็น schema แยก เป็น database instance แยก หรือเป็น database server แยก ขึ้นอยู่กับว่าคุณต้องการการแยก (isolation) ที่แข็งแกร่งเพียงใด ไม่มี service อื่นได้รับอนุญาตให้เชื่อมต่อกับมัน วิธีเดียวที่จะอ่านหรือเปลี่ยนข้อมูลของ service คือการผ่าน API ที่ service นั้น publish ออกมา หรือการบริโภค event ที่มันส่งออกมา
+
+ฐานข้อมูลกลายเป็นรายละเอียดการ implement ของ service เช่นเดียวกับโครงสร้างข้อมูลใน memory ของมัน ทีมมีอิสระในการเปลี่ยนตาราง index และแม้แต่ database engine ตราบใดที่ contract ของ API ยังคงเสถียร
+
+export const dbPerServiceDiagram = `flowchart TB
+  subgraph Order[Order Service]
+    OAPI[Order API]
+    ODB[(PostgreSQL)]
+    OAPI --> ODB
+  end
+  subgraph Shipping[Shipping Service]
+    SAPI[Shipping API]
+    SDB[(MongoDB)]
+    SAPI --> SDB
+  end
+  SAPI -- HTTP / gRPC call --> OAPI
+  Forbidden[Shipping reaching into Orders DB] -. NOT ALLOWED .-x ODB
+  style Forbidden fill:#fee,stroke:#c00,stroke-dasharray: 5 5`;
+
+<Mermaid code={dbPerServiceDiagram} title="service หนึ่งอาจเรียก API ของอีก service ได้ แต่ห้ามเชื่อมต่อกับฐานข้อมูลของมันเด็ดขาด" />
+
+## ตัวอย่าง (Example)
+
+pattern นี้เป็นเชิงโครงสร้างมากกว่าเชิงอัลกอริทึม ดังนั้นภาพประกอบที่ชัดเจนที่สุดคือการตั้งค่า (configuration) ด้านล่างนี้ มีสอง service ที่ถูกต่อสายไว้ให้แต่ละตัวถือ credentials สำหรับฐานข้อมูลของตัวเองเท่านั้น สังเกตว่า Shipping service ไม่มี connection string สำหรับฐานข้อมูล Orders เลย — มันมีเพียง URL ของ Order service เท่านั้น
+
+```yaml
+# docker-compose excerpt — each service gets its own DB and its own credentials
+services:
+  order-service:
+    image: shop/order-service:1.0
+    environment:
+      DATABASE_URL: postgres://order_user:secret@order-db:5432/orders
+    # No reference to any other service's database.
+
+  order-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: order_user
+      POSTGRES_PASSWORD: secret
+
+  shipping-service:
+    image: shop/shipping-service:1.0
+    environment:
+      DATABASE_URL: mongodb://ship_user:secret@shipping-db:27017/shipping
+      # To learn about an order, Shipping calls the Order API, not its DB.
+      ORDER_SERVICE_URL: http://order-service:8080
+
+  shipping-db:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_DATABASE: shipping
+```
+
+ขอบเขตนี้ยังเป็นขอบเขตของสิทธิ์ (permissions) ด้วย แม้ว่าใครบางคนจะรู้ hostname ของฐานข้อมูล orders แต่ credentials ก็ไม่มีอยู่ที่ใดเลยนอกเหนือจาก Order service:
+
+```text
+order-service     --owns-->   orders DB     (order_user can connect)
+shipping-service  --owns-->   shipping DB   (ship_user can connect)
+shipping-service  --calls-->  Order API --> orders DB   (allowed, indirect)
+shipping-service  --X-->      orders DB     (blocked: no route, no credentials)
+```
+
+## บริบทที่เป็นผลลัพธ์ (Resulting context)
+
+สิ่งที่คุณได้รับ:
+
+- **Loose coupling.** แต่ละทีมเป็นเจ้าของ schema ของตัวเองและ refactor มันได้อย่างอิสระ การเปลี่ยนแปลงภายในฐานข้อมูลหนึ่งจะไม่ทำให้ service อื่นพังได้
+- **Polyglot persistence.** service สามารถเลือกที่จัดเก็บที่เหมาะกับงานของมัน — relational สำหรับ orders, document สำหรับ shipping, search index สำหรับ catalog
+- **การ scale อย่างอิสระและการแยกความล้มเหลว (failure isolation).** ภาระ query ที่หนักหรือฐานข้อมูลล่มของ service หนึ่งจะไม่ลากทุก service อื่นล้มตามไปอีกต่อไป
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **ไม่มี transaction ข้าม service.** คุณไม่สามารถห่อการ insert order และการลด inventory ไว้ใน atomic commit เดียวได้ เพราะมันอยู่ในฐานข้อมูลคนละตัว การคืนความสอดคล้องข้าม service คือสิ่งที่ pattern [Saga](/microservices-design-from-zero-to-hero/th/data-management/saga/) จัดการพอดี
+- **ไม่มี join ข้าม service.** query ที่ต้องการข้อมูล order, customer และ shipping ไม่สามารถเป็น SQL statement เดียวได้อีกต่อไป คุณต้องประกอบมันด้วย [API Composition](/microservices-design-from-zero-to-hero/th/data-management/api-composition/) หรือ [CQRS](/microservices-design-from-zero-to-hero/th/data-management/cqrs/) แทน
+- **ข้อมูลซ้ำซ้อนบางส่วน.** service มัก cache ข้อมูลบางส่วนเล็ก ๆ ที่บริโภคมาจาก service อื่น ซึ่งคุณต้องคอยซิงค์ให้ตรงกัน
+
+ข้อคิดสำคัญ: Database per Service ไม่ได้แก้ปัญหาความสอดคล้องและการ query — มันจงใจเอาทางลัดออกไป เพื่อให้คุณแก้ปัญหาเหล่านั้นอย่างชัดเจนและเป็นราย service ซึ่งเป็นเหตุผลว่าทำไมส่วนที่เหลือของโมดูลนี้จึงมีอยู่
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Saga](/microservices-design-from-zero-to-hero/th/data-management/saga/) — ความสอดคล้องข้ามฐานข้อมูลส่วนตัวโดยไม่ต้องใช้ distributed transaction
+- [API Composition](/microservices-design-from-zero-to-hero/th/data-management/api-composition/) — การตอบ query ที่เคยเป็น join
+- [CQRS](/microservices-design-from-zero-to-hero/th/data-management/cqrs/) — read model ที่พาดข้าม service ได้อย่างมีประสิทธิภาพ
+
+<Callout title="กฎข้อเดียว">
+ถ้าคุณจำอะไรไม่ได้เลย: ฐานข้อมูลของ service เป็นของส่วนตัว วันที่ service ที่สองเปิดการเชื่อมต่อโดยตรงกับมัน คุณจะไม่มีสอง service อีกต่อไป — คุณมี distributed monolith หนึ่งตัวที่ติดป้ายชื่อสองอัน
+</Callout>
+
+export const quizDbPerService = [
+  {
+    q: 'วิธีเดียวที่ถูกต้องที่ service หนึ่งจะอ่านข้อมูลของอีก service หนึ่งได้คืออะไร?',
+    options: [
+      'เชื่อมต่อกับฐานข้อมูลอีกตัวโดยตรงด้วย credentials แบบ read-only',
+      'ผ่าน API ของ service ที่เป็นเจ้าของ หรือ event ที่มัน publish ออกมา',
+      'โดยการ query จาก read replica ที่ใช้ร่วมกัน',
+      'โดยการ import โมเดล ORM ของ service อีกตัว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Database per Service เปิดทางให้ประโยชน์ใดได้โดยตรง?',
+    options: [
+      'distributed ACID transaction ข้าม service',
+      'SQL join ข้าม service',
+      'Polyglot persistence — แต่ละ service เลือกเทคโนโลยีการจัดเก็บของตัวเอง',
+      'schema เดียวที่ใช้ร่วมกันทั้งระบบ',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Database per Service เอา join ข้าม service ออกไป pattern ใดที่คืนการ query ข้าม service กลับมา?',
+    options: [
+      'Saga และ two-phase commit',
+      'API Composition และ CQRS',
+      'Sharding และ replication',
+      'connection pooling และ caching เท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="data-management/database-per-service" questions={quizDbPerService} />
+
+<ProgressTracker client:visible id="data-management/database-per-service" />

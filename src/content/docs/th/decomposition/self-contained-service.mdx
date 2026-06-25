@@ -1,0 +1,109 @@
+---
+title: Self-Contained Service
+description: 'ออกแบบ service ให้จัดการ request ได้โดยไม่ต้องเรียก service อื่นแบบ synchronous — โดยใช้ข้อมูลที่ทำสำเนาไว้และอัปเดตให้สดใหม่ด้วย event — เพื่อให้มันยังคงพร้อมใช้งานแม้เพื่อนบ้านจะช้าหรือล่ม'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## บริบท (Context)
+
+service ของคุณมีเส้นแบ่งที่ดี แต่ละตัวเป็นเจ้าของข้อมูลของตัวเอง ตอนนี้พวกมันต้องทำงานร่วมกัน Order service เพื่อจะแสดง order หนึ่งต้องใช้ชื่อของลูกค้าและชื่อสินค้า — ข้อมูลที่ Customer และ Catalog service เป็นเจ้าของ การกระทำที่ชัดเจนคือเรียก service เหล่านั้นแบบ synchronous ทุกครั้งที่ render order มันทำงานได้ตอน development ที่ทุก service เปิดอยู่และเครือข่ายเป็น loopback แล้วคุณก็ขึ้น production
+
+## ปัญหา (Problem)
+
+ทันทีที่ service หนึ่งต้องเรียก service อื่นแบบ synchronous เพื่อทำงานของตัวเอง มันก็รับเอา availability ของ service อื่นนั้นมา — รวมถึง latency ของมันด้วย ต่อการเรียกแบบนี้สักสองสามครั้งแล้วคณิตศาสตร์ก็กลายเป็นศัตรู ถ้าสี่ service แต่ละตัวมี availability ที่ยอดเยี่ยม 99.9% request ที่ขึ้นกับทั้งสี่ตัวแบบ synchronous จะพร้อมใช้งานเพียงประมาณ 99.6% ของเวลา และ dependency ที่ช้าตัวใดตัวหนึ่งก็ลาก latency ของทั้งสายให้สูงขึ้น ความล้มเหลวหรือความช้าที่ใดก็ตามในสายกลายเป็นความล้มเหลวทุกที่ที่อยู่เหนือมันขึ้นไป คุณได้สร้าง service ที่ deploy ได้อย่างอิสระแต่ *รัน* อย่างอิสระไม่ได้ — distributed system ที่เปราะบางกว่า monolith ที่มันมาแทนที่
+
+ดังนั้นแรงต่าง ๆ คือ service หนึ่งต้องการข้อมูลที่ service อื่นเป็นเจ้าของ แต่มันต้องไม่ยอมสละ availability และความตอบสนองของตัวเองให้ service อื่นนั้นทุกครั้งที่มันให้บริการ request
+
+## วิธีแก้ (Solution)
+
+**self-contained service** จัดการแต่ละ request ด้วยตัวมันเองทั้งหมด โดยไม่เรียก service อื่นใดแบบ synchronous ในเส้นทางของ request มันทำได้ด้วยการเก็บ **สำเนาในที่ (local replica)** ของข้อมูลที่มันต้องการจากที่อื่น — แค่ส่วนที่มันใช้จริง ๆ — และทำให้สำเนานั้นสดใหม่ *แบบ asynchronous* ด้วยการ subscribe ไปยัง event ที่ service เจ้าของข้อมูลเผยแพร่
+
+service เจ้าของยังคงเป็น source of truth เมื่อ Customer service เปลี่ยนชื่อ มันก็เผยแพร่ event `CustomerUpdated` ส่วน Order service ก็บริโภคมันและอัปเดตสำเนาในที่เล็ก ๆ ของชื่อลูกค้า ต่อมาเมื่อ Order service ให้บริการ request ข้อมูลที่มันต้องการก็นั่งอยู่ใน database ของตัวเองอยู่แล้ว ไม่มีการเรียกใดออกไปข้ามเครือข่ายบน hot path ดังนั้น request จึงสำเร็จแม้ Customer service จะปิดเพื่อบำรุงรักษาอยู่
+
+การแลกเปลี่ยนนี้เป็นไปอย่างจงใจ คุณยอมรับว่าสำเนาในที่นั้น **eventually consistent** — มันอาจตามหลัง source อยู่ชั่วครู่ — เพื่อแลกกับการที่ service สามารถตอบ request ได้ด้วยตัวเอง สำหรับ read path ส่วนใหญ่ ชื่อที่เก่าไปสองสามวินาทีเป็นการแลกเปลี่ยนที่ดีเยี่ยมเพื่อให้ยังคงพร้อมใช้งาน
+
+export const selfContainedDiagram = `flowchart TB
+  subgraph Chain[Synchronous chain - fragile]
+    direction LR
+    Req1[Request] --> O1[Order Service]
+    O1 -->|sync call| C1[Customer Service]
+    O1 -->|sync call| P1[Catalog Service]
+    note1[If Customer or Catalog is down or slow,<br/>the request fails or hangs]
+  end
+  subgraph Self[Self-contained - resilient]
+    direction LR
+    Req2[Request] --> O2[Order Service]
+    O2 --> R2[(Local replica:<br/>names, titles)]
+    C2[Customer Service] -. CustomerUpdated event .-> R2
+    P2[Catalog Service] -. ProductUpdated event .-> R2
+    note2[Request served from local replica;<br/>events update it in the background]
+  end`;
+
+<Mermaid code={selfContainedDiagram} title="บน: สาย synchronous รับเอา availability ของทุก dependency มา ล่าง: self-contained service ให้บริการจากสำเนาในที่ที่อัปเดตให้สดใหม่ด้วย event" />
+
+## บริบทที่ได้ตามมา (Resulting context)
+
+สิ่งที่คุณได้:
+
+- **availability ที่ไม่ทวีคูณลดลง** service ตอบ request โดยไม่ขึ้นกับตัวอื่นตอน runtime ดังนั้นการล่มหรือความช้าของเพื่อนบ้านจึงไม่ทำให้มันล่มอีกต่อไป availability หยุดเป็นผลคูณของ availability ของทุก dependency
+- **latency ที่ต่ำกว่าและคาดเดาได้มากกว่า** ไม่มีการกระโดดข้ามเครือข่ายแบบ synchronous บน hot path หมายความว่าไม่มีเซอร์ไพรส์เรื่อง tail-latency ที่นำเข้ามาจาก dependency ที่ช้า
+- **coupling ตอน runtime ที่หลวมกว่า** service ทำงานร่วมกันผ่าน event แบบ asynchronous แทนการเรียกแบบ synchronous ซึ่งยังให้แต่ละตัว deploy และ restart ได้โดยไม่ต้องประสานเวลา downtime กัน
+
+สิ่งที่คุณต้องจ่าย:
+
+- **eventual consistency** สำเนาในที่อาจตามหลัง source of truth ได้ นี่ไม่เป็นไรสำหรับการแสดงชื่อ แต่ยอมรับไม่ได้สำหรับการตัดสินใจที่ต้องการค่าที่เป็นทางการและทันต่อวินาที (เช่น ยอดเงินในบัญชี ณ ขณะที่โอน) — สิ่งเหล่านั้นยังคงต้องการ service เจ้าของ
+- **ข้อมูลที่ทำสำเนาไว้ที่ต้องจัดการ** ตอนนี้คุณเก็บและดูแลสำเนาของข้อมูลของ service อื่น ซึ่งหมายถึง storage ที่มากขึ้น, วินัยในการทำให้สำเนาเล็กที่สุด, และความระมัดระวังในการจัดการ event ที่มาผิดลำดับหรือซ้ำซ้อนแบบ idempotent
+- **event backbone ที่คุณต้องรัน** pattern นี้สันนิษฐานว่ามีการเผยแพร่และบริโภค event ที่เชื่อถือได้ — message broker และวุฒิภาวะเชิงปฏิบัติการที่จะรักษาให้มันมีสุขภาพดี — ซึ่งเป็น infrastructure จริง ๆ ที่ต้องสร้างและเป็นเจ้าของ
+
+## pattern ที่เกี่ยวข้อง
+
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/th/decomposition/decompose-by-subdomain/) — bounded context ที่ชัดเจนทำให้เห็นชัดว่าส่วนใดของข้อมูลภายนอกที่ service ต้องทำสำเนาจริง ๆ
+- [Saga](/microservices-design-from-zero-to-hero/th/data-management/saga/) — สไตล์แบบ asynchronous ที่ขับเคลื่อนด้วย event ซึ่ง self-contained service พึ่งพาสำหรับการเขียนข้าม service
+- [CQRS](/microservices-design-from-zero-to-hero/th/data-management/cqrs/) — การสร้าง local read model จาก event เป็นกลไกเดียวกับที่ทำให้สำเนาของ self-contained service สดใหม่
+
+<Callout title="self-contained เป็นเรื่องของเส้นทาง request">
+self-contained service ไม่ได้ห้ามการสื่อสารทั้งหมดกับ service อื่น — มันห้ามการเรียกแบบ synchronous *บนเส้นทางของการให้บริการ request* ข้อมูลก็ยังไหลเข้ามา แต่แบบ asynchronous และล่วงหน้า ผ่าน event การทดสอบที่ใช้นั้นง่าย คือ เมื่อ service นี้จัดการ request มันต้องรอใครคนอื่นตอบกลับหรือไม่? ถ้าคำตอบคือไม่ มันก็เป็น self-contained และ availability ของมันก็เป็นของมันเองที่จะรักษาไว้
+</Callout>
+
+export const quizSelfContained = [
+  {
+    q: 'What defines a self-contained service?',
+    options: [
+      'service ที่ไม่เคยสื่อสารกับ service อื่นใดเลย',
+      'service ที่จัดการแต่ละ request โดยไม่เรียก service อื่นแบบ synchronous บนเส้นทางของ request',
+      'service ที่ใช้ database ร่วมกับเพื่อนบ้าน',
+      'service ที่ deploy บนเครื่องจริงของตัวเอง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does a self-contained service get the data it needs from other services?',
+    options: [
+      'ด้วยการเรียกพวกมันแบบ synchronous ทุกครั้งที่ request เข้ามา',
+      'ด้วยการเก็บสำเนาในที่ที่อัปเดตแบบ asynchronous จาก event ที่ service เหล่านั้นเผยแพร่',
+      'ด้วยการ query database ของพวกมันโดยตรง',
+      'ด้วยการไม่ cache อะไรเลยและคำนวณทุกอย่างใหม่ในที่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the main trade-off accepted to make a service self-contained?',
+    options: [
+      'service ไม่สามารถ deploy ได้อย่างอิสระอีกต่อไป',
+      'สำเนาในที่เป็น eventually consistent และอาจตามหลัง source of truth อยู่ชั่วครู่',
+      'service ต้องใช้ two-phase commit สำหรับทุก request',
+      'service สูญเสียความเป็นเจ้าของข้อมูลของตัวเอง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/self-contained-service" questions={quizSelfContained} />
+
+<ProgressTracker client:visible id="decomposition/self-contained-service" />

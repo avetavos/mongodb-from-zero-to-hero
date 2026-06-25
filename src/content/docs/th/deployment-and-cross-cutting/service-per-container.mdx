@@ -1,0 +1,184 @@
+---
+title: Service per Container
+description: 'package แต่ละ service เป็น container image และรันเพียง service เดียวต่อหนึ่ง container: คุณได้ความ isolation การเริ่มทำงานที่รวดเร็ว และการ deploy ที่ทำงานเหมือนกันทั้งบน laptop, ใน CI และใน production — โดยมี orchestrator คอยจัดสรร container ไปตามเครื่องต่าง ๆ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+คุณมีหลาย service ที่ต้อง deploy แต่ละตัวมี runtime ของตัวเอง ชุด library ของตัวเอง และเวอร์ชันของ library เหล่านั้นของตัวเอง service หนึ่งต้องการ OpenSSL เวอร์ชันเก่า อีกตัวต้องการ Java เวอร์ชันเฉพาะ ตัวที่สามรวมเอา native image-processing library มาด้วย ในช่วงแรก ๆ คุณรันมันทั้งหมดโดยตรงบน host ที่แชร์กัน ติดตั้ง runtime แต่ละตัวเคียงข้างกัน
+
+แบบนั้นใช้ได้กับสอง service แต่พอมีสิบ host กลายเป็นทุ่งระเบิด: การ upgrade library ที่แชร์กันให้ service หนึ่งทำให้อีกตัวพัง "มันรันได้บนเครื่องผม" กลายเป็นวลีติดปากประจำวัน และไม่มีใครจำลอง production ได้เป๊ะ ๆ คุณต้องการวิธีส่งมอบ service พร้อมทุกอย่างที่มันต้องใช้รัน และวางหลาย service แบบนี้บนเครื่องเดียวได้โดยไม่รบกวนกัน
+
+## ปัญหา
+
+คุณต้องการให้แต่ละ service ถูก deploy เป็นหน่วยที่ครบในตัวเอง ไม่เปลี่ยนแปลง และรวม dependency ของตัวเองไว้ เพื่อให้สิ่งที่คุณทดสอบเป็นสิ่งที่รันเป๊ะ ๆ คุณต้องการให้หน่วยนั้นเริ่มทำงานภายในไม่กี่วินาที ไม่ใช่หลายนาที เพื่อให้การ deploy และ autoscaling เร็ว คุณต้องการ isolation ที่แข็งแกร่งเพื่อให้ library, file system และการใช้ resource ของ service หนึ่งไม่รั่วไปยังอีกตัว และคุณต้องการสิ่งเหล่านี้ทั้งหมดโดยไม่ต้องจ่ายค่า virtual machine เต็ม ๆ ต่อหนึ่ง service
+
+ดังนั้นแรงที่ขัดแย้งกันคือ: isolation และ reproducibility ที่แข็งแกร่ง แต่ต้องเริ่มทำงานเร็วและมีความหนาแน่นสูงบนแต่ละเครื่อง และ artifact ชิ้นเดียวที่รันเหมือนกันทุกที่
+
+## ทางออก
+
+package แต่ละ service เป็น **container image**: snapshot ของ filesystem แบบ layered และไม่เปลี่ยนแปลง ที่รวม binary ของ service, runtime และ dependency ของมัน build ครั้งเดียวจากสูตรเชิงประกาศ (declarative recipe) ตอน runtime image นั้นถูกสร้างเป็น **container** — process ที่ isolated โดยมี filesystem, network namespace และ resource limit ของตัวเอง โดยแชร์ host kernel แทนที่จะ boot guest OS เต็ม ๆ
+
+กฎที่นิยาม pattern นี้คือ **หนึ่ง service ต่อหนึ่ง container** คุณไม่ยัดหลาย service เข้าไปใน image เดียว แต่ละ service ได้ image ของตัวเองและ container ของตัวเอง เพื่อให้มันถูก build, ทำเวอร์ชัน, deploy, scale และ roll back ได้อย่างอิสระจาก service อื่น ๆ ทุกตัว
+
+เพราะ container นั้นเบา คุณจึงรันมันได้หลายตัวต่อเครื่อง คุณไม่วางมันด้วยมือ: **orchestrator** เช่น Kubernetes รับ desired state ของคุณ ("รันสาม replica ของ order service") แล้วจัดสรร container ลงบนเครื่องต่าง ๆ เริ่มตัวที่ตายใหม่ และจัดสรรใหม่เมื่อ node ล่ม
+
+export const containerDiagram = `flowchart TB
+  subgraph Build[Build once]
+    Dockerfile[Dockerfile] --> Image[order-service:1.4.2 image]
+  end
+  Image --> Reg[(Image registry)]
+  subgraph Cluster[Orchestrated cluster]
+    subgraph N1[Node A]
+      C1[order-service container]
+      C2[order-service container]
+    end
+    subgraph N2[Node B]
+      C3[order-service container]
+      C4[inventory-service container]
+    end
+  end
+  Reg --> C1
+  Reg --> C2
+  Reg --> C3
+  Sched[Scheduler / control plane] --> N1
+  Sched --> N2`;
+
+<Mermaid code={containerDiagram} title="image เดียว build ครั้งเดียว ดึงจาก registry รันแบบหนึ่ง service ต่อหนึ่ง container และถูกจัดสรรไปตาม node โดย orchestrator" />
+
+## ตัวอย่าง
+
+สูตรที่ build image ขึ้นมาคือ `Dockerfile` การ build แบบ multi-stage จะ compile service ใน build image ที่หนัก แล้วคัดลอกเฉพาะ binary ที่เสร็จแล้วเข้าไปใน runtime image จิ๋ว ๆ เพื่อให้ artifact ที่ส่งมอบยังคงเล็กและมีจุดให้โจมตีน้อย
+
+```dockerfile
+# Stage 1: build
+FROM golang:1.22 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/order-service ./cmd/order
+
+# Stage 2: minimal runtime — one service, nothing else
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/order-service /order-service
+USER nonroot
+EXPOSE 8080
+ENTRYPOINT ["/order-service"]
+```
+
+จากนั้น image นั้นถูกประกาศต่อ orchestrator เป็น `Deployment` สังเกตว่ามันร้องขอสาม replica ตั้ง resource limit เพื่อไม่ให้ container หนึ่งแย่ง resource เพื่อนบ้าน และเดินสาย health check ที่ orchestrator ใช้ตัดสินว่า container พร้อมเมื่อใด
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      containers:
+        - name: order-service
+          image: registry.example.com/order-service:1.4.2
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+```
+
+## บริบทที่ได้
+
+สิ่งที่คุณได้:
+
+- **Isolation และ reproducibility** แต่ละ service ส่งมอบพร้อม dependency ของตัวเองใน image ที่ไม่เปลี่ยนแปลง ดังนั้น artifact ที่คุณทดสอบจึงเป็นตัวเดียวกันแบบ byte-for-byte กับที่รัน ความขัดแย้งของ library ระหว่าง service หายไป และ "มันรันได้บนเครื่องผม" ก็หมดไปเป็นส่วนใหญ่
+- **เร็ว หนาแน่น พกพาได้** container เริ่มทำงานภายในไม่กี่วินาทีและอัดได้หลายตัวต่อ host เพราะมันแชร์ kernel แทนที่จะ boot VM image เดียวกันรันได้โดยไม่ต้องแก้ทั้งบน laptop, ใน CI และใน production
+- **Lifecycle ที่อิสระ** หนึ่ง service ต่อหนึ่ง container หมายความว่าคุณ build, ทำเวอร์ชัน, scale และ roll back แต่ละ service ตามตารางเวลาของมันเอง
+
+สิ่งที่คุณต้องเสีย:
+
+- **ความซับซ้อนของ orchestration** การรัน container ในระดับใหญ่หมายถึงการรับเอา orchestrator เข้ามา ซึ่งเป็นระบบขนาดใหญ่ในตัวเอง — scheduling, networking, storage และ security ทั้งหมดกลายเป็นสิ่งที่ทีมคุณต้องเข้าใจและ operate
+- **สุขอนามัยของ image และ supply chain** image อาจพ่วง base layer ที่มีช่องโหว่และบวมขึ้นได้ คุณต้องมีวินัยในการทำ image ที่เล็ก rebuild เป็นประจำ และ scan
+- **isolation อ่อนกว่า VM** container แชร์ host kernel ดังนั้น exploit ระดับ kernel จึงมี blast radius กว้างกว่า virtualization เต็มรูปแบบ workload ที่ไม่น่าเชื่อถือหรือความเสี่ยงสูงอาจยังต้องการขอบเขตที่แข็งแกร่งกว่า
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/externalized-configuration/) — เก็บการตั้งค่าเฉพาะสภาพแวดล้อมไว้นอก image เพื่อให้ image เดียวรันได้ทุกที่
+- [Service Mesh](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/service-mesh/) — เพิ่ม sidecar container ข้าง ๆ แต่ละ service container เพื่อ networking ที่สอดคล้องกัน
+- [Serverless Deployment](/microservices-design-from-zero-to-hero/th/deployment-and-cross-cutting/serverless-deployment/) — โมเดล runtime ทางเลือกเมื่อคุณไม่อยากรัน container ด้วยตัวเอง
+
+<Callout title="หนึ่ง service ต่อหนึ่ง container คือหัวใจ">
+มันชวนให้ประหยัดไม่กี่สตางค์ด้วยการยัดหลาย service เข้าไปใน image เดียว จงต้านทานมันไว้ คุณค่าทั้งหมดของ pattern นี้ — การ deploy อิสระ, scale อิสระ, roll back อิสระ และ resource limit ที่สะอาด — มาจากการแมปแบบหนึ่งต่อหนึ่งระหว่าง service กับ container ของมัน รวมมันเข้าด้วยกัน แล้วคุณก็สร้าง monolith เล็ก ๆ ขึ้นมาใหม่ภายใน container
+</Callout>
+
+export const quizSPC = [
+  {
+    q: 'อะไรคือกฎที่นิยาม pattern Service per Container?',
+    options: [
+      'รันทุก service ใน container ที่แชร์กันตัวเดียวเพื่อประหยัด memory',
+      'package แต่ละ service เป็น image ของตัวเองและรันเพียง service เดียวต่อหนึ่ง container',
+      'รันแต่ละ container บนเครื่อง physical เฉพาะของตัวเอง',
+      'รวมฐานข้อมูลและ service เข้าไปใน container เดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม container จึงเริ่มทำงานเร็วและอัดแน่นกว่า virtual machine?',
+    options: [
+      'มันบีบอัด service binary ได้แรงกว่า',
+      'มันแชร์ host kernel และ isolate process แทนที่จะ boot guest operating system เต็ม ๆ',
+      'มันรันได้เฉพาะภาษาที่เป็น interpreted',
+      'มันปิด isolation ทั้งหมดระหว่าง service',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'orchestrator เช่น Kubernetes ให้อะไร?',
+    options: [
+      'มัน compile service ของคุณเป็น container image',
+      'มันจัดสรร container ลงบนเครื่อง เริ่มตัวที่ล้มเหลวใหม่ และจัดสรรใหม่เมื่อ node ตาย',
+      'มันแทนที่ความจำเป็นในการมี container registry',
+      'มันรับประกันว่า service จะไม่ต้องการมากกว่าหนึ่ง replica',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อใดคือต้นทุนจริงของการรับเอา container มาใช้ในระดับใหญ่?',
+    options: [
+      'service ไม่สามารถ deploy อย่างอิสระได้อีกต่อไป',
+      'คุณต้อง operate orchestrator และรักษาสุขอนามัย supply chain ของ image และ isolation อ่อนกว่า VM เต็มรูปแบบ',
+      'image ไม่สามารถ roll back ได้เลย',
+      'แต่ละ service ต้องแชร์ dependency กับทุก service อื่น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/service-per-container" questions={quizSPC} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/service-per-container" />

@@ -1,0 +1,253 @@
+---
+title: Event Sourcing
+description: 'Persist state as an append-only log of domain events, rebuild current state by replaying them, and reliably publish those same events to other services.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+Your services rely on events — sagas chain on them, CQRS projections are built from them. But there is a subtle reliability gap. A service usually updates its database and then publishes an event as two separate steps. If it commits the database change and crashes before publishing, the rest of the system never hears about it; the state and the event stream silently diverge. You want a way to update state and publish the corresponding event such that one can never happen without the other.
+
+## Problem
+
+The dual-write problem: writing to the database and publishing to the message broker are two operations that you cannot wrap in one transaction. Whichever you do first, a crash in between leaves the two stores inconsistent. On top of that, ordinary state storage throws away history — once a row is overwritten you can no longer answer "what was the balance last Tuesday?" or "how did we get to this state?".
+
+How do you store state so that the event is the source of truth, publishing is guaranteed, and the full history is preserved?
+
+## Solution
+
+With **Event Sourcing** you do not store the current state at all. You store the sequence of **domain events** that produced it, in an append-only **event store**. An account is not a row with a `balance` column; it is the ordered list `AccountOpened`, `Deposited`, `Withdrawn`, `Deposited`. To get the current state, you load the events for that entity and **fold** (replay) them into an in-memory state.
+
+Because the event is the unit you persist, there is no dual write: appending the event *is* the state change. The same event store then doubles as the outbox — other services subscribe to the stream and receive every event in order, with no separate publish step to lose.
+
+export const eventSourcingDiagram = `flowchart LR
+  Cmd[Command] --> Agg[Aggregate]
+  Agg -->|append events| Store[(Event Store - append only)]
+  Store -->|replay / fold| State[Current State]
+  Store -->|subscribe| C1[CQRS Projection]
+  Store -->|subscribe| C2[Other Service]
+  Store -->|subscribe| C3[Audit / Analytics]`;
+
+<Mermaid code={eventSourcingDiagram} title="Commands append events; state is folded from the log, and the same log fans out to subscribers" />
+
+## Example
+
+The example models a bank account. Commands produce events; the current state is computed by folding the event list. Notice there is no setter for `balance` — it only ever moves by applying an event.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type Event =
+      | { type: 'AccountOpened'; owner: string }
+      | { type: 'Deposited'; amount: number }
+      | { type: 'Withdrawn'; amount: number };
+
+    type Account = { owner: string; balance: number };
+
+    // Fold the log into current state.
+    function apply(state: Account, e: Event): Account {
+      switch (e.type) {
+        case 'AccountOpened': return { owner: e.owner, balance: 0 };
+        case 'Deposited':     return { ...state, balance: state.balance + e.amount };
+        case 'Withdrawn':     return { ...state, balance: state.balance - e.amount };
+      }
+    }
+
+    const replay = (events: Event[]): Account =>
+      events.reduce(apply, { owner: '', balance: 0 });
+
+    // A command validates against current state, then appends a new event.
+    async function withdraw(id: string, amount: number) {
+      const state = replay(await store.load(id));
+      if (state.balance < amount) throw new Error('insufficient funds');
+      await store.append(id, { type: 'Withdrawn', amount }); // append = state change + publish
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from functools import reduce
+
+    def apply(state: dict, e: dict) -> dict:
+        if e["type"] == "AccountOpened":
+            return {"owner": e["owner"], "balance": 0}
+        if e["type"] == "Deposited":
+            return {**state, "balance": state["balance"] + e["amount"]}
+        if e["type"] == "Withdrawn":
+            return {**state, "balance": state["balance"] - e["amount"]}
+        return state
+
+    def replay(events: list[dict]) -> dict:
+        return reduce(apply, events, {"owner": "", "balance": 0})
+
+    # A command validates against current state, then appends a new event.
+    async def withdraw(account_id: str, amount: int) -> None:
+        state = replay(await store.load(account_id))
+        if state["balance"] < amount:
+            raise ValueError("insufficient funds")
+        await store.append(account_id, {"type": "Withdrawn", "amount": amount})  # append = state change + publish
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type Event struct {
+        Type   string // "AccountOpened" | "Deposited" | "Withdrawn"
+        Owner  string
+        Amount int
+    }
+
+    type Account struct {
+        Owner   string
+        Balance int
+    }
+
+    // Fold the log into current state.
+    func Apply(s Account, e Event) Account {
+        switch e.Type {
+        case "AccountOpened":
+            return Account{Owner: e.Owner, Balance: 0}
+        case "Deposited":
+            s.Balance += e.Amount
+        case "Withdrawn":
+            s.Balance -= e.Amount
+        }
+        return s
+    }
+
+    func Replay(events []Event) Account {
+        var s Account
+        for _, e := range events {
+            s = Apply(s, e)
+        }
+        return s
+    }
+
+    // A command validates against current state, then appends a new event.
+    func Withdraw(ctx context.Context, id string, amount int) error {
+        events, err := store.Load(ctx, id)
+        if err != nil {
+            return err
+        }
+        if Replay(events).Balance < amount {
+            return errors.New("insufficient funds")
+        }
+        return store.Append(ctx, id, Event{Type: "Withdrawn", Amount: amount}) // append = state change + publish
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    enum Event {
+        AccountOpened { owner: String },
+        Deposited { amount: i64 },
+        Withdrawn { amount: i64 },
+    }
+
+    #[derive(Default)]
+    struct Account {
+        owner: String,
+        balance: i64,
+    }
+
+    // Fold the log into current state.
+    fn apply(mut state: Account, e: &Event) -> Account {
+        match e {
+            Event::AccountOpened { owner } => Account { owner: owner.clone(), balance: 0 },
+            Event::Deposited { amount } => { state.balance += amount; state }
+            Event::Withdrawn { amount } => { state.balance -= amount; state }
+        }
+    }
+
+    fn replay(events: &[Event]) -> Account {
+        events.iter().fold(Account::default(), apply)
+    }
+
+    // A command validates against current state, then appends a new event.
+    async fn withdraw(id: &str, amount: i64) -> Result<(), Error> {
+        let state = replay(&store::load(id).await?);
+        if state.balance < amount {
+            return Err(Error::InsufficientFunds);
+        }
+        store::append(id, Event::Withdrawn { amount }).await // append = state change + publish
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Resulting context
+
+What you gain:
+
+- **Reliable event publishing.** Appending the event is the write, so there is no dual-write gap — subscribers receive exactly the events that changed the state, in order. This makes Event Sourcing a natural backbone for sagas and CQRS.
+- **A complete audit log.** Every change is preserved, immutably, forever. You can answer not just what the state is but how and when it got there.
+- **Temporal queries and replay.** You can reconstruct the state as of any past moment, and rebuild new read models simply by replaying history through a fresh projection.
+
+What it costs you:
+
+- **Querying is hard.** The event store is great at "give me one entity's events" and poor at "find all accounts with a negative balance". Event Sourcing therefore almost always pairs with [CQRS](/microservices-design-from-zero-to-hero/en/data-management/cqrs/), which builds queryable read models from the stream.
+- **Replay cost.** Folding a long event history on every load is expensive, so you periodically save a **snapshot** and replay only the events after it.
+- **Schema evolution and eventual consistency.** Events are immutable, so changing their shape over time requires versioning and upcasting old events. And anything built from the stream — read models, other services — is eventually consistent.
+
+## Related patterns
+
+- [CQRS](/microservices-design-from-zero-to-hero/en/data-management/cqrs/) — the standard partner that makes an event-sourced system queryable.
+- [Saga](/microservices-design-from-zero-to-hero/en/data-management/saga/) — sagas rely on the reliable events an event store emits.
+- [Database per Service](/microservices-design-from-zero-to-hero/en/data-management/database-per-service/) — each service may choose Event Sourcing as its private storage model.
+
+<Callout title="Events are immutable facts">
+A stored event records something that already happened — it is in the past tense and it never changes. You correct a mistake by appending a new compensating event (a reversal), not by editing or deleting an old one. Treating the log as append-only is what gives Event Sourcing its audit trail and its reliable publishing in the first place.
+</Callout>
+
+export const quizEventSourcing = [
+  {
+    q: 'What does an event-sourced system actually persist?',
+    options: [
+      'The current state as a single mutable row per entity',
+      'An append-only, ordered sequence of domain events',
+      'Only the most recent event for each entity',
+      'A nightly snapshot of every table',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How is an entity\'s current state obtained?',
+    options: [
+      'By reading a cached balance column',
+      'By folding (replaying) its events in order, optionally from a snapshot',
+      'By querying a separate write database',
+      'By asking another service for it',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does Event Sourcing solve the dual-write problem?',
+    options: [
+      'It uses two-phase commit across the database and broker',
+      'Appending the event is the state change, so state and event stream can never diverge',
+      'It disables the message broker entirely',
+      'It writes to the broker first and the database never',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which pattern does Event Sourcing almost always pair with, and why?',
+    options: [
+      'API Composition, to avoid storing events',
+      'Saga, to replace compensations',
+      'CQRS, because the event store is poor at ad-hoc queries and needs read models',
+      'Database per Service, to share one schema',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="data-management/event-sourcing" questions={quizEventSourcing} />
+
+<ProgressTracker client:visible id="data-management/event-sourcing" />

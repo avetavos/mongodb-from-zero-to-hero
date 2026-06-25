@@ -1,0 +1,246 @@
+---
+title: Remote Procedure Invocation
+description: 'ทำให้การเรียกบริการดูเหมือนการเรียกฟังก์ชันในเครื่อง: ส่งคำขอผ่าน REST หรือ gRPC แล้วบล็อกรอการตอบกลับ เข้าใจได้ง่าย แต่ผูกมัดบริการในเชิงเวลาและอาจทำให้ความล้มเหลวลุกลามเป็นทอด ๆ'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+บริการ Order ต้องการที่อยู่จัดส่งของผู้ซื้อ ซึ่งอยู่ในบริการ Customer สิ่งที่เป็นธรรมชาติที่สุดในโลกคือการขอที่อยู่นั้นแล้วรอคำตอบ เหมือนกับที่ monolith เดิมเรียก method `getAddress` เป๊ะ ๆ ผู้เรียกต้องการการตอบกลับเพียงครั้งเดียวและทันที เพื่อจะได้สร้างคำสั่งซื้อต่อไปได้
+
+## ปัญหา
+
+คุณต้องการให้บริการหนึ่งเรียกใช้การทำงานบนอีกบริการหนึ่งและรับผลลัพธ์กลับมา โดยมีพิธีรีตองให้น้อยที่สุด ทีมงานคิดในแง่ของ method ที่รับอาร์กิวเมนต์และคืนค่าอยู่แล้ว และการทำงานนี้เป็นคำถามที่ต้องการคำตอบจริง ๆ ก่อนที่ผู้เรียกจะไปต่อได้ คุณจะทำให้การเรียกผ่านเครือข่ายรู้สึกเหมือนการเรียกฟังก์ชันที่มันมาแทนที่ได้อย่างไร ในขณะที่ยังต้องระบุอย่างชัดเจนถึงสิ่งที่การเรียกฟังก์ชันไม่เคยต้องกังวล — การ serialize, timeout และ contract ที่ทั้งสองฝั่งเห็นพ้องกัน?
+
+## ทางออก
+
+**Remote Procedure Invocation (RPI)** คือรูปแบบ synchronous, one-to-one ผู้เรียก (client) ส่งคำขอไปยัง instance บริการเดียวแล้วบล็อกจนกว่าการตอบกลับจะมาถึง proxy หรือ client library จะซ่อนกลไกไว้: มัน serialize อาร์กิวเมนต์ ส่งผ่านสายไป รอ แล้ว deserialize ผลลัพธ์กลับมาเป็นค่าคืนธรรมดา
+
+มีสอง transport ที่ครองพื้นที่:
+
+- **REST over HTTP** — ทรัพยากรระบุด้วย URL การทำงานแสดงผ่าน HTTP verb และ payload มักอยู่ในรูป JSON อ่านโดยมนุษย์ได้ มีอยู่ทุกหนทุกแห่ง และทดสอบได้ง่ายด้วยเบราว์เซอร์หรือ `curl`
+- **gRPC** — contract นิยามไว้ในไฟล์ `.proto` payload เป็น Protobuf แบบ binary ผ่าน HTTP/2 พร้อม client และ server stub ที่ถูกสร้างให้ กระชับกว่าและเร็วกว่า มี schema ที่เคร่งครัดและมีเวอร์ชัน และรองรับ streaming เป็นชั้นหนึ่ง
+
+ไม่ว่าจะ transport ใด การโต้ตอบก็มีรูปร่างเดียวกัน: หนึ่งคำขอ หนึ่งการตอบกลับ และผู้เรียกรออยู่ระหว่างนั้น
+
+export const rpiSequence = `sequenceDiagram
+  participant C as Client (Order Service)
+  participant S as Customer Service
+  C->>S: GET /customers/42/address
+  activate S
+  S->>S: load customer 42
+  S-->>C: 200 OK { address }
+  deactivate S
+  Note over C: caller was blocked until the response arrived`;
+
+<Mermaid code={rpiSequence} title="Remote Procedure Invocation — หนึ่งคำขอ หนึ่งการตอบกลับ ผู้เรียกถูกบล็อกอยู่ระหว่างนั้น" />
+
+## ตัวอย่าง
+
+client แบบมี type สำหรับดึงที่อยู่จัดส่งของลูกค้า client ห่อหุ้ม transport ไว้เพื่อให้ผู้เรียกเขียนอะไรที่ใกล้เคียงกับการเรียก method ธรรมดา แต่ timeout ทำให้การมีอยู่ของเครือข่ายชัดเจนขึ้น แต่ละตัวอย่างสมบูรณ์ในตัวเองและเป็นสำนวนของภาษานั้น ๆ
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    type Address = { line1: string; city: string; postalCode: string };
+
+    class CustomerClient {
+      constructor(private baseUrl: string) {}
+
+      async getAddress(customerId: string): Promise<Address> {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2000);
+        try {
+          const res = await fetch(`${this.baseUrl}/customers/${customerId}/address`, {
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            throw new Error(`customer service returned ${res.status}`);
+          }
+          return (await res.json()) as Address;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    }
+
+    const customers = new CustomerClient('http://customer-service');
+    const address = await customers.getAddress('42');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from dataclasses import dataclass
+    import httpx
+
+    @dataclass
+    class Address:
+        line1: str
+        city: str
+        postal_code: str
+
+    class CustomerClient:
+        def __init__(self, base_url: str) -> None:
+            self._base_url = base_url
+
+        async def get_address(self, customer_id: str) -> Address:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                res = await client.get(f"{self._base_url}/customers/{customer_id}/address")
+                res.raise_for_status()
+                body = res.json()
+                return Address(body["line1"], body["city"], body["postalCode"])
+
+    customers = CustomerClient("http://customer-service")
+    address = await customers.get_address("42")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    type Address struct {
+        Line1      string `json:"line1"`
+        City       string `json:"city"`
+        PostalCode string `json:"postalCode"`
+    }
+
+    type CustomerClient struct {
+        baseURL string
+        http    *http.Client
+    }
+
+    func NewCustomerClient(baseURL string) *CustomerClient {
+        return &CustomerClient{baseURL: baseURL, http: &http.Client{Timeout: 2 * time.Second}}
+    }
+
+    func (c *CustomerClient) GetAddress(ctx context.Context, customerID string) (*Address, error) {
+        url := fmt.Sprintf("%s/customers/%s/address", c.baseURL, customerID)
+        req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+        res, err := c.http.Do(req)
+        if err != nil {
+            return nil, err
+        }
+        defer res.Body.Close()
+        if res.StatusCode != http.StatusOK {
+            return nil, fmt.Errorf("customer service returned %d", res.StatusCode)
+        }
+        var addr Address
+        if err := json.NewDecoder(res.Body).Decode(&addr); err != nil {
+            return nil, err
+        }
+        return &addr, nil
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct Address {
+        line1: String,
+        city: String,
+        #[serde(rename = "postalCode")]
+        postal_code: String,
+    }
+
+    struct CustomerClient {
+        base_url: String,
+        http: reqwest::Client,
+    }
+
+    impl CustomerClient {
+        fn new(base_url: impl Into<String>) -> Self {
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .expect("client");
+            Self { base_url: base_url.into(), http }
+        }
+
+        async fn get_address(&self, customer_id: &str) -> Result<Address, reqwest::Error> {
+            let url = format!("{}/customers/{customer_id}/address", self.base_url);
+            self.http.get(url).send().await?.error_for_status()?.json().await
+        }
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **ความเรียบง่าย** โมเดลนี้คือสิ่งที่นักพัฒนาทุกคนรู้จักดีอยู่แล้ว: เรียก รอ ได้ผลลัพธ์ ไม่มี broker ให้ดูแล และไม่มีสถานะกลางทางให้คอยติดตาม
+- **contract ที่ชัดเจน** โดยเฉพาะกับ gRPC type ของคำขอและการตอบกลับถูกนิยามไว้ครั้งเดียวและบังคับใช้กับทั้งสองฝั่ง ดังนั้นความไม่ตรงกันจะถูกจับได้ตั้งแต่ตอน build
+
+สิ่งที่คุณต้องจ่าย:
+
+- **Temporal coupling (การผูกมัดในเชิงเวลา)** เพราะผู้เรียกบล็อก ทั้งสองบริการจึงต้องพร้อมใช้งานในขณะเดียวกัน ถ้าฝั่งที่ถูกเรียกล่มหรือกำลัง deploy คำขอของผู้เรียกจะล้มเหลวทันที — ไม่มีบัฟเฟอร์คั่นกลาง
+- **ความล้มเหลวลุกลามเป็นทอด ๆ (cascading failures)** ฝั่งที่ถูกเรียกที่ช้าทำให้ผู้เรียกช้าตามไปด้วย thread หรือ connection ของผู้เรียกกองสะสมรออยู่ และความช้าก็แพร่ขึ้นไปต้นน้ำจนทั้งสายของบริการติดขัด บริการเดียวที่ดิ้นรนอยู่สามารถล้มทุกอย่างที่พึ่งพามันได้
+- **ความพร้อมใช้งานที่ลดลง** ความพร้อมใช้งานโดยรวมของสายการเรียกแบบ synchronous คือผลคูณของความพร้อมใช้งานของแต่ละข้อต่อ ดังนั้นยิ่งคำขอกระโดดมากครั้งเท่าใด ก็ยิ่งเปราะบางมากขึ้นเท่านั้น
+
+เพราะโหมดความล้มเหลวเหล่านี้ อย่าทำการเรียกแบบ synchronous ดิบ ๆ โดยไม่ป้องกันเลย ห่อหุ้มมันด้วย timeout, retry และ [Circuit Breaker](/microservices-design-from-zero-to-hero/th/reliability/circuit-breaker/) เพื่อให้ dependency ที่ล้มเหลวล้มเร็วแทนที่จะลากผู้เรียกล้มตามไปด้วย ในกรณีที่การโต้ตอบไม่จำเป็นต้องได้คำตอบทันทีจริง ๆ ให้เลือกใช้ [Messaging](/microservices-design-from-zero-to-hero/th/communication/messaging/) แทน
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Messaging](/microservices-design-from-zero-to-hero/th/communication/messaging/) — ทางเลือกแบบ asynchronous ที่ขจัด temporal coupling
+- [Service Discovery](/microservices-design-from-zero-to-hero/th/communication/service-discovery/) — วิธีที่ client ค้นหาที่อยู่ที่จะส่งคำขอไปหา
+- [API Gateway](/microservices-design-from-zero-to-hero/th/communication/api-gateway/) — มักเป็นประตูหน้าที่การเรียก RPI จากภายนอกเข้ามา
+
+<Callout title="REST หรือ gRPC?">
+เลือก REST ที่ขอบของระบบและสำหรับ API สาธารณะ ที่ซึ่งการอ่านโดยมนุษย์ได้ เครื่องมือที่หลากหลาย และ HTTP semantics ที่ cache ได้สำคัญที่สุด เลือก gRPC สำหรับการสื่อสารระหว่างบริการภายใน ที่ซึ่ง schema ที่เคร่งครัด payload ที่เล็กกว่า และ HTTP/2 streaming ให้ผลคุ้มค่า — และที่ซึ่งทั้งสองฝั่งเป็นของคุณที่จะสร้างใหม่ได้เมื่อ contract เปลี่ยน
+</Callout>
+
+export const quizRpi = [
+  {
+    q: 'Remote Procedure Invocation เป็นการโต้ตอบชนิดใด?',
+    options: [
+      'Asynchronous, one-to-many',
+      'Synchronous, one-to-one — คำขอไปยังบริการเดียวโดยผู้เรียกบล็อกรอการตอบกลับ',
+      'Asynchronous, one-to-one ผ่าน queue',
+      'การกระจายไปยังผู้สมัครรับทุกราย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'temporal coupling ในบริบทของ RPI คืออะไร?',
+    options: [
+      'client และบริการต้องใช้นาฬิกาเดียวกัน',
+      'ทั้งผู้เรียกและฝั่งที่ถูกเรียกต้องพร้อมใช้งานในขณะเดียวกันเพื่อให้การเรียกสำเร็จ',
+      'คำขอต้องถูกประมวลผลตามลำดับ timestamp',
+      'การตอบกลับต้องมาถึงภายในหนึ่งวินาที',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เหตุใดบริการที่ช้าเพียงตัวเดียวจึงทำให้เกิดความล้มเหลวลุกลามเป็นทอด ๆ กับ RPI ได้?',
+    options: [
+      'เพราะ broker มีพื้นที่ดิสก์หมด',
+      'เพราะผู้เรียกที่ถูกบล็อกกองสะสมรออยู่ ทำให้ความช้าแพร่ขึ้นไปต้นน้ำสู่ทุกสิ่งที่พึ่งพาพวกมัน',
+      'เพราะ gRPC จัดการ payload ขนาดใหญ่ไม่ได้',
+      'เพราะ REST ไม่รองรับ timeout',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'pattern ใดควรห่อหุ้มการเรียกแบบ synchronous เพื่อป้องกันไม่ให้มันลากผู้เรียกล้มตาม?',
+    options: [
+      'Event Sourcing',
+      'API Composition',
+      'Circuit Breaker ร่วมกับ timeout และ retry',
+      'Database per Service',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="communication/remote-procedure-invocation" questions={quizRpi} />
+
+<ProgressTracker client:visible id="communication/remote-procedure-invocation" />

@@ -1,0 +1,109 @@
+---
+title: Self-Contained Service
+description: 'Design a service to handle a request without synchronously calling other services — using replicated data kept fresh by events — so it stays available even when its neighbours are slow or down.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+Your services are well bounded, each owning its own data. Now they have to collaborate. The Order service, to display an order, needs the customer's name and the product's title — data owned by the Customer and Catalog services. The obvious move is to call those services synchronously whenever an order is rendered. It works in development, where every service is up and the network is a loopback. Then you go to production.
+
+## Problem
+
+The instant one service must make a synchronous call to another to do its own job, it inherits that other service's availability — and its latency. Chain a few of these calls and the maths turns hostile: if four services each have an excellent 99.9% availability, a request that depends on all four synchronously is up only about 99.6% of the time, and any one slow dependency drags the whole chain's latency up with it. A failure or a slowdown anywhere in the chain becomes a failure everywhere upstream. You have built services that deploy independently but cannot *run* independently — a distributed system that is more fragile than the monolith it replaced.
+
+So the forces are: a service needs data that another service owns, but it must not surrender its own availability and responsiveness to that other service every time it serves a request.
+
+## Solution
+
+A **self-contained service** handles each request entirely on its own, without making a synchronous call to any other service in the request path. It achieves this by keeping a **local replica** of the data it needs from elsewhere — just the slice it actually uses — and keeping that replica fresh *asynchronously*, by subscribing to the events the owning services publish.
+
+The owning service stays the source of truth. When the Customer service changes a name, it publishes a `CustomerUpdated` event; the Order service consumes it and updates its small local copy of customer names. Later, when the Order service serves a request, the data it needs is already sitting in its own database. No call goes out across the network on the hot path, so the request succeeds even if the Customer service is down for maintenance.
+
+The trade is deliberate: you accept that the local replica is **eventually consistent** — it may lag the source by a moment — in exchange for the service being able to answer requests on its own. For the vast majority of read paths, a name that is a few seconds stale is a perfectly good trade for staying available.
+
+export const selfContainedDiagram = `flowchart TB
+  subgraph Chain[Synchronous chain - fragile]
+    direction LR
+    Req1[Request] --> O1[Order Service]
+    O1 -->|sync call| C1[Customer Service]
+    O1 -->|sync call| P1[Catalog Service]
+    note1[If Customer or Catalog is down or slow,<br/>the request fails or hangs]
+  end
+  subgraph Self[Self-contained - resilient]
+    direction LR
+    Req2[Request] --> O2[Order Service]
+    O2 --> R2[(Local replica:<br/>names, titles)]
+    C2[Customer Service] -. CustomerUpdated event .-> R2
+    P2[Catalog Service] -. ProductUpdated event .-> R2
+    note2[Request served from local replica;<br/>events update it in the background]
+  end`;
+
+<Mermaid code={selfContainedDiagram} title="Top: a synchronous chain inherits every dependency's availability. Bottom: a self-contained service serves from a local replica kept fresh by events." />
+
+## Resulting context
+
+What you gain:
+
+- **Availability that does not multiply downward.** The service answers requests without depending on others at runtime, so a neighbour's outage or slowdown no longer takes it down. Availability stops being the product of every dependency's availability.
+- **Lower, more predictable latency.** No synchronous network hops on the hot path means no tail-latency surprises imported from a slow dependency.
+- **Looser runtime coupling.** Services collaborate through asynchronous events rather than synchronous calls, which also lets each deploy and restart without coordinating downtime.
+
+What it costs you:
+
+- **Eventual consistency.** The local replica can lag the source of truth. This is fine for displaying a name, but unacceptable for decisions that need an authoritative, up-to-the-instant value (such as an account balance at the moment of a transfer) — those still need the owning service.
+- **Replicated data to manage.** You now store and maintain copies of other services' data, which means more storage, the discipline to keep the copy minimal, and care to handle out-of-order or duplicate events idempotently.
+- **An event backbone you must run.** This pattern presumes reliable event publishing and consumption — a message broker and the operational maturity to keep it healthy — which is real infrastructure to build and own.
+
+## Related patterns
+
+- [Decompose by Subdomain](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-subdomain/) — clear bounded contexts make it obvious which slice of foreign data a service actually needs to replicate.
+- [Saga](/microservices-design-from-zero-to-hero/en/data-management/saga/) — the asynchronous, event-driven style that self-contained services rely on for cross-service writes.
+- [CQRS](/microservices-design-from-zero-to-hero/en/data-management/cqrs/) — building a local read model from events is the same mechanism that keeps a self-contained replica fresh.
+
+<Callout title="Self-contained is about the request path">
+A self-contained service does not forbid all communication with other services — it forbids synchronous calls *on the path of serving a request*. Data still flows in, but asynchronously and ahead of time, via events. The test to apply is simple: when this service handles a request, does it have to wait on anyone else to respond? If the answer is no, it is self-contained, and its availability is its own to keep.
+</Callout>
+
+export const quizSelfContained = [
+  {
+    q: 'What defines a self-contained service?',
+    options: [
+      'A service that never communicates with any other service at all',
+      'A service that handles each request without making a synchronous call to another service on the request path',
+      'A service that shares a database with its neighbours',
+      'A service deployed on its own physical machine',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does a self-contained service get the data it needs from other services?',
+    options: [
+      'By calling them synchronously every time a request arrives',
+      'By keeping a local replica that is updated asynchronously from the events those services publish',
+      'By querying their databases directly',
+      'By caching nothing and recomputing everything locally',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the main trade-off accepted to make a service self-contained?',
+    options: [
+      'The service can no longer be deployed independently',
+      'The local replica is eventually consistent and may briefly lag the source of truth',
+      'The service must use two-phase commit for every request',
+      'The service loses ownership of its own data',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/self-contained-service" questions={quizSelfContained} />
+
+<ProgressTracker client:visible id="decomposition/self-contained-service" />

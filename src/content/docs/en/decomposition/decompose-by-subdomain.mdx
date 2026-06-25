@@ -1,0 +1,120 @@
+---
+title: Decompose by Subdomain
+description: 'Use Domain-Driven Design to find service boundaries: identify the subdomains of the business, give each its own bounded context with a single consistent model, and make each context a service.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+You have a first cut of services — perhaps drawn by business capability — and the boundaries feel roughly right, but the *models* leak across them. The word "customer" means a billing account in one service, a shipping recipient in another, and a marketing lead in a third, yet they all try to share one bloated `Customer` object. Every team that touches it has to understand every other team's rules. You need a more disciplined way to decide not just where services live, but what each service's model actually *is*.
+
+## Problem
+
+A single, system-wide domain model is seductive and almost always a trap. As more concepts and rules pile onto shared entities, the model grows ambiguous: the same term carries different meanings for different parts of the business, and reconciling them produces a class that satisfies no one and changes constantly. This is the *large monolithic domain model* problem. The ambiguity is not an accident to be cleaned up later — it reflects the genuine fact that different parts of the business legitimately think about the same word in different ways.
+
+So the forces are: you want each service to have a model that is clear, internally consistent, and small enough to reason about — but you also have to acknowledge that no single model can serve the whole business without becoming meaningless.
+
+## Solution
+
+**Domain-Driven Design (DDD)** gives this problem a vocabulary. The overall problem space — everything the business deals with — is the *domain*. It is divided into **subdomains**, the distinct areas of expertise within it: order taking, inventory, billing, delivery. Subdomains come in flavours that guide investment: a **core** subdomain is what differentiates the business and deserves your best engineers; a **supporting** subdomain is necessary but not distinctive; a **generic** subdomain (such as authentication or payments) can often be bought rather than built.
+
+The key DDD concept for decomposition is the **bounded context**: an explicit boundary within which a particular domain model applies and every term has one precise meaning. Inside the billing context, "customer" means exactly a billing account, with no apology and no shared definition. Outside it, the word may mean something else, and that is fine, because the boundary makes the difference explicit.
+
+The pattern is to **align each bounded context with a subdomain, and implement each bounded context as a service.** Where two contexts must collaborate, you define the translation between their models deliberately — through a published contract or an anti-corruption layer — instead of letting one model bleed into the other.
+
+export const contextDiagram = `flowchart TB
+  subgraph Domain[Domain: e-commerce]
+    direction LR
+    subgraph BCOrder[Bounded Context: Ordering<br/>core]
+      OCust[Customer = buyer placing an order]
+      OOrder[Order, OrderLine]
+    end
+    subgraph BCBill[Bounded Context: Billing<br/>supporting]
+      BCust[Customer = billing account]
+      BInv[Invoice, Payment]
+    end
+    subgraph BCShip[Bounded Context: Delivery<br/>supporting]
+      SCust[Customer = recipient address]
+      SShip[Shipment, Tracking]
+    end
+  end
+  BCOrder -. published contract .-> BCBill
+  BCOrder -. published contract .-> BCShip`;
+
+<Mermaid code={contextDiagram} title="Each bounded context owns one consistent model; the word 'customer' means something precise inside each, and translation between them is explicit" />
+
+## Contrast with decomposition by business capability
+
+These two strategies are complementary rather than competing, and they usually agree. Both tend to produce a similar set of services, because a business capability and a subdomain often describe the same slice of the business from two angles — capabilities ask "*what* does the business do?", subdomains ask "*what area of knowledge* does that require, and what model applies there?". The practical difference is one of rigour and emphasis.
+
+- **By business capability** is the faster, more accessible starting point. It gives you a sensible first cut from an organizational view, but it stops short of defining each service's internal model.
+- **By subdomain** is more disciplined and model-driven. It does the extra work of pinning down a single, unambiguous model per context, which is exactly what prevents the shared-model leakage that capability decomposition alone leaves unresolved.
+
+A common, effective approach is to use capabilities for the first sketch and DDD to refine it, especially around the core subdomain where getting the model right matters most.
+
+## Resulting context
+
+What you gain:
+
+- **One clear model per service.** Inside a bounded context every term is unambiguous, so the code is smaller, the rules are local, and teams stop arguing over a shared definition that can never satisfy everyone.
+- **Explicit, principled boundaries.** DDD makes the act of drawing a line a modelling decision you can defend, and it forces the relationships between services to be designed rather than discovered.
+- **Investment guidance.** Classifying subdomains as core, supporting, or generic tells you where to build versus buy, and where to put your strongest people.
+
+What it costs you:
+
+- **A real learning curve.** DDD has a substantial vocabulary and demands deep collaboration with domain experts; teams new to it often misapply the concepts at first.
+- **Translation work.** Because each context guards its own model, collaboration across contexts needs explicit mapping — published contracts or anti-corruption layers — which is more upfront effort than sharing one model.
+- **Boundaries can still shift.** Subdomains are clearer than capabilities but not immune to change as understanding of the domain deepens; you should expect to refine contexts as you learn.
+
+## Related patterns
+
+- [Decompose by Business Capability](/microservices-design-from-zero-to-hero/en/decomposition/decompose-by-business-capability/) — the complementary strategy that gives a fast first cut DDD then refines.
+- [Self-Contained Service](/microservices-design-from-zero-to-hero/en/decomposition/self-contained-service/) — bounded contexts give each service the local model it needs to answer requests on its own.
+- [Decomposition overview](/microservices-design-from-zero-to-hero/en/decomposition/) — where this strategy sits in the wider picture.
+
+<Callout title="Let the same word mean different things">
+The single most freeing idea in this pattern is permission for a word to mean different things in different contexts. A shared, "correct" definition of `Customer` across the whole company is not a goal worth chasing — it is the very thing that creates the monolithic model. Bounded contexts let billing, ordering, and delivery each keep the precise meaning they actually need, and turn the seams between them into deliberate, well-defined contracts.
+</Callout>
+
+export const quizSubdomain = [
+  {
+    q: 'In Domain-Driven Design, what is a bounded context?',
+    options: [
+      'A network firewall around a service',
+      'An explicit boundary within which one domain model applies and every term has a single precise meaning',
+      'A database schema shared by all services',
+      'The maximum number of services a team may own',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What problem does decomposing by subdomain primarily solve that capability decomposition leaves open?',
+    options: [
+      'It removes the need for any inter-service communication',
+      'It pins down a single, unambiguous model per service, preventing a bloated shared model where a term means different things',
+      'It guarantees services never need to change again',
+      'It forces all services into one programming language',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do decomposition by subdomain and by business capability relate?',
+    options: [
+      'They are rivals — you must pick exactly one and never the other',
+      'They are complementary and usually agree; capabilities give a fast first cut, DDD refines the model',
+      'Subdomain decomposition replaces capability decomposition because capabilities are obsolete',
+      'They apply to entirely different kinds of systems and never overlap',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="decomposition/decompose-by-subdomain" questions={quizSubdomain} />
+
+<ProgressTracker client:visible id="decomposition/decompose-by-subdomain" />

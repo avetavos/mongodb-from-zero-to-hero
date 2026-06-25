@@ -1,0 +1,125 @@
+---
+title: Microservices Architecture คืออะไร?
+description: 'microservices architecture สร้างแอปพลิเคชันให้เป็นชุดของ service ขนาดเล็กที่ deploy ได้อย่างอิสระ จัดระเบียบรอบ business capability โดยแต่ละ service เป็นเจ้าของข้อมูลของตัวเองและทำงานร่วมกันผ่านเครือข่าย'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Context
+
+คุณกำลังจะสร้าง หรือกำลังดูแล แอปพลิเคชันฝั่ง server-side ที่มีความซับซ้อนพอสมควรอยู่แล้ว มันเปิด API ให้ web และ mobile client เรียกใช้ รัน business logic และเก็บข้อมูลลงฐานข้อมูล เมื่อผลิตภัณฑ์เติบโต นักพัฒนาเข้ามามากขึ้น ฟีเจอร์ออกมากขึ้น และ codebase ก็พองตัวขึ้นเรื่อย ๆ ถึงจุดหนึ่งจะมีใครสักคนพูดคำว่า *microservices* ขึ้นมาในที่ประชุมวางแผน และคุณก็ต้องตัดสินใจว่ามันหมายถึงอะไรกันแน่ ก่อนจะตัดสินใจได้ว่าคุณต้องการมันหรือไม่
+
+ดังนั้นงานแรกของคอร์สนี้จึงตรงไปตรงมา นั่นคือ ตกลงกันให้ได้ก่อนว่า microservices architecture *คืออะไร* ก่อนที่เราจะเถียงกันว่าเมื่อไรมันถึงจะคุ้มที่จะลงทุน
+
+## Problem
+
+คำนี้ถูกใช้อย่างหลวม ๆ ผู้คนหยิบมันมาใช้ในความหมายว่า "service ขนาดเล็ก" "service ที่คุยกันผ่าน HTTP" หรือเพียงแค่ "ระบบใหม่ที่เรากำลังสร้าง" ไม่มีนิยามไหนในนั้นแม่นยำพอที่จะใช้ตัดสินใจได้ ถ้า microservice หมายถึงแค่ service เล็ก ๆ แล้วต้องเล็กแค่ไหน? ถ้ามันหมายถึง service ที่คุยกันผ่าน HTTP แล้ว monolith ที่เรียก API ของบุคคลที่สามนับเป็น microservice ด้วยไหม?
+
+เราต้องการนิยามที่ระบุคุณสมบัติที่สำคัญจริง ๆ — คุณสมบัติที่เปลี่ยนวิธีที่คุณจัดระเบียบทีม deploy โค้ด และเก็บข้อมูล — มากกว่านิยามที่อิงกับจำนวนบรรทัดของโค้ดหรือ transport protocol
+
+## Solution
+
+**microservices architecture** จัดโครงสร้างแอปพลิเคชันให้เป็นชุดของ service ที่:
+
+- **จัดระเบียบรอบ business capability** แต่ละ service เป็นเจ้าของส่วนหนึ่งของ domain — orders, payments, inventory — แทนที่จะเป็น layer เชิงเทคนิคอย่าง "ชั้นฐานข้อมูล" หรือ "ชั้น UI"
+- **deploy ได้อย่างอิสระ** แต่ละ service สามารถ build, test และ release ตามตารางของตัวเอง โดยไม่ต้องประสานงาน deploy ทั้งระบบพร้อมกันแบบ lock-step
+- **coupling แบบหลวม (loosely coupled)** service มีปฏิสัมพันธ์กันผ่าน API และ message ที่นิยามไว้ชัดเจนเท่านั้น ไม่เคยล้วงเข้าไปยังภายในของกันและกัน
+- **เป็นเจ้าของข้อมูลของตัวเอง** แต่ละ service เก็บข้อมูลของตัวเองไว้เป็นส่วนตัว และเปิดเผยผ่าน API ของมันหรือ event ที่มันเผยแพร่เท่านั้น ไม่มีฐานข้อมูลที่ใช้ร่วมกันให้ทุกคนอ่านและเขียน
+
+โดยปกติ client ไม่ได้เรียก service โดยตรง จะมี gateway วางอยู่ด้านหน้า คอยส่งต่อแต่ละ request ไปยัง service ที่เป็นเจ้าของ capability นั้น ๆ เบื้องหลัง gateway แต่ละ service รันเป็น process ของตัวเองพร้อมกับ datastore ของตัวเอง และ service ทั้งหลายทำงานร่วมกันด้วยการเรียก API ของกันและกันหรือแลกเปลี่ยน event
+
+export const overviewDiagram = `flowchart TB
+  Client[Web / Mobile Client] --> GW[API Gateway]
+  GW --> OAPI
+  GW --> PAPI
+  GW --> IAPI
+  subgraph Orders[Order Service]
+    OAPI[API]
+    ODB[(Orders DB)]
+    OAPI --> ODB
+  end
+  subgraph Payments[Payment Service]
+    PAPI[API]
+    PDB[(Payments DB)]
+    PAPI --> PDB
+  end
+  subgraph Inventory[Inventory Service]
+    IAPI[API]
+    IDB[(Inventory DB)]
+    IAPI --> IDB
+  end
+  OAPI -. events .-> PAPI
+  OAPI -. events .-> IAPI`;
+
+<Mermaid code={overviewDiagram} title="service ไม่กี่ตัว แต่ละตัวมีฐานข้อมูลส่วนตัว อยู่หลัง API gateway เพียงตัวเดียว" />
+
+สังเกตสิ่งที่ไดอะแกรม *ไม่ได้* แสดง นั่นคือ ไม่มีฐานข้อมูลกลางที่ทั้งสาม service ใช้ร่วมกัน และไม่มี service ใดล้วงข้ามไปยังตารางของอีก service หนึ่ง ลูกศรเส้นประคือ event แบบ asynchronous ไม่ใช่การเรียกตรงเข้าไปยังข้อมูลส่วนตัว การแยกออกจากกันนั้นคือหัวใจทั้งหมด — มันคือสิ่งที่ทำให้แต่ละกล่อง deploy, scale และล้มเหลวได้ด้วยตัวของมันเอง
+
+## คอร์สนี้ครอบคลุมอะไรบ้าง
+
+คอร์สนี้พาเดินผ่าน pattern language ของ microservices ในแปดโมดูล:
+
+1. **Intro and Principles** — โมดูลที่คุณกำลังอ่านอยู่นี้: microservices คืออะไร เปรียบเทียบกับ monolith อย่างไร trade-off เป็นอย่างไร เมื่อไรควรใช้ และ pattern ต่าง ๆ ประกอบกันอย่างไร
+2. **Decomposition** — วิธีหั่นระบบออกเป็น service รอบ business capability และ bounded context
+3. **Data Management** — การรักษาความสอดคล้องของข้อมูลและความสามารถในการ query เมื่อแต่ละ service เป็นเจ้าของ store ของตัวเอง
+4. **Transactional Messaging** — การเผยแพร่ event อย่างเชื่อถือได้ในฐานะส่วนหนึ่งของ local transaction
+5. **Communication** — รูปแบบการสื่อสารทั้งแบบ synchronous และ asynchronous, API และ gateway
+6. **Reliability** — การอยู่รอดจาก partial failure ที่ระบบแบบกระจาย (distributed) ทำให้เป็นเรื่องปกติ
+7. **Observability** — การมองเห็นว่ากองทัพ service กำลังทำอะไรอยู่จริง ๆ
+8. **Deployment and Cross-cutting** — การส่งมอบ รัน และรักษาความปลอดภัยของ service บน production
+
+## pattern language สรุปในบรรทัดเดียว
+
+ไม่มี pattern ใดที่ยืนอยู่ได้ลำพัง แต่ละ pattern แก้ปัญหาที่เกิดจากการเลือกในขั้นก่อนหน้า ดังนั้น pattern ทั้งหลายจึงก่อตัวเป็น *ภาษา* ที่เชื่อมโยงกัน มากกว่าจะเป็นเช็กลิสต์ เราจะ map ภาษานี้ออกมาให้ชัดเจนในบทเรียนสุดท้ายของโมดูลนี้
+
+## Related patterns
+
+- [Monolith vs Microservices](/microservices-design-from-zero-to-hero/th/intro-and-principles/monolith-vs-microservices/) — สิ่งที่คุณกำลังจะก้าวออกมา และทำไมมันถึงไม่ใช่ศัตรู
+- [The Pattern Language](/microservices-design-from-zero-to-hero/th/intro-and-principles/the-pattern-language/) — ทุก pattern ในคอร์สนี้เชื่อมโยงกันอย่างไร
+- [Data Management](/microservices-design-from-zero-to-hero/th/data-management/) — โมดูลที่ "แต่ละ service เป็นเจ้าของข้อมูลของตัวเอง" กลายเป็นเรื่องยาก
+
+<Callout title="เป็นคุณสมบัติ ไม่ใช่ขนาด">
+อย่ายอมแพ้ต่อแรงดึงดูดที่จะนิยาม microservice ด้วยความเล็กของมัน คุณสมบัติที่สำคัญคือความเป็นอิสระและความเป็นเจ้าของ: service ที่คุณ deploy ได้ด้วยตัวเอง ที่เป็นเจ้าของข้อมูลของมัน และที่ map กับ business capability หนึ่ง ๆ service จะมีไม่กี่ร้อยบรรทัดหรือไม่กี่พันบรรทัดก็ได้ — สิ่งที่ทำให้มันเป็น microservice คือขอบเขตที่ล้อมรอบมัน ไม่ใช่จำนวนที่อยู่ภายใน
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Which property best characterizes a microservices architecture?',
+    options: [
+      'ทุก service มีโค้ดน้อยกว่าหนึ่งพันบรรทัด',
+      'service deploy ได้อย่างอิสระ, coupling แบบหลวม, จัดระเบียบรอบ business capability และเป็นเจ้าของข้อมูลของตัวเอง',
+      'ทุก service สื่อสารกันผ่าน HTTP เท่านั้น',
+      'ทุก service ใช้ฐานข้อมูลกลางร่วมกันหนึ่งตัวเพื่อความสอดคล้อง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do services in this architecture access another service\'s data?',
+    options: [
+      'ด้วยการ query ตารางฐานข้อมูลของอีก service โดยตรง',
+      'ผ่าน API ของ service ที่เป็นเจ้าของ หรือ event ที่มันเผยแพร่',
+      'ผ่าน connection pool ฐานข้อมูลที่ใช้ร่วมกัน',
+      'พวกมันไม่สามารถแลกเปลี่ยนข้อมูลกันได้เลย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What role does the API gateway play in the overview diagram?',
+    options: [
+      'มันเก็บข้อมูลของทุก service',
+      'มันส่งต่อ request ของ client ไปยัง service ที่เป็นเจ้าของ capability ที่เกี่ยวข้อง',
+      'มันรัน business logic ให้ทุก service',
+      'มันแทนที่ความจำเป็นที่ service ต้องเป็นเจ้าของข้อมูลของตัวเอง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-principles/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="intro-and-principles/index" />

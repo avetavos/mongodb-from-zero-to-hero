@@ -1,0 +1,214 @@
+---
+title: API Composition
+description: 'ตอบ query ที่พาดข้ามหลาย service โดยเรียกแต่ละ service แล้ว join ผลลัพธ์เข้าด้วยกันใน memory — วิธีที่ง่ายที่สุดในการกู้คืน join ข้าม service ที่คุณเสียไปกับ Database per Service'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท (Context)
+
+service แต่ละตัวของคุณเป็นเจ้าของฐานข้อมูลส่วนตัว ดังนั้นหน้ารายละเอียด order จึงกลายเป็นปัญหา มันต้องการตัว order เองจาก Order service, ชื่อและ tier ของผู้ซื้อจาก Customer service และสถานะการจัดส่งจาก Shipping service ใน monolith นี่เป็น join สามตาราง ตอนนี้ตารางเหล่านั้นอยู่ในสามฐานข้อมูลที่ไม่มี query เดียวเอื้อมถึงได้
+
+## ปัญหา (Problem)
+
+หน้านี้ก็ยังต้อง render อยู่ดี คุณต้องรวบรวมข้อมูลจากหลาย service และนำเสนอเป็นผลลัพธ์รวมหนึ่งเดียว แต่คุณไม่มีฐานข้อมูลร่วมให้ join ข้ามได้ และคุณก็ไม่อยากประดิษฐ์ชั้นการจัดเก็บใหม่ทั้งชั้นขึ้นมาเพียงเพื่อตอบ query เดียว
+
+คุณจะ implement query ที่ข้อมูลกระจายอยู่ตามหลาย service ได้อย่างไร โดยไม่ทำลายขอบเขต Database per Service และไม่ over-engineer?
+
+## วิธีแก้ (Solution)
+
+แนะนำ **API Composer** — component เล็ก ๆ (มักอยู่ใน API gateway หรือ backend-for-frontend) ที่มีหน้าที่เดียวคือตอบ query นี้ มันเรียกแต่ละ service ที่เป็นเจ้าของส่วนหนึ่งของคำตอบ รวบรวม response แล้ว join เข้าด้วยกันใน memory ก่อนคืนผลลัพธ์รวมกลับไป
+
+composer ไม่ถือข้อมูลของตัวเองเลย มันเป็นการประสานงานล้วน ๆ: กระจาย request ออกไป (ในอุดมคติคือแบบขนาน เพราะมันเป็นอิสระต่อกัน) แล้วจึง merge เพราะการเรียกทั้งสามไม่ได้พึ่งพากัน การยิงพวกมันพร้อมกันจึงทำให้ latency ใกล้เคียงกับการเรียกที่ช้าที่สุดเพียงตัวเดียว แทนที่จะเป็นผลรวมของทั้งสาม
+
+export const apiCompositionDiagram = `flowchart LR
+  Client[Client] --> Composer[API Composer]
+  Composer -->|getOrder| OrderSvc[Order Service]
+  Composer -->|getCustomer| CustomerSvc[Customer Service]
+  Composer -->|getShipment| ShippingSvc[Shipping Service]
+  OrderSvc --> ODB[(Orders DB)]
+  CustomerSvc --> CDB[(Customers DB)]
+  ShippingSvc --> SDB[(Shipping DB)]
+  Composer -->|merged result| Client`;
+
+<Mermaid code={apiCompositionDiagram} title="composer กระจายการเรียกออกไปยังแต่ละ service ที่เป็นเจ้าของ แล้ว join response เข้าด้วยกันใน memory" />
+
+## ตัวอย่าง (Example)
+
+composer ด้านล่างดึง order, customer และ shipment แบบขนาน แล้วเย็บเข้าด้วยกันเป็น view object เดียว การ merge เป็น in-memory join ที่ใช้ ID ที่ order ถืออยู่แล้วเป็นกุญแจ
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    async function getOrderDetail(orderId: string) {
+      const order = await orderSvc.getOrder(orderId);
+
+      // The order tells us which customer and shipment to fetch.
+      const [customer, shipment] = await Promise.all([
+        customerSvc.getCustomer(order.customerId),
+        shippingSvc.getShipment(order.id),
+      ]);
+
+      // In-memory join.
+      return {
+        orderId: order.id,
+        total: order.total,
+        customerName: customer.name,
+        customerTier: customer.tier,
+        deliveryStatus: shipment.status,
+        eta: shipment.eta,
+      };
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import asyncio
+
+    async def get_order_detail(order_id: str) -> dict:
+        order = await order_svc.get_order(order_id)
+
+        # The order tells us which customer and shipment to fetch.
+        customer, shipment = await asyncio.gather(
+            customer_svc.get_customer(order["customer_id"]),
+            shipping_svc.get_shipment(order["id"]),
+        )
+
+        # In-memory join.
+        return {
+            "order_id": order["id"],
+            "total": order["total"],
+            "customer_name": customer["name"],
+            "customer_tier": customer["tier"],
+            "delivery_status": shipment["status"],
+            "eta": shipment["eta"],
+        }
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func GetOrderDetail(ctx context.Context, orderID string) (OrderDetail, error) {
+        order, err := orderSvc.GetOrder(ctx, orderID)
+        if err != nil {
+            return OrderDetail{}, err
+        }
+
+        // Fetch customer and shipment in parallel.
+        var customer Customer
+        var shipment Shipment
+        g, gctx := errgroup.WithContext(ctx)
+        g.Go(func() (err error) {
+            customer, err = customerSvc.GetCustomer(gctx, order.CustomerID)
+            return
+        })
+        g.Go(func() (err error) {
+            shipment, err = shippingSvc.GetShipment(gctx, order.ID)
+            return
+        })
+        if err := g.Wait(); err != nil {
+            return OrderDetail{}, err
+        }
+
+        // In-memory join.
+        return OrderDetail{
+            OrderID:        order.ID,
+            Total:          order.Total,
+            CustomerName:   customer.Name,
+            CustomerTier:   customer.Tier,
+            DeliveryStatus: shipment.Status,
+            ETA:            shipment.ETA,
+        }, nil
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    async fn get_order_detail(order_id: &str) -> Result<OrderDetail, Error> {
+        let order = order_svc::get_order(order_id).await?;
+
+        // Fetch customer and shipment concurrently.
+        let (customer, shipment) = tokio::try_join!(
+            customer_svc::get_customer(&order.customer_id),
+            shipping_svc::get_shipment(&order.id),
+        )?;
+
+        // In-memory join.
+        Ok(OrderDetail {
+            order_id: order.id,
+            total: order.total,
+            customer_name: customer.name,
+            customer_tier: customer.tier,
+            delivery_status: shipment.status,
+            eta: shipment.eta,
+        })
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เป็นผลลัพธ์ (Resulting context)
+
+สิ่งที่คุณได้รับ:
+
+- **ความเรียบง่าย.** ไม่มีการจัดเก็บใหม่ ไม่มี event pipeline ถ้าคุณเรียก service ได้ คุณก็ compose พวกมันได้ มันเป็นตัวเลือกแรกที่ชัดเจนสำหรับ query ข้าม service
+- **ทันสมัยเสมอ.** เพราะมันอ่านสด ๆ จากเจ้าของแต่ละรายตอน request ผลลัพธ์จึงสะท้อนสถานะล่าสุด — ไม่มี replication lag
+
+สิ่งที่มันมีต้นทุนกับคุณ:
+
+- **in-memory join ไม่มีประสิทธิภาพ.** การ join ผลลัพธ์ชุดใหญ่ใน memory ของแอปพลิเคชันช้ากว่าการให้ฐานข้อมูลทำมันด้วย index มาก query ที่ filter หรือ sort ข้าม service (เช่น "order มูลค่าสูงสุด 20 รายการสำหรับลูกค้า gold-tier") อาจบังคับให้ composer ดึงข้อมูลปริมาณมหาศาลจากแต่ละ service มาแล้วทิ้งส่วนใหญ่ไป
+- **availability เป็นผลคูณของส่วนต่าง ๆ.** composer ต้องการให้ทุก service ที่เรียกตอบกลับ ถ้าตัวใดล่มหรือช้า query ทั้งหมดก็จะแย่ตามไปด้วย — เว้นแต่คุณจะเพิ่ม timeout และการจัดการ partial-result
+- **consistency ลดลง.** ชิ้นส่วนต่าง ๆ ถูกอ่านในช่วงเวลาที่ต่างกันเล็กน้อย ดังนั้น view รวมจึงอาจผสมสถานะที่ไม่เคยมีอยู่ด้วยกันในขณะเดียวกันเลย
+
+เมื่อ in-memory join กลายเป็นคอขวด — ข้อมูลใหญ่ การ filter ซับซ้อน หรือเป้าหมาย latency ที่เข้มงวด — ให้ยกระดับไปสู่ read model ที่ดูแลไว้ด้วย [CQRS](/microservices-design-from-zero-to-hero/th/data-management/cqrs/) ซึ่ง pre-join ข้อมูลไว้ล่วงหน้า
+
+## Pattern ที่เกี่ยวข้อง
+
+- [Database per Service](/microservices-design-from-zero-to-hero/th/data-management/database-per-service/) — ขอบเขตที่เปลี่ยน join ให้กลายเป็น composition
+- [CQRS](/microservices-design-from-zero-to-hero/th/data-management/cqrs/) — ทางเลือกที่หนักกว่าสำหรับ query ที่แพงเกินกว่าจะ compose ตอน request
+
+<Callout title="เริ่มที่นี่ ยกระดับเมื่อจำเป็นเท่านั้น">
+API Composition เป็น pattern สำหรับ query ข้าม service ที่ถูกที่สุด และ query ส่วนใหญ่ก็ไม่เคยเติบโตเกินมันไปได้ คว้า CQRS มาใช้เมื่อคุณได้วัดแล้วว่า in-memory join ช้าจริงหรือดูดข้อมูลมากจริงเท่านั้น — ไม่ใช่ก่อนหน้านั้น read model ที่สร้างก่อนเวลาอันควรเป็นแหล่งของความซับซ้อนโดยไม่ตั้งใจที่พบบ่อย
+</Callout>
+
+export const quizApiComposition = [
+  {
+    q: 'API Composer ทำอะไร?',
+    options: [
+      'เก็บสำเนา denormalized ของข้อมูลทุก service',
+      'เรียกแต่ละ service ที่เป็นเจ้าของส่วนหนึ่งของคำตอบ แล้ว join response ของพวกมันใน memory',
+      'เชื่อมต่อกับฐานข้อมูลของแต่ละ service โดยตรงเพื่อรัน join',
+      'แทนที่ service ทั้งหลายด้วยฐานข้อมูลร่วมเดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม composer จึงควรยิงการเรียกแบบขนานเมื่อพวกมันเป็นอิสระต่อกัน?',
+    options: [
+      'เพื่อรับประกัน strong consistency',
+      'เพื่อให้ latency รวมใกล้เคียงกับการเรียกที่ช้าที่สุดเพียงตัวเดียว แทนที่จะเป็นผลรวมของทุกการเรียก',
+      'เพราะ service ปฏิเสธ request แบบลำดับ',
+      'เพื่อหลีกเลี่ยงการใช้ join ของฐานข้อมูล',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อเสียหลักของ API Composition สำหรับ query ขนาดใหญ่หรือที่ filter หนักคืออะไร?',
+    options: [
+      'มันทำลายขอบเขต Database per Service',
+      'มันต้องการ two-phase commit',
+      'in-memory join ไม่มีประสิทธิภาพและอาจดึงข้อมูลปริมาณมากมาเพียงเพื่อทิ้งส่วนใหญ่ไป',
+      'มันคืนข้อมูลปัจจุบันไม่ได้',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="data-management/api-composition" questions={quizApiComposition} />
+
+<ProgressTracker client:visible id="data-management/api-composition" />

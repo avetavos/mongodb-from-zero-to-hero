@@ -1,0 +1,146 @@
+---
+title: Backends for Frontends
+description: 'แทนที่จะมี API Gateway เดียวสำหรับทุกคน ให้ client แต่ละชนิดมีของตัวเอง: web BFF, mobile BFF, third-party BFF — แต่ละตัวปรับแต่งให้เข้ากับ client ของมันและเป็นเจ้าของโดยทีมที่สร้าง client นั้น'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+คุณนำ [API Gateway](/microservices-design-from-zero-to-hero/th/communication/api-gateway/) มาใช้และมันได้ผล แต่ client ของคุณไม่เหมือนกัน web app ทำงานบนการเชื่อมต่อที่เร็วและต้องการการตอบกลับที่ละเอียดสมบูรณ์เพื่อแสดง dashboard ที่กว้าง mobile app ทำงานบนสัญญาณมือถือที่ไม่เสถียรและต้องการการตอบกลับที่เล็กกระชับ มีเฉพาะ field ที่หน้าจอเล็กแสดงเท่านั้น third-party integration ต้องการ endpoint ที่เสถียร อนุรักษ์นิยม มีเวอร์ชัน และเปลี่ยนแปลงน้อย gateway เดียวที่พยายามตอบสนองทั้งสามฝ่ายก็จะเติบโต logic แบบมีเงื่อนไขและกรณีพิเศษ "ใส่ field นี้เฉพาะ mobile" เพิ่มขึ้นเรื่อย ๆ
+
+## ปัญหา
+
+gateway เดียวที่ใช้ร่วมกันโดย client ทุกชนิดจะกลายเป็นองค์ประกอบที่ถูกแย่งชิงและเติบโตไม่หยุด ทีม client ทุกทีมต้องประสานงานการเปลี่ยนแปลงของตนผ่าน codebase ที่ใช้ร่วมกันตัวเดียวนั้น ดังนั้นทีม mobile จึงต้องรอทีม web และในทางกลับกัน API ก็เลื่อนไหลไปสู่รูปร่างแบบหารร่วมน้อยที่สุดที่ไม่เข้ากับ client ใดได้ดี — หนักเกินไปสำหรับ mobile บางเกินไปสำหรับ web และความเป็นเจ้าของก็คลุมเครือ: ใครเป็นเจ้าของ gateway เมื่อสามทีมพึ่งพามัน? คุณจะรักษาประโยชน์ของจุดเข้าจุดเดียวไว้ในขณะที่ให้ client แต่ละตัวพัฒนา API ของตัวเองได้ตามจังหวะของตัวเองได้อย่างไร?
+
+## ทางออก
+
+**Backends for Frontends (BFF)** นำ gateway pattern มาใช้หนึ่งครั้งต่อ client หนึ่งชนิด แทนที่จะมี gateway เดียว คุณรัน **gateway แยกต่างหากสำหรับ client แต่ละชนิด** — web BFF, mobile BFF, third-party BFF แต่ละ BFF เปิดเผย API ที่ถูกปรับรูปร่างให้เหมาะกับ client ของมันอย่างแม่นยำ: mobile BFF คืน payload ที่ถูกตัดทอน web BFF คืนผลรวมที่ละเอียดสมบูรณ์ third-party BFF เปิดเผย contract ที่เสถียรและเปลี่ยนเวอร์ชันช้า ๆ
+
+การเปลี่ยนแปลงที่ชี้ขาดคือความเป็นเจ้าของ แต่ละ BFF **เป็นเจ้าของโดยทีมที่สร้าง client นั้น** ทีม mobile เป็นเจ้าของ mobile BFF และส่งการเปลี่ยนแปลงไปยัง client และ backend ของมันพร้อมกัน โดยไม่ต้องประสานงานข้ามทีม บริการภายในที่ใช้ร่วมกันยังคงไม่ถูกแตะต้องอยู่หลัง BFF ทุกตัว
+
+export const bffDiagram = `flowchart LR
+  Web[Web App] --> WBFF[Web BFF]
+  Mobile[Mobile App] --> MBFF[Mobile BFF]
+  Third[Third-party client] --> TBFF[Third-party BFF]
+  WBFF --> O[Order Service]
+  WBFF --> C[Customer Service]
+  MBFF --> O
+  MBFF --> I[Inventory Service]
+  TBFF --> O
+  TBFF --> C`;
+
+<Mermaid code={bffDiagram} title="Backends for Frontends — gateway ที่ปรับแต่งหนึ่งตัวต่อ client หนึ่งชนิด แต่ละตัวเป็นเจ้าของโดยทีมของ client นั้น เหนือบริการภายในที่ใช้ร่วมกัน" />
+
+## ตัวอย่าง
+
+แต่ละ BFF เป็น deployable ของตัวเองพร้อม configuration ของตัวเองที่ปรับให้เข้ากับ client ของมัน นี่คือ configuration ของ route สอง BFF เหนือบริการภายในเดียวกัน — สังเกตว่า mobile BFF ตัด field และเข้มงวด limit ในขณะที่ web BFF คืนผลรวมที่ละเอียดสมบูรณ์
+
+```yaml
+# mobile-bff.yaml — small payloads, conservative limits for cellular clients
+listen: ":443"
+routes:
+  - path: /m/order/:id
+    aggregate:
+      - get: http://order-service/orders/:id
+        as: order
+      - get: http://inventory-service/stock/:sku
+        as: stock
+    response_shape:
+      fields: [order.id, order.status, order.total, stock.available]  # trimmed
+    rate_limit:
+      requests_per_minute: 60
+---
+# web-bff.yaml — rich aggregates for a fast connection and a wide screen
+listen: ":443"
+routes:
+  - path: /w/order/:id
+    aggregate:
+      - get: http://order-service/orders/:id
+        as: order
+      - get: http://customer-service/customers/:customerId
+        as: customer
+      - get: http://inventory-service/stock/:sku
+        as: stock
+    response_shape:
+      fields: [order, customer, stock]  # full objects
+    rate_limit:
+      requests_per_minute: 240
+```
+
+## บริบทผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **API ที่ปรับแต่งเฉพาะ** client แต่ละตัวได้รับการตอบกลับที่ถูกปรับรูปร่างให้เข้ากับหน้าจอ เครือข่าย และความต้องการของมันพอดี — เล็กสำหรับ mobile ละเอียดสำหรับ web เสถียรสำหรับ third party — โดยไม่ต้องประนีประนอมเพื่อให้เข้ากับฝ่ายอื่น
+- **ความเป็นเจ้าของและความเป็นอิสระที่ชัดเจน** ทีม client แต่ละทีมเป็นเจ้าของ BFF ของตน และส่งการเปลี่ยนแปลง client กับ backend พร้อมกัน ขจัดการประสานงานข้ามทีมที่ gateway ที่ใช้ร่วมกันบังคับให้ทำ
+- **รัศมีการระเบิดที่เล็กลง** การเปลี่ยนแปลงหรือบั๊กใน mobile BFF ไม่สามารถทำให้ web client พังได้ เพราะมันเป็น deployable แยกกัน
+
+สิ่งที่คุณต้องจ่าย:
+
+- **มีการทำซ้ำบ้าง** กฎการจัดเส้นทาง การเชื่อมต่อการยืนยันตัวตน และ logic การรวมผลลัพธ์เกิดซ้ำกันในหลาย BFF concern ที่ใช้ร่วมกันสามารถถูกแยกออกไปเป็น library ที่ใช้ร่วมกันได้ แต่คุณยอมรับว่ามีชิ้นส่วนเคลื่อนไหวมากกว่า gateway เดียว
+- **มีองค์ประกอบให้ดำเนินการมากขึ้น** BFF หลายตัวหมายถึงหลายสิ่งที่ต้อง deploy เฝ้าติดตาม และทำให้พร้อมใช้งาน แทนที่จะเป็นเพียงตัวเดียว
+- **มีขอบเขตที่ต้องคอยควบคุม** แต่ละ BFF ต้องคงสภาพเป็นชั้นปรับแต่งบาง ๆ ถ้า BFF เฉพาะ client เริ่มดูดซับ business logic คุณก็จะสร้างปัญหา God-object ที่ pattern นี้ตั้งใจจะแก้ขึ้นมาใหม่ — เพียงแต่กระจายอยู่ในหลายที่
+
+## Pattern ที่เกี่ยวข้อง
+
+- [API Gateway](/microservices-design-from-zero-to-hero/th/communication/api-gateway/) — pattern แบบ gateway เดียวที่ BFF ทำให้พิเศษขึ้นต่อ client หนึ่งชนิด
+- [Service Discovery](/microservices-design-from-zero-to-hero/th/communication/service-discovery/) — วิธีที่แต่ละ BFF ค้นหาตำแหน่งของบริการภายในที่มันเรียก
+- [API Composition](/microservices-design-from-zero-to-hero/th/data-management/api-composition/) — การรวมผลลัพธ์ที่แต่ละ BFF ทำเพื่อประกอบการตอบกลับที่ปรับให้เข้ากับ client
+
+<Callout title="BFF เป็น pattern ที่ปรับรูปทีมพอ ๆ กับที่เป็นเรื่องทางเทคนิค">
+ชัยชนะที่แท้จริงของ BFF ไม่ใช่ payload ที่เล็กลง — แต่คือการขจัดคอขวดในการประสานงาน เมื่อทีม mobile เป็นเจ้าของ BFF ของตน มันก็ส่งงานได้ตามจังหวะของตัวเองโดยไม่ต้องเข้าคิวรออยู่หลังทีม client อื่นทุกทีม ถ้าองค์กรของคุณมีทีม platform เดียวที่จะเป็นเจ้าของ BFF ทั้งหมดอยู่แล้ว gateway เดียวที่ถูกแยกองค์ประกอบมาอย่างดีอาจให้บริการคุณได้ดีกว่า; BFF ให้ผลคุ้มค่าเมื่อทีม client แยกจากกันชัดเจนและต้องการความเป็นอิสระ
+</Callout>
+
+export const quizBff = [
+  {
+    q: 'แนวคิดหลักของ Backends for Frontends คืออะไร?',
+    options: [
+      'รัน gateway เดียวที่ใช้ร่วมกันพร้อม configuration flag จำนวนมาก',
+      'รัน gateway ที่แยกต่างหากและปรับแต่งเฉพาะสำหรับ client แต่ละชนิด เป็นเจ้าของโดยทีมของ client นั้น',
+      'ย้าย business logic ทั้งหมดเข้าไปใน gateway',
+      'แทนที่ gateway ด้วยการเรียกบริการโดยตรง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ปัญหาของ gateway เดียวที่ใช้ร่วมกันอันใดที่ BFF แก้เป็นหลัก?',
+    options: [
+      'มันขจัดความจำเป็นในการยืนยันตัวตน',
+      'มันขจัดคอขวดในการประสานงานข้ามทีมและรูปร่าง API แบบหารร่วมน้อยที่สุด',
+      'มันทำให้ฐานข้อมูลเร็วขึ้น',
+      'มันขจัดความจำเป็นในการทำ service discovery',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใครเป็นเจ้าของ BFF ตัวหนึ่ง?',
+    options: [
+      'ทีม platform ส่วนกลางที่เป็นเจ้าของทั้งหมด',
+      'ทีมที่สร้าง client ที่ BFF นั้นให้บริการ',
+      'ทีมฐานข้อมูล',
+      'ไม่มีใคร; มันถูกสร้างขึ้นโดยอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อใดเป็นต้นทุนที่แท้จริงของ BFF pattern?',
+    options: [
+      'มันบังคับให้ client ทุกตัวใช้รูปร่างการตอบกลับเดียวกัน',
+      'มีการทำซ้ำบ้างของ logic การจัดเส้นทาง การยืนยันตัวตน และการรวมผลลัพธ์ในหลาย BFF',
+      'มันทำให้ API ที่ปรับแต่งเฉพาะเป็นไปไม่ได้',
+      'มันต้องการให้ client ทุกตัวใช้ deployment เดียวร่วมกัน',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="communication/backends-for-frontends" questions={quizBff} />
+
+<ProgressTracker client:visible id="communication/backends-for-frontends" />

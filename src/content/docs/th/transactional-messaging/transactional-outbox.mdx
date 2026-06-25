@@ -1,0 +1,238 @@
+---
+title: Transactional Outbox
+description: 'ทำให้การ publish เป็น atomic ไปพร้อมกับการเขียนทางธุรกิจ: insert ข้อความขาออกลงในตาราง outbox ใน local transaction เดียวกันกับการเปลี่ยนแปลง state แล้วให้ relay แยกต่างหากส่งมันไปยัง broker'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+เซอร์วิสของคุณต้องบันทึกการเปลี่ยนแปลงทางธุรกิจและบอกระบบส่วนที่เหลือเกี่ยวกับมัน อย่างที่บทนำของโมดูลแสดงให้เห็น การทำทั้งสองอย่างเป็นการเขียนสองครั้งที่อิสระต่อกัน — ครั้งหนึ่งลงฐานข้อมูล อีกครั้งลง broker — เปิดช่องว่างที่การ crash ทำให้เกิด event แบบ ghost หรือ lost คุณต้องการวิธีที่ทำให้ข้อความมีชะตากรรมร่วมกับการเปลี่ยนแปลงทางธุรกิจ: ถ้าการเปลี่ยนแปลง commit ข้อความก็จะถูกส่งในที่สุด ถ้าการเปลี่ยนแปลง roll back ก็ไม่มีข้อความอยู่เลย
+
+## ปัญหา
+
+คุณไม่สามารถนำ message broker เข้าร่วมใน database transaction ของคุณได้ และ two-phase commit ข้ามระบบทั้งสองก็เป็นสิ่งที่คุณตัดทิ้งไปแล้ว แต่คุณ *สามารถ* ควบคุมฐานข้อมูลของคุณเองได้อย่างสมบูรณ์ ภายใน local transaction เดียว คุณเขียนได้กี่แถวก็ได้ ลงกี่ตารางก็ได้ ตามต้องการ และทั้งหมดจะ commit หรือ roll back ด้วยกัน
+
+ดังนั้นแรงต่าง ๆ คือ: คุณต้องการ atomicity ระหว่าง "การเปลี่ยนแปลงทางธุรกิจเกิดขึ้น" กับ "ข้อความเกี่ยวกับมันมีอยู่" คุณมีเพียงระบบเดียวที่ให้ transaction กับคุณ (ฐานข้อมูลของคุณ) และคุณยังต้องการให้ข้อความออกจากฐานข้อมูลและไปถึง broker ในที่สุด
+
+## วิธีแก้
+
+เพิ่มตาราง **outbox** ลงในฐานข้อมูลของเซอร์วิส เมื่อคุณทำการเปลี่ยนแปลงทางธุรกิจ ให้เขียนข้อความขาออกเป็นแถวในตาราง outbox *ภายใน transaction เดียวกัน* กับการเปลี่ยนแปลงนั้น เพราะ insert ทั้งสองอยู่ใน local transaction เดียว มันจึง commit ด้วยกันหรือไม่เกิดเลย — dual write ยุบรวมเป็นการเขียน atomic ครั้งเดียว
+
+แถว outbox ไม่ใช่การส่ง มันเป็น *เจตนา* ที่คงทนถาวรว่าจะส่ง คอมโพเนนต์แยกต่างหากที่เรียกว่า **message relay** จะอ่านแถว outbox ที่ commit แล้วและ publish ไปยัง broker โดยทำเครื่องหมายแต่ละแถวว่าส่งแล้ว (หรือลบทิ้ง) เมื่อ broker ตอบรับ วิธีที่ relay อ่าน outbox เป็นหัวข้อของอีกสองบทเรียนถัดไป — โดยการ tailing transaction log หรือโดยการ polling ตาราง
+
+export const outboxDiagram = `flowchart LR
+  subgraph Service
+    H[Handler]
+  end
+  subgraph DB[Service Database]
+    BT[(business table)]
+    OT[(outbox table)]
+  end
+  R[Message Relay]
+  B[(Message Broker)]
+  H -->|one local transaction| BT
+  H -->|same transaction| OT
+  R -->|read committed rows| OT
+  R -->|publish, then mark sent| B`;
+
+<Mermaid code={outboxDiagram} title="แถวธุรกิจและแถว outbox commit ใน transaction เดียว; relay drain outbox ไปยัง broker" />
+
+## ตัวอย่าง
+
+การเคลื่อนไหวหลักคือ transaction เดียวที่ insert แถวธุรกิจและแถว outbox ด้วยกัน payload ที่ถูก serialize และ metadata ของข้อความไปอยู่ใน outbox ไม่มีการ publish อะไรจาก code path นี้เลย
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { randomUUID } from 'node:crypto';
+
+    // pool is a node-postgres Pool; the whole function is one DB transaction.
+    async function confirmOrder(orderId: string, customerId: string, amount: number) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        await client.query(
+          'UPDATE orders SET status = $1 WHERE id = $2',
+          ['CONFIRMED', orderId],
+        );
+
+        const payload = JSON.stringify({ orderId, customerId, amount });
+        await client.query(
+          `INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [randomUUID(), 'Order', orderId, 'OrderConfirmed', payload],
+        );
+
+        await client.query('COMMIT'); // business row + outbox row commit together
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import json
+    import uuid
+
+    # conn is a psycopg connection; the `with` block is one DB transaction.
+    def confirm_order(conn, order_id: str, customer_id: str, amount: int) -> None:
+        with conn:  # commits on success, rolls back on exception
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET status = %s WHERE id = %s",
+                    ("CONFIRMED", order_id),
+                )
+
+                payload = json.dumps(
+                    {"orderId": order_id, "customerId": customer_id, "amount": amount}
+                )
+                cur.execute(
+                    """INSERT INTO outbox
+                         (id, aggregate_type, aggregate_id, event_type, payload)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (str(uuid.uuid4()), "Order", order_id, "OrderConfirmed", payload),
+                )
+            # business row + outbox row commit together here
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func ConfirmOrder(ctx context.Context, db *sql.DB, orderID, customerID string, amount int64) error {
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil {
+            return err
+        }
+        defer tx.Rollback() // no-op once committed
+
+        if _, err = tx.ExecContext(ctx,
+            `UPDATE orders SET status = $1 WHERE id = $2`,
+            "CONFIRMED", orderID); err != nil {
+            return err
+        }
+
+        payload, _ := json.Marshal(map[string]any{
+            "orderId": orderID, "customerId": customerID, "amount": amount,
+        })
+        if _, err = tx.ExecContext(ctx,
+            `INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+             VALUES ($1, $2, $3, $4, $5)`,
+            uuid.NewString(), "Order", orderID, "OrderConfirmed", payload); err != nil {
+            return err
+        }
+
+        return tx.Commit() // business row + outbox row commit together
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use sqlx::{Pool, Postgres};
+    use uuid::Uuid;
+
+    async fn confirm_order(
+        pool: &Pool<Postgres>,
+        order_id: &str,
+        customer_id: &str,
+        amount: i64,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?; // one local transaction
+
+        sqlx::query("UPDATE orders SET status = $1 WHERE id = $2")
+            .bind("CONFIRMED")
+            .bind(order_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let payload = serde_json::json!({
+            "orderId": order_id, "customerId": customer_id, "amount": amount,
+        });
+        sqlx::query(
+            "INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind("Order")
+        .bind(order_id)
+        .bind("OrderConfirmed")
+        .bind(payload)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await // business row + outbox row commit together
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เป็นผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **เจตนา publish ที่ atomic** ข้อความและการเปลี่ยนแปลงทางธุรกิจใช้ transaction เดียวกัน ดังนั้นคุณจะไม่มีวันมีอย่างหนึ่งโดยไม่มีอีกอย่าง ปัญหา dual-write ถูกแก้ที่ต้นทาง
+- **ความเป็นอิสระจาก broker** write path ไม่แตะ broker อีกต่อไป ดังนั้น broker ที่ล่มไม่สามารถทำให้การดำเนินงานทางธุรกิจล้มเหลวหรือช้าลงได้ — outbox เพียงสะสมแถวไว้จนกว่า relay จะตามทัน
+- **audit trail โดยธรรมชาติ** outbox เป็นบันทึกที่คงทนถาวรของทุก event ที่เซอร์วิสตั้งใจจะปล่อยออกไป
+
+สิ่งที่คุณต้องแลก:
+
+- **การส่งแบบ at-least-once ไม่ใช่ exactly-once** relay สามารถ crash หลัง publish แต่ก่อนทำเครื่องหมายแถวว่าส่งแล้ว มันจึงจะ publish ซ้ำ ดังนั้น consumer ต้องเป็น idempotent — บทเรียนสุดท้ายของโมดูลนี้
+- **relay ที่ต้องสร้างและรัน** ต้องมีใครสักคน drain outbox อีกสองบทเรียนถัดไปครอบคลุมสองวิธีในการทำ
+- **การดูแลรักษา outbox** แถวที่ส่งแล้วต้องถูกตัดทิ้ง ไม่เช่นนั้นตารางจะโตขึ้นไม่สิ้นสุด
+
+## แพตเทิร์นที่เกี่ยวข้อง
+
+- [Transaction Log Tailing](/microservices-design-from-zero-to-hero/th/transactional-messaging/transaction-log-tailing/) — วิธีหนึ่งในการสร้าง relay โดยไม่ต้อง polling
+- [Polling Publisher](/microservices-design-from-zero-to-hero/th/transactional-messaging/polling-publisher/) — วิธีที่ง่ายกว่าในการสร้าง relay
+- [Idempotent Consumer](/microservices-design-from-zero-to-hero/th/transactional-messaging/idempotent-consumer/) — จำเป็นเพราะ outbox รับประกันเพียงการส่งแบบ at-least-once
+
+<Callout title="แถว outbox คือเจตนา ไม่ใช่การส่ง">
+การ commit แถว outbox ไม่ได้หมายความว่าข้อความถูกส่งแล้ว — มันหมายความว่าเซอร์วิสได้ *สัญญา* ว่าจะส่ง การส่งเป็นงานแยกต่างหากที่ retry ได้ การแยกนี้คือเหตุผลที่แพตเทิร์นนี้ใช้ได้: ส่วน atomic ที่ยากเกิดขึ้นภายในฐานข้อมูลเดียว และส่วน network ที่ไม่น่าเชื่อถือถูกผลักไปเป็นขั้นตอนที่ retry ได้จนกว่าจะสำเร็จ
+</Callout>
+
+export const quizOutbox = [
+  {
+    q: 'อะไรทำให้ transactional outbox เป็น atomic กับการเปลี่ยนแปลงทางธุรกิจ?',
+    options: [
+      'two-phase commit ระหว่างฐานข้อมูลและ broker',
+      'แถว outbox ถูก insert ใน local database transaction เดียวกันกับการเปลี่ยนแปลงทางธุรกิจ ดังนั้นทั้งคู่ commit หรือ roll back ด้วยกัน',
+      'broker เข้าร่วมใน database transaction',
+      'ข้อความถูก publish ก่อน transaction commit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'แถว outbox ที่ commit แล้วแทนอะไร?',
+    options: [
+      'หลักฐานว่าข้อความไปถึง broker แล้ว',
+      'เจตนาที่คงทนถาวรว่าจะส่งข้อความ ซึ่ง relay แยกต่างหากจะทำให้สำเร็จ',
+      'lock ที่ถูกถือไว้บน broker จนกว่าจะส่ง',
+      'การส่งที่ล้มเหลวซึ่ง handler ต้อง retry',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม consumer ของข้อความที่ส่งผ่าน outbox ต้องเป็น idempotent?',
+    options: [
+      'เพราะ outbox สามารถทำข้อความหายได้',
+      'เพราะ relay อาจ publish ข้อความแล้ว crash ก่อนทำเครื่องหมายว่าส่งแล้ว ทำให้ส่งซ้ำ — การส่งแบบ at-least-once',
+      'เพราะ database transaction ไม่คงทนถาวร',
+      'เพราะข้อความมาถึงไม่เรียงลำดับ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactional-messaging/transactional-outbox" questions={quizOutbox} />
+
+<ProgressTracker client:visible id="transactional-messaging/transactional-outbox" />

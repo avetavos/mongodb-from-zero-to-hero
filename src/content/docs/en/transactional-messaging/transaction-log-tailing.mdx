@@ -1,0 +1,136 @@
+---
+title: Transaction Log Tailing
+description: 'Drain the outbox without polling: a relay reads the database transaction log via change data capture and publishes each committed outbox insert to the broker as it appears.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You have a [Transactional Outbox](/microservices-design-from-zero-to-hero/en/transactional-messaging/transactional-outbox/): business changes commit alongside an outbox row in one local transaction. Now you need the relay — the component that takes committed outbox rows and publishes them to the broker. You want delivery to be prompt and to add as little load on the application database as possible.
+
+## Problem
+
+The obvious relay repeatedly queries the outbox table for new rows. But every query costs database work whether or not new rows exist, and the freshness of delivery is bounded by how often you poll. Poll often and you load the database; poll rarely and messages sit waiting. There is also a subtle correctness trap: you must observe rows in commit order and never miss one.
+
+So the forces are: you want low latency and low database overhead, you must publish every committed outbox row exactly once *from the relay's point of view*, and you would rather not run a busy query loop against your primary database.
+
+## Solution
+
+Every relational database already maintains an ordered, durable record of committed changes for its own recovery and replication — the **transaction log** (PostgreSQL's write-ahead log, MySQL's binlog, and so on). **Transaction log tailing** turns the relay into a consumer of that log. Instead of querying the outbox table, the relay reads the log stream, picks out the inserts into the `outbox` table, and publishes each one to the broker — in commit order, as soon as the transaction commits.
+
+This is **change data capture (CDC)**. Tools such as Debezium connect to the log, decode it, and emit a change event per row. Because the relay reads the replication stream rather than running queries, it adds almost no load to the primary and introduces almost no latency. The relay tracks its position in the log (an offset such as an LSN), so after a restart it resumes exactly where it left off.
+
+export const logTailDiagram = `flowchart LR
+  subgraph DB[Service Database]
+    OT[(outbox table)]
+    LOG[(transaction log / WAL)]
+    OT -->|insert is recorded in| LOG
+  end
+  CDC[CDC Connector]
+  B[(Message Broker)]
+  LOG -->|stream of committed changes| CDC
+  CDC -->|publish outbox inserts in commit order| B
+  CDC -.->|store offset / LSN| OFF[(offset store)]`;
+
+<Mermaid code={logTailDiagram} title="The relay tails the transaction log via CDC and publishes outbox inserts, with no polling" />
+
+## Example
+
+Log tailing is usually an infrastructure pattern: you run a CDC connector rather than write a query loop. The relay is configured, not coded. A Debezium-style connector watching the `outbox` table looks like this — it captures inserts and routes each event to a topic derived from the outbox metadata.
+
+```yaml
+# CDC connector: tail the WAL and publish outbox inserts to the broker.
+name: order-outbox-connector
+config:
+  connector.class: io.debezium.connector.postgresql.PostgresConnector
+  plugin.name: pgoutput
+  database.hostname: orders-db
+  database.dbname: orders
+  database.server.name: orders
+  # Only capture the outbox table.
+  table.include.list: public.outbox
+  # The outbox is append-only; ignore deletes from pruning.
+  tombstones.on.delete: false
+  # Route by the event's aggregate type and key by aggregate id,
+  # using the outbox event-router transform.
+  transforms: outbox
+  transforms.outbox.type: io.debezium.transforms.outbox.EventRouter
+  transforms.outbox.table.field.event.key: aggregate_id
+  transforms.outbox.route.by.field: aggregate_type
+  transforms.outbox.route.topic.replacement: ${routedByValue}.events
+```
+
+The connector remembers its log position, so a restart resumes from the last committed offset rather than replaying everything:
+
+```text
+offset: { "lsn": 24197848, "txId": 5912, "ts_usec": 1718900000000000 }
+resume → continue streaming WAL after lsn 24197848
+```
+
+## Resulting context
+
+What you gain:
+
+- **No polling, low latency.** Messages are published almost the instant their transaction commits, because the relay is reading the live replication stream.
+- **Minimal load on the primary.** Reading the log is the same cheap path replicas already use; there is no busy query loop hammering the outbox table.
+- **Correct ordering for free.** The transaction log is already in commit order, so the relay publishes in that order without extra work.
+
+What it costs you:
+
+- **Operational weight.** You must run and monitor a CDC connector (Kafka Connect, Debezium, or equivalent), grant replication privileges, and configure log retention so the relay does not fall behind and lose its position.
+- **Database coupling.** The connector is specific to your database's log format; switching databases means switching connectors.
+- **Still at-least-once.** A connector restart can re-emit the last unacknowledged change, so consumers must remain idempotent.
+
+## Related patterns
+
+- [Transactional Outbox](/microservices-design-from-zero-to-hero/en/transactional-messaging/transactional-outbox/) — supplies the rows this relay tails.
+- [Polling Publisher](/microservices-design-from-zero-to-hero/en/transactional-messaging/polling-publisher/) — the simpler relay alternative when CDC is too much to operate.
+- [Idempotent Consumer](/microservices-design-from-zero-to-hero/en/transactional-messaging/idempotent-consumer/) — needed because log tailing also delivers at least once.
+
+<Callout title="Tailing the log, not the table">
+The key shift is that the relay no longer asks the database "any new rows?" It listens to the same change stream the database uses to feed its own replicas. That stream is durable, ordered, and already being produced — log tailing just borrows it. The price is the CDC infrastructure you now operate and depend on.
+</Callout>
+
+export const quizLogTail = [
+  {
+    q: 'What does a transaction-log-tailing relay read to find new messages?',
+    options: [
+      'The outbox table, queried on a timer',
+      "The database's transaction log (WAL / binlog) via change data capture",
+      'The message broker, which pushes new rows back',
+      'An in-memory queue inside the application',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does log tailing add almost no load to the primary database?',
+    options: [
+      'Because it caches every query result',
+      'Because it reads the replication stream the database already produces, instead of running a busy query loop',
+      'Because it runs only once per day',
+      'Because it bypasses the database entirely',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the relay track so it can resume correctly after a restart?',
+    options: [
+      'The number of rows in the outbox table',
+      'Its position in the log, such as an LSN or offset',
+      'A lock on the broker topic',
+      'The total size of the database',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactional-messaging/transaction-log-tailing" questions={quizLogTail} />
+
+<ProgressTracker client:visible id="transactional-messaging/transaction-log-tailing" />

@@ -1,0 +1,248 @@
+---
+title: Polling Publisher
+description: 'วิธีง่าย ๆ ในการ drain outbox: relay query ตาราง outbox เป็นระยะเพื่อหาแถวที่ยังไม่ถูก publish แล้ว publish ไปยัง broker และทำเครื่องหมายว่าส่งแล้ว — ไม่ต้องใช้ change-data-capture infrastructure'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## บริบท
+
+คุณมี [Transactional Outbox](/microservices-design-from-zero-to-hero/th/transactional-messaging/transactional-outbox/) และคุณต้องการ relay เพื่อส่งแถวของมัน [Transaction Log Tailing](/microservices-design-from-zero-to-hero/th/transactional-messaging/transaction-log-tailing/) มีประสิทธิภาพแต่นำ CDC stack มาด้วย — replication slot, connector, log retention — ที่อาจมากเกินกว่าที่ทีมของคุณอยากรัน โดยเฉพาะในช่วงแรก คุณต้องการ relay ที่คุณสร้างและดำเนินการได้ด้วยเพียงแอปพลิเคชันและฐานข้อมูลของมันเท่านั้น
+
+## ปัญหา
+
+หากไม่มีสิทธิ์เข้าถึง transaction log วิธีเดียวที่จะรู้เกี่ยวกับแถว outbox ใหม่คือการถามฐานข้อมูล แต่ loop แบบไร้เดียงสามีหลุมพราง: มันสามารถหยิบแถวเดียวกันสองครั้งถ้ามี relay สองตัวรันอยู่ มันสามารถ publish แถวแล้วลืมทำเครื่องหมายว่าส่งแล้ว และมันสามารถกระหน่ำฐานข้อมูลถ้า poll หนักเกินไป
+
+ดังนั้นแรงต่าง ๆ คือ: คุณต้องการ relay ที่ง่ายที่สุดเท่าที่จะเป็นไปได้โดยไม่มี infrastructure เพิ่ม คุณยังต้อง publish ทุกแถวอย่างน้อยหนึ่งครั้งและหลีกเลี่ยงการ publish แถวสองครั้งจาก relay เดียว และคุณต้องการให้ต้นทุนและ latency ของการ polling อยู่ในระดับที่สมเหตุสมผล
+
+## วิธีแก้
+
+รัน **polling publisher**: background loop ที่ในช่วงเวลาคงที่ เลือกชุดของแถวที่ยังไม่ถูกส่งจาก outbox (เก่าสุดก่อน) publish แต่ละอันไปยัง broker และทำเครื่องหมายว่าส่งแล้วเมื่อ broker ตอบรับ เลือกด้วย row lock ที่ข้ามแถวที่ถูก lock อยู่แล้ว เพื่อให้ relay หลายตัวรันได้อย่างปลอดภัยโดยไม่อ้างสิทธิ์แถวเดียวกัน หลังจาก publish ให้ลบแถวหรือตั้ง timestamp `published_at` เพื่อไม่ให้มันถูกหยิบขึ้นมาอีก
+
+การส่งยังคงเป็น at least once: ถ้า relay crash หลัง publish แต่ก่อนทำเครื่องหมายแถวว่าส่งแล้ว poll ครั้งถัดไปจะ publish มันซ้ำ นั่นยอมรับได้ — [Idempotent Consumer](/microservices-design-from-zero-to-hero/th/transactional-messaging/idempotent-consumer/) ที่ปลายอีกด้านดูดซับ duplicate
+
+export const pollingDiagram = `sequenceDiagram
+  participant R as Polling Relay
+  participant DB as Outbox Table
+  participant B as Message Broker
+  loop every interval
+    R->>DB: SELECT unsent rows FOR UPDATE SKIP LOCKED
+    DB-->>R: batch of rows
+    R->>B: publish each message
+    B-->>R: ack
+    R->>DB: mark rows as sent (or delete)
+  end`;
+
+<Mermaid code={pollingDiagram} title="relay poll outbox เป็นช่วง ๆ publish แถวที่ยังไม่ถูกส่ง แล้วทำเครื่องหมายว่าส่งแล้ว" />
+
+## ตัวอย่าง
+
+loop อ้างสิทธิ์ชุดด้วย `FOR UPDATE SKIP LOCKED` เพื่อไม่ให้ relay ที่ทำงานพร้อมกันชนกัน publish แต่ละแถว และทำเครื่องหมายว่าส่งแล้วใน transaction เดียวกันกับที่ lock มันไว้
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    async function pollOnce(pool: Pool, broker: Broker): Promise<void> {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const { rows } = await client.query(
+          `SELECT id, event_type, payload FROM outbox
+             WHERE published_at IS NULL
+             ORDER BY created_at
+             LIMIT 100
+             FOR UPDATE SKIP LOCKED`,
+        );
+
+        for (const row of rows) {
+          await broker.publish(row.event_type, row.payload, { key: row.id });
+          await client.query(
+            'UPDATE outbox SET published_at = now() WHERE id = $1',
+            [row.id],
+          );
+        }
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    setInterval(() => pollOnce(pool, broker).catch(console.error), 1000);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import time
+
+    def poll_once(conn, broker) -> None:
+        with conn:  # one transaction: claim, publish, mark sent
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, event_type, payload FROM outbox
+                         WHERE published_at IS NULL
+                         ORDER BY created_at
+                         LIMIT 100
+                         FOR UPDATE SKIP LOCKED"""
+                )
+                rows = cur.fetchall()
+                for row_id, event_type, payload in rows:
+                    broker.publish(event_type, payload, key=row_id)
+                    cur.execute(
+                        "UPDATE outbox SET published_at = now() WHERE id = %s",
+                        (row_id,),
+                    )
+
+    while True:
+        poll_once(conn, broker)
+        time.sleep(1)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    func pollOnce(ctx context.Context, db *sql.DB, broker Broker) error {
+        tx, err := db.BeginTx(ctx, nil)
+        if err != nil {
+            return err
+        }
+        defer tx.Rollback()
+
+        rows, err := tx.QueryContext(ctx,
+            `SELECT id, event_type, payload FROM outbox
+               WHERE published_at IS NULL
+               ORDER BY created_at
+               LIMIT 100
+               FOR UPDATE SKIP LOCKED`)
+        if err != nil {
+            return err
+        }
+
+        type msg struct{ id, eventType string; payload []byte }
+        var batch []msg
+        for rows.Next() {
+            var m msg
+            if err := rows.Scan(&m.id, &m.eventType, &m.payload); err != nil {
+                rows.Close()
+                return err
+            }
+            batch = append(batch, m)
+        }
+        rows.Close()
+
+        for _, m := range batch {
+            if err := broker.Publish(m.eventType, m.payload, m.id); err != nil {
+                return err
+            }
+            if _, err := tx.ExecContext(ctx,
+                `UPDATE outbox SET published_at = now() WHERE id = $1`, m.id); err != nil {
+                return err
+            }
+        }
+        return tx.Commit()
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use sqlx::{Pool, Postgres, Row};
+
+    async fn poll_once(pool: &Pool<Postgres>, broker: &Broker) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?; // claim, publish, mark sent in one tx
+
+        let rows = sqlx::query(
+            "SELECT id, event_type, payload FROM outbox \
+             WHERE published_at IS NULL \
+             ORDER BY created_at LIMIT 100 \
+             FOR UPDATE SKIP LOCKED",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for row in rows {
+            let id: uuid::Uuid = row.get("id");
+            let event_type: String = row.get("event_type");
+            let payload: serde_json::Value = row.get("payload");
+
+            broker.publish(&event_type, &payload, id).await?;
+            sqlx::query("UPDATE outbox SET published_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## บริบทที่เป็นผลลัพธ์
+
+สิ่งที่คุณได้:
+
+- **ความเรียบง่าย** ไม่มี CDC connector ไม่มี replication slot ไม่มี log retention ให้ปรับจูน — แค่ loop, query และ database connection ที่คุณมีอยู่แล้ว นี่มักเป็น relay แรกที่ถูกต้อง
+- **ความสามารถในการพกพา** แพตเทิร์นนี้เป็น SQL ธรรมดา จึงใช้ได้กับฐานข้อมูลเชิงสัมพันธ์ใด ๆ และเข้าใจกับทดสอบได้ง่ายมาก
+- **concurrency ที่ปลอดภัย** `FOR UPDATE SKIP LOCKED` ทำให้ relay หลายตัวแบ่งงานกันได้โดยไม่ publish แถวเดียวกันสองครั้ง
+
+สิ่งที่คุณต้องแลก:
+
+- **latency จากการ polling** ข้อความรอ โดยเฉลี่ย ครึ่งหนึ่งของช่วง polling ก่อนที่มันจะถูก publish การลดช่วงให้สั้นลงช่วยปรับปรุง latency แต่เพิ่มภาระ
+- **ภาระของฐานข้อมูล** ทุก poll รัน query ไม่ว่าจะมีงานทำหรือไม่ ดังนั้นตาราง outbox และ index ของมันจึงรับ traffic ตลอดเวลา — overhead ที่ log tailing หลีกเลี่ยงได้พอดี
+- **ยังคงเป็น at-least-once** การ crash ระหว่าง publish และ mark-sent ทำให้ publish ซ้ำ ดังนั้น consumer ต้องเป็น idempotent
+
+กฎเชิงปฏิบัติ: เริ่มด้วย **polling publisher** เพราะมันง่ายและไม่มี dependency แล้วย้ายไปใช้ **transaction log tailing** เมื่อ latency หรือภาระจากการ polling กลายเป็นปัญหาจริง
+
+## แพตเทิร์นที่เกี่ยวข้อง
+
+- [Transactional Outbox](/microservices-design-from-zero-to-hero/th/transactional-messaging/transactional-outbox/) — ผลิตแถวที่ relay นี้ poll
+- [Transaction Log Tailing](/microservices-design-from-zero-to-hero/th/transactional-messaging/transaction-log-tailing/) — relay ที่ latency ต่ำกว่าแต่ซับซ้อนกว่า
+- [Idempotent Consumer](/microservices-design-from-zero-to-hero/th/transactional-messaging/idempotent-consumer/) — จำเป็นเพราะ polling ส่งแบบ at least once
+
+<Callout title="ทำเครื่องหมายว่าส่งแล้วใน transaction เดียวกันกับที่ publish">
+เวอร์ชันที่อันตรายของแพตเทิร์นนี้ publish แถวแล้วทำเครื่องหมายว่าส่งแล้วในขั้นตอนแยกต่างหาก จงทำการอ้างสิทธิ์และการทำเครื่องหมายใน transaction เดียวด้วย `FOR UPDATE SKIP LOCKED` และยอมรับว่าการ crash กลาง loop จะ publish แถวซ้ำ การพยายามทำให้ polling เป็น exactly-once มักแค่ย้าย race ไปอยู่ที่ที่แยบยลกว่า — พึ่งพา idempotent consumer แทน
+</Callout>
+
+export const quizPolling = [
+  {
+    q: 'polling publisher ค้นพบแถว outbox ใหม่อย่างไร?',
+    options: [
+      'มัน tail transaction log ของฐานข้อมูล',
+      'มัน query ตาราง outbox เป็นระยะเพื่อหาแถวที่ยังไม่ถูก publish',
+      'broker push แถวใหม่ให้มัน',
+      'มันรับ callback จากแอปพลิเคชันทุกครั้งที่ insert',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมจึงใช้ FOR UPDATE SKIP LOCKED เมื่อเลือกแถวที่จะ publish?',
+    options: [
+      'เพื่อให้ query รันเร็วขึ้นบน relay เดียว',
+      'เพื่อให้ relay หลายตัวรันพร้อมกันได้โดยไม่ publish แถวเดียวกันสองครั้ง',
+      'เพื่อรับประกันการส่งแบบ exactly-once ไปยัง broker',
+      'เพื่อหลีกเลี่ยงการเขียนลงฐานข้อมูลโดยสิ้นเชิง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การแลกเปลี่ยนหลักระหว่าง polling กับ log tailing คืออะไร?',
+    options: [
+      'polling ทำข้อความหายในขณะที่ log tailing ไม่',
+      'polling ง่ายกว่าและไม่มี dependency แต่เพิ่ม latency และภาระของฐานข้อมูลตลอดเวลา',
+      'polling ต้องใช้ CDC connector ในขณะที่ log tailing ไม่ต้อง',
+      'polling รับประกันการส่งแบบ exactly-once ในขณะที่ log tailing ไม่',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactional-messaging/polling-publisher" questions={quizPolling} />
+
+<ProgressTracker client:visible id="transactional-messaging/polling-publisher" />

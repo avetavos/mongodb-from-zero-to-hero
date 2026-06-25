@@ -1,0 +1,184 @@
+---
+title: Service per Container
+description: 'Package each service as a container image and run exactly one service per container: you get isolation, fast startup, and deploys that behave identically on a laptop, in CI, and in production — with an orchestrator scheduling the containers across machines.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Context
+
+You have several services to deploy. Each has its own runtime, its own set of libraries, and its own version of those libraries. One service needs an older OpenSSL, another needs a specific Java release, a third bundles a native image-processing library. In the early days you ran them all directly on a shared host, installing each runtime side by side.
+
+That worked for two services. With ten, the host turns into a minefield: upgrading a shared library for one service breaks another, "works on my machine" becomes a daily refrain, and nobody can reproduce production exactly. You need a way to ship a service together with everything it needs to run, and to place many such services on a machine without them interfering.
+
+## Problem
+
+You want each service to be deployed as a self-contained, immutable unit that includes its own dependencies, so that what you tested is exactly what runs. You want that unit to start in seconds, not minutes, so deploys and autoscaling are fast. You want strong isolation so one service's libraries, file system, and resource usage do not leak into another's. And you want all of this without paying for a full virtual machine per service.
+
+So the forces are: strong isolation and reproducibility, but with fast startup and high density on each machine, and a single artifact that runs the same everywhere.
+
+## Solution
+
+Package each service as a **container image**: a layered, immutable filesystem snapshot that bundles the service binary, its runtime, and its dependencies, built once from a declarative recipe. At runtime that image is instantiated as a **container** — an isolated process with its own filesystem, network namespace, and resource limits, sharing the host kernel rather than booting a full guest OS.
+
+The defining rule is **one service per container**. You do not pack several services into one image. Each service gets its own image and its own container, so it can be built, versioned, deployed, scaled, and rolled back independently of every other service.
+
+Because containers are lightweight, you run many of them per machine. You do not place them by hand: an **orchestrator** such as Kubernetes takes your desired state ("run three replicas of the order service") and schedules containers onto machines, restarts the ones that die, and reschedules them when a node fails.
+
+export const containerDiagram = `flowchart TB
+  subgraph Build[Build once]
+    Dockerfile[Dockerfile] --> Image[order-service:1.4.2 image]
+  end
+  Image --> Reg[(Image registry)]
+  subgraph Cluster[Orchestrated cluster]
+    subgraph N1[Node A]
+      C1[order-service container]
+      C2[order-service container]
+    end
+    subgraph N2[Node B]
+      C3[order-service container]
+      C4[inventory-service container]
+    end
+  end
+  Reg --> C1
+  Reg --> C2
+  Reg --> C3
+  Sched[Scheduler / control plane] --> N1
+  Sched --> N2`;
+
+<Mermaid code={containerDiagram} title="One image built once, pulled from a registry, run as one-service-per-container and scheduled across nodes by the orchestrator" />
+
+## Example
+
+The recipe that builds the image is a `Dockerfile`. A multi-stage build compiles the service in a heavy build image, then copies only the finished binary into a tiny runtime image, so the shipped artifact stays small and has little to attack.
+
+```dockerfile
+# Stage 1: build
+FROM golang:1.22 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/order-service ./cmd/order
+
+# Stage 2: minimal runtime — one service, nothing else
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/order-service /order-service
+USER nonroot
+EXPOSE 8080
+ENTRYPOINT ["/order-service"]
+```
+
+That image is then declared to the orchestrator as a `Deployment`. Notice that it asks for three replicas, sets resource limits so one container cannot starve its neighbours, and wires up a health check the orchestrator uses to decide when a container is ready.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      containers:
+        - name: order-service
+          image: registry.example.com/order-service:1.4.2
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+```
+
+## Resulting context
+
+What you gain:
+
+- **Isolation and reproducibility.** Each service ships with its own dependencies in an immutable image, so the artifact you tested is byte-for-byte the one that runs. Library conflicts between services disappear, and "works on my machine" largely goes away.
+- **Fast, dense, portable.** Containers start in seconds and pack many to a host because they share the kernel rather than booting a VM. The same image runs unchanged on a laptop, in CI, and in production.
+- **Independent lifecycle.** One service per container means you build, version, scale, and roll back each service on its own schedule.
+
+What it costs you:
+
+- **Orchestration complexity.** Running containers at scale means adopting an orchestrator, which is a substantial system in its own right — scheduling, networking, storage, and security all become things your team must understand and operate.
+- **Image and supply-chain hygiene.** Images can carry vulnerable base layers and bloat. You need a discipline of small, regularly rebuilt, scanned images.
+- **Weaker isolation than VMs.** Containers share the host kernel, so a kernel-level exploit has a larger blast radius than with full virtualization. Untrusted or high-risk workloads may still warrant stronger boundaries.
+
+## Related patterns
+
+- [Externalized Configuration](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/externalized-configuration/) — keeps environment-specific settings out of the image so one image runs everywhere.
+- [Service Mesh](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/service-mesh/) — adds a sidecar container alongside each service container for consistent networking.
+- [Serverless Deployment](/microservices-design-from-zero-to-hero/en/deployment-and-cross-cutting/serverless-deployment/) — an alternative runtime model when you would rather not run the containers yourself.
+
+<Callout title="One service per container is the point">
+It is tempting to save a few cents by cramming several services into one image. Resist it. The whole value of the pattern — independent deploys, independent scaling, independent rollback, and clean resource limits — comes from the one-to-one mapping between a service and its container. Bundle them, and you have rebuilt a small monolith inside a container.
+</Callout>
+
+export const quizSPC = [
+  {
+    q: 'What is the defining rule of the Service per Container pattern?',
+    options: [
+      'Run every service in one shared container to save memory',
+      'Package each service as its own image and run exactly one service per container',
+      'Run each container on its own dedicated physical machine',
+      'Bundle the database and the service into a single container',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why do containers start faster and pack more densely than virtual machines?',
+    options: [
+      'They compress the service binary more aggressively',
+      'They share the host kernel and isolate processes, rather than booting a full guest operating system',
+      'They run only interpreted languages',
+      'They disable all isolation between services',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does an orchestrator such as Kubernetes provide?',
+    options: [
+      'It compiles your service into a container image',
+      'It schedules containers onto machines, restarts failed ones, and reschedules them when a node dies',
+      'It replaces the need for a container registry',
+      'It guarantees a service never needs more than one replica',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a genuine cost of adopting containers at scale?',
+    options: [
+      'Services can no longer be deployed independently',
+      'You must operate an orchestrator and keep image supply-chain hygiene, and isolation is weaker than full VMs',
+      'Images can never be rolled back',
+      'Each service must share its dependencies with every other service',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="deployment-and-cross-cutting/service-per-container" questions={quizSPC} />
+
+<ProgressTracker client:visible id="deployment-and-cross-cutting/service-per-container" />
