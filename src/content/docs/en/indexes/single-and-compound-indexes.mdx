@@ -1,0 +1,204 @@
+---
+title: Single and compound indexes
+description: Create indexes on one field or several, choose ascending or descending order, and learn the prefix rule that decides which queries a compound index serves.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The simplest index covers one field. The moment your queries filter or sort on two fields together, you reach for a **compound index** — a single index that orders documents by several fields at once. Compound indexes are where most of the real power lives, and where most of the confusion lives too, because a compound index does not help every query that mentions its fields. The rule that governs which queries it serves is the **prefix rule**, and it is the most important idea in this lesson.
+
+Throughout we keep using the library `members` collection, each document carrying a `name`, a `joined` year, a `city`, and a `fines` count.
+
+## A single-field index
+
+You already met `createIndex` in the previous lesson. The direction — `1` for ascending, `-1` for descending — controls the sort order stored in the index. For a single-field index the direction rarely matters for filtering, because MongoDB can walk an index in either direction, but it matters for sorting. Here we index `fines` ascending:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ fines: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ fines: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("fines", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "fines", Value: 1}}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "fines": 1 }).build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The server confirms the index by name:
+
+```json
+{ "createdIndexes": ["fines_1"], "ok": 1 }
+```
+
+## A compound index over several fields
+
+A compound index lists more than one field, each with its own direction. The order of the fields in the index is not cosmetic — it defines the sort order, first by the first field, then by the second within each group of equal first values, and so on. Here we index `city` ascending and then `joined` descending, so members group by city and, inside each city, sort newest-first:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ city: 1, joined: -1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ city: 1, joined: -1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("city", 1), ("joined", -1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys: bson.D{{Key: "city", Value: 1}, {Key: "joined", Value: -1}},
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "city": 1, "joined": -1 })
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The generated name strings the fields and directions together:
+
+```json
+{ "createdIndexes": ["city_1_joined_-1"], "ok": 1 }
+```
+
+## The prefix rule
+
+A compound index can serve a query only when that query uses a **left-prefix** of the index fields — the first field, or the first two, or the first three, and so on, always starting from the left and never skipping. Our `city_1_joined_-1` index has two usable prefixes: `city` alone, and `city` together with `joined`.
+
+So this index helps a query that filters on `city` only:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ city: "Berlin" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").find({ city: "Berlin" }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    list(db.members.find({"city": "Berlin"}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"city": "Berlin"})
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let cur = coll.find(doc! { "city": "Berlin" }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+And it helps a query on `city` and `joined` together. But it does **not** help a query that filters on `joined` alone, because `joined` is not a left-prefix — the index is sorted by `city` first, so the join years are scattered across the whole structure with no way to seek straight to them. A query on `joined` alone would need its own index, or a compound index that begins with `joined`.
+
+You can see in `explain` which prefix a query matched, which is the subject of a later lesson. For now, the takeaway is structural: read a compound index left to right, and a query can ride it only as far as the unbroken run of leading fields it touches.
+
+**In Compass:** the **Indexes** tab lists each index with its fields and directions in order, so you can read off the available prefixes at a glance, and it reports each index's size on disk to help you judge whether it is earning its keep.
+
+## Tips and gotchas
+
+- One well-chosen compound index can replace several single-field ones. An index on `{ city: 1, joined: -1 }` already covers queries on `city` alone, so a separate `{ city: 1 }` index would be redundant.
+- Field order in a compound index is a design decision, not a detail. Reversing it changes which queries the index can serve.
+- Direction matters for sorting, not for simple equality matches. An index can be read forwards or backwards, so `{ joined: 1 }` and `{ joined: -1 }` both serve a plain equality filter on `joined` equally well; the difference shows up when you sort.
+- Skipping a leading field breaks the prefix. A query on the second field alone cannot use the index, no matter how selective that field is.
+
+<Callout title="Read a compound index left to right">
+A compound index serves any query that uses an unbroken run of its leading fields, starting from the first. The moment a query skips the leftmost field, the index can no longer seek for it.
+</Callout>
+
+export const quizCompound = [
+  {
+    q: 'You have a compound index on { city: 1, joined: -1 }. Which query can it serve with a seek?',
+    options: [
+      'A query filtering on joined only',
+      'A query filtering on city only',
+      'A query filtering on fines only',
+      'No query, because compound indexes need all fields',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the prefix rule say about a compound index?',
+    options: [
+      'It serves queries that use any subset of its fields',
+      'It serves queries that use a left-prefix of its fields, starting from the first',
+      'It serves only queries that use every field at once',
+      'It serves queries that use its last field first',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does field order matter in a compound index?',
+    options: [
+      'It changes the index name only',
+      'It defines the sort order and therefore which query prefixes the index can serve',
+      'It has no effect; MongoDB reorders the fields automatically',
+      'It only affects how the index is displayed in Compass',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/single-and-compound-indexes" questions={quizCompound} />
+
+<ProgressTracker client:visible id="indexes/single-and-compound-indexes" />

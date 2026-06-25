@@ -1,0 +1,84 @@
+---
+title: Querying in MongoDB
+description: An overview of reading documents with precision — filters, operators, projection, sorting, pagination, and how to reach into arrays and nested fields.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Inserting data is easy. The skill that separates someone who *stores* documents from someone who actually *uses* a database is reading them back with precision. Querying is the art of describing, exactly and no more, the subset of documents you care about — and then shaping what comes back so you receive only the fields you need, in the order you want, in pages small enough to handle. This module is entirely about that second half of the database: reading.
+
+We will keep working with a small, made-up collection of library `members` and the books they borrow, because tiny data keeps the queries in the spotlight. By the end you will be able to filter on comparisons and logical combinations, dig into arrays and embedded sub-documents, and trim, sort, and page through results without dragging the whole collection across the wire.
+
+export const queryOverviewDiagram = `flowchart LR
+  Q["Your query"] --> F["Filter: which documents"]
+  Q --> P["Projection: which fields"]
+  Q --> O["Order: sort"]
+  Q --> Pg["Page: limit and skip"]
+  F --> R["Result cursor"]
+  P --> R
+  O --> R
+  Pg --> R
+  R --> App["Your app"]`
+
+<Mermaid code={queryOverviewDiagram} title="A read request is four independent decisions — which documents, which fields, in what order, how many — that combine into one cursor" />
+
+## A query is a description, not a search loop
+
+When you query MongoDB you never write a loop. You hand the server a **filter document** that *describes* the documents you want, and the server finds them. A filter like the one below reads as "every member who joined in 2023 and currently owes nothing":
+
+```js
+db.members.find({ joined: 2023, fines: 0 })
+```
+
+The plainest filter pairs a field name with a value, and several pairs in the same filter are an implicit AND. From there, querying grows in four directions, and this module takes them one at a time.
+
+## What this module covers
+
+- **Comparison and logical operators.** Beyond exact matches: greater-than, less-than, membership in a set, the absence of a field, and how to combine conditions with explicit AND/OR/NOT. These are the everyday workhorses.
+- **Querying arrays.** A field can hold a list. You will learn to match a single element, to require several conditions on *the same* element with `$elemMatch`, to require that several values all be present with `$all`, and to filter by array length.
+- **Querying nested documents.** Documents nest. Dot notation lets you reach a field buried inside an embedded object, and there is an important difference between matching a whole sub-document exactly and matching just one of its fields.
+- **Projection, sorting, and pagination.** Once you have the right documents, you decide which fields to return, what order they arrive in, and how to slice a large result into manageable pages — and why one popular paging trick gets slow at scale.
+
+Every lesson shows the same query five ways — in `mongosh`, then the Node.js, Python, Go, and Rust drivers — alongside the JSON documents it would return, so you can read the shape of the answer, not just the call.
+
+<Callout title="Reading is the half of the database you will use most">
+Most application code reads far more than it writes. Time spent learning to write precise filters and lean projections pays back on every page load — a good query returns exactly the documents and fields you need, and nothing you have to throw away on the client.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'In MongoDB, what is a query filter?',
+    options: [
+      'A loop you write to scan every document',
+      'A document that describes which documents you want',
+      'A list of field names to return',
+      'A sort order applied to results',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A filter with two field/value pairs, such as joined and fines, means what?',
+    options: [
+      'Match documents where either condition holds',
+      'Match documents where both conditions hold (implicit AND)',
+      'Match documents where neither condition holds',
+      'It is invalid; only one pair is allowed',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which of these is NOT one of the four decisions a read request combines?',
+    options: ['Which documents (filter)', 'Which fields (projection)', 'How the documents are stored on disk', 'In what order and how many (sort, limit, skip)'],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="querying/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="querying/index" />

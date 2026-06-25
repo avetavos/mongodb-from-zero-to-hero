@@ -1,0 +1,283 @@
+---
+title: การค้นหา document
+description: อ่าน document กลับมาด้วย find และ findOne สร้าง filter แบบ equality และแบบหลาย field และ project field ที่คุณต้องการ
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การอ่านคือจุดที่ฐานข้อมูลพิสูจน์คุณค่าของมัน และ MongoDB มอบประตูสองบานเข้าสู่ห้องเดียวกันให้คุณ `findOne` ใช้สำหรับเมื่อคุณคาดหวัง document เพียงรายการเดียว — "สมาชิกชื่อ Grace คือใคร?" — แล้วมันยื่น document หนึ่งรายการนั้นหรือไม่ยื่นอะไรเลยให้คุณ `find` ใช้สำหรับเมื่อคุณอาจได้หลายรายการ — "สมาชิกคนใดบ้างที่เข้าร่วมในปี 2023?" — แล้วมันยื่น cursor ที่คุณวนซ้ำได้ให้คุณ ทั้งคู่รับ **filter** ชนิดเดียวกัน นั่นคือ document ที่อธิบายว่าคุณต้องการระเบียนใด
+
+ตลอดบทเรียนนี้ให้สมมติว่า collection `members` มีคนที่เรา insert ไว้ก่อนหน้านี้อยู่แล้ว เราจะถามคำถามที่แม่นยำขึ้นเรื่อย ๆ กับมัน
+
+## findOne เทียบกับ find
+
+ความแตกต่างคือรูปทรง ไม่ใช่ไวยากรณ์ `findOne` คืน document อย่างมากที่สุดหนึ่งรายการโดยตรง `find` คืน cursor — handle แบบ lazy ที่ driver วนซ้ำเพื่อดึง document มาทีละชุด — ดังนั้นโดยปกติคุณจะแปลงมันเป็น array (หรือวนลูปครอบมัน) เพื่อดูผลลัพธ์
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.findOne({ name: "Grace" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const member = await db.collection("members").findOne({ name: "Grace" });
+    console.log(member);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    member = db.members.find_one({"name": "Grace"})
+    print(member)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var member bson.M
+    err := coll.FindOne(ctx, bson.M{"name": "Grace"}).Decode(&member)
+    if err != nil {
+        return err
+    }
+    fmt.Println(member)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let member = coll.find_one(doc! { "name": "Grace" }).await?;
+    println!("{:?}", member);
+    ```
+  </TabItem>
+</Tabs>
+
+document รายการเดียวที่ตรงกันกลับมาแบบเต็ม ๆ รวมถึง `_id` ด้วย:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
+  "name": "Grace",
+  "joined": 2024,
+  "fines": 0
+}
+```
+
+filter ที่ว่างเปล่าตรงกับทุกอย่าง ซึ่งเป็นวิธีที่คุณอ่าน collection ทั้งก้อน ด้วย `find` คุณจะได้ cursor ครอบทั้งหมดของมัน:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({})
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const all = await db.collection("members").find({}).toArray();
+    console.log(all);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    all_members = list(db.members.find({}))
+    print(all_members)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{})
+    if err != nil {
+        return err
+    }
+    var all []bson.M
+    if err := cur.All(ctx, &all); err != nil {
+        return err
+    }
+    fmt.Println(all)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use futures::stream::TryStreamExt;
+
+    let mut cursor = coll.find(doc! {}).await?;
+    while let Some(member) = cursor.try_next().await? {
+        println!("{:?}", member);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## filter แบบ equality
+
+filter ที่ระบุ field และค่าหมายความว่า "field นี้เท่ากับค่านี้" วาง field หลาย ๆ ตัวซ้อนกันใน filter เดียว แล้ว MongoDB จะปฏิบัติกับมันเป็น **implicit AND** — document ต้องตรงกับทุกเงื่อนไขจึงจะถูกคืนกลับมา ในที่นี้เราขอสมาชิกที่เข้าร่วมในปี 2023 *และ* ไม่มีค่าปรับค้างชำระ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ joined: 2023, fines: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const matches = await db
+      .collection("members")
+      .find({ joined: 2023, fines: 0 })
+      .toArray();
+    console.log(matches);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    matches = list(db.members.find({"joined": 2023, "fines": 0}))
+    print(matches)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"joined": 2023, "fines": 0})
+    if err != nil {
+        return err
+    }
+    var matches []bson.M
+    if err := cur.All(ctx, &matches); err != nil {
+        return err
+    }
+    fmt.Println(matches)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use futures::stream::TryStreamExt;
+
+    let mut cursor = coll.find(doc! { "joined": 2023, "fines": 0 }).await?;
+    let matches: Vec<_> = cursor.try_collect().await?;
+    println!("{:?}", matches);
+    ```
+  </TabItem>
+</Tabs>
+
+ผลลัพธ์คือรายการของ document ที่ตรงกับทั้งสองเงื่อนไข:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "joined": 2023,
+    "fines": 0
+  }
+]
+```
+
+## การได้ลิ้มลอง projection เป็นครั้งแรก
+
+โดยปริยายการอ่านจะคืนทุก field ของทุก document ที่ตรงกัน **projection** ให้คุณขอเฉพาะ field ที่คุณสนใจ ซึ่งช่วยลดข้อมูลที่ส่งผ่านสายลง คุณส่ง document ตัวที่สองเข้าไปโดยที่ `1` หมายถึง "รวม field นี้" ในที่นี้เราต้องการเพียงชื่อ และเราปิด `_id` อย่างชัดเจนด้วยการกำหนดให้เป็น `0`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ joined: 2023 }, { name: 1, _id: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const names = await db
+      .collection("members")
+      .find({ joined: 2023 }, { projection: { name: 1, _id: 0 } })
+      .toArray();
+    console.log(names);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    names = list(db.members.find({"joined": 2023}, {"name": 1, "_id": 0}))
+    print(names)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetProjection(bson.M{"name": 1, "_id": 0})
+    cur, err := coll.Find(ctx, bson.M{"joined": 2023}, opts)
+    if err != nil {
+        return err
+    }
+    var names []bson.M
+    if err := cur.All(ctx, &names); err != nil {
+        return err
+    }
+    fmt.Println(names)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use futures::stream::TryStreamExt;
+    use mongodb::options::FindOptions;
+
+    let opts = FindOptions::builder()
+        .projection(doc! { "name": 1, "_id": 0 })
+        .build();
+    let mut cursor = coll.find(doc! { "joined": 2023 }).with_options(opts).await?;
+    let names: Vec<_> = cursor.try_collect().await?;
+    println!("{:?}", names);
+    ```
+  </TabItem>
+</Tabs>
+
+ตอนนี้ผลลัพธ์แต่ละรายการมีเฉพาะ field ที่ร้องขอเท่านั้น:
+
+```json
+[{ "name": "Margaret" }]
+```
+
+**ใน Compass:** พิมพ์ filter ลงในแถบ **Filter** ที่ด้านบนของแท็บ Documents แล้วกด **Find** เปิดแผง **Options** เพื่อกรอก projection โดยไม่ต้องเขียนการเรียกด้วยมือ
+
+## เคล็ดลับและจุดที่ต้องระวัง
+
+- `find` คืน **cursor** ไม่ใช่ list ไม่มีอะไรถูกดึงมาจนกว่าคุณจะวนซ้ำมัน (หรือเรียกตัวช่วยอย่าง `toArray`) `findOne` แท้จริงแล้วคือ cursor ที่หยุดหลังจาก document แรก
+- field `_id` ถูก **รวมไว้โดยปริยาย** ในทุก projection ถ้าคุณไม่ต้องการมัน คุณต้องปิดมันอย่างชัดเจนด้วย `_id: 0`
+- อย่าผสม `1` และ `0` ใน projection เดียวกัน ยกเว้นสำหรับ `_id` ให้เลือกระหว่างการระบุ field ที่คุณต้องการ หรือระบุ field ที่คุณต้องการตัดออก — ไม่ใช่ทั้งสองอย่าง
+- filter ที่ไม่ตรงกับอะไรเลยคืน cursor ที่ว่างเปล่า (หรือสำหรับ `findOne` คือผลลัพธ์ที่เป็น null) นั่นเป็นคำตอบปกติ ไม่ใช่ error
+
+<Callout title="filter ก็เป็นแค่ document">
+query filter คือ document ที่อธิบาย document ที่คุณต้องการ ระบุ field หลายตัว แล้ว MongoDB จะกำหนดให้ทั้งหมดต้องตรงกัน — implicit AND นั้นคือม้างานเบื้องหลังการอ่านในชีวิตประจำวันส่วนใหญ่
+</Callout>
+
+export const quizFind = [
+  {
+    q: 'find คืนอะไร เมื่อเทียบกับ findOne?',
+    options: [
+      'document รายการเดียว ส่วน findOne คืน list',
+      'cursor ครอบทุกรายการที่ตรงกัน ส่วน findOne คืน document อย่างมากที่สุดหนึ่งรายการ',
+      'สิ่งเดียวกันเป๊ะในทั้งสองกรณี',
+      'error ถ้ามี document ตรงกันมากกว่าหนึ่งรายการ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน filter ที่มีสอง field เงื่อนไขถูกรวมกันอย่างไร?',
+    options: [
+      'ด้วย implicit OR — เงื่อนไขใดก็ได้อาจตรงกัน',
+      'ด้วย implicit AND — ทุกเงื่อนไขต้องตรงกัน',
+      'ใช้เฉพาะ field แรกเท่านั้น',
+      'ใช้เฉพาะ field สุดท้ายเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณกัน _id ออกจาก projection ได้อย่างไร?',
+    options: [
+      'มันถูกตัดออกโดยปริยาย',
+      'คุณไม่สามารถตัด _id ออกได้',
+      'กำหนด _id เป็น 0 อย่างชัดเจน',
+      'ระบุ field อื่น ๆ ทุกตัว แล้ว _id จะหลุดออกไปโดยอัตโนมัติ',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="crud/find-and-query-filters" questions={quizFind} />
+
+<ProgressTracker client:visible id="crud/find-and-query-filters" />

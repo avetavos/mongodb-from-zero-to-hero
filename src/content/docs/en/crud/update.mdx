@@ -1,0 +1,462 @@
+---
+title: Updating documents
+description: Change documents with updateOne and updateMany using $set, $inc, $unset, $push, and $pull, and read the match counts a write returns.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Updating is the operation people most often get subtly wrong, because the obvious mental model — "find the document and overwrite a field" — is not how MongoDB works by default. An update is two documents: a **filter** that selects which documents to change, and an **update document** built from **operators** that describe the change. The operators are the whole point. They let you bump a number, set a field, remove a field, or push onto an array without touching anything else in the document.
+
+We will keep editing our library `members`. Every example below shows the document **before** and **after** so you can see exactly what each operator did.
+
+## updateOne with $set
+
+`$set` writes a value into a field. If the field exists it is overwritten; if it does not exist it is created. `updateOne` applies the change to the **first** document that matches the filter and stops there. Here we record that Edsger paid off his fines:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Edsger" },
+      { $set: { fines: 0 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").updateOne(
+      { name: "Edsger" },
+      { $set: { fines: 0 } }
+    );
+    console.log(res.matchedCount, res.modifiedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.update_one(
+        {"name": "Edsger"},
+        {"$set": {"fines": 0}},
+    )
+    print(res.matched_count, res.modified_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Edsger"},
+        bson.M{"$set": bson.M{"fines": 0}},
+    )
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.MatchedCount, res.ModifiedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll
+        .update_one(
+            doc! { "name": "Edsger" },
+            doc! { "$set": { "fines": 0 } },
+        )
+        .await?;
+    println!("{} {}", res.matched_count, res.modified_count);
+    ```
+  </TabItem>
+</Tabs>
+
+Before the update, Edsger owed five:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d3", "name": "Edsger", "joined": 2022, "fines": 5 }
+```
+
+After it, only the `fines` field changed:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d3", "name": "Edsger", "joined": 2022, "fines": 0 }
+```
+
+The acknowledgement tells you how the operation went. `matchedCount` is how many documents the filter found; `modifiedCount` is how many actually changed:
+
+```json
+{ "acknowledged": true, "matchedCount": 1, "modifiedCount": 1 }
+```
+
+If you run the very same update again, the value is already `0`, so `matchedCount` stays `1` but `modifiedCount` is `0` — the document matched but nothing needed changing.
+
+## $inc, and adding new fields
+
+`$inc` adds a number to a field (use a negative number to subtract). It is atomic, which is the right tool for counters and balances. `$set` doubles as a way to **add** a field that was never there — here we both charge a late fee and stamp the member with a `lastSeen` year in one call:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Linus" },
+      { $inc: { fines: 3 }, $set: { lastSeen: 2026 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Linus" },
+      { $inc: { fines: 3 }, $set: { lastSeen: 2026 } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Linus"},
+        {"$inc": {"fines": 3}, "$set": {"lastSeen": 2026}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Linus"},
+        bson.M{
+            "$inc": bson.M{"fines": 3},
+            "$set": bson.M{"lastSeen": 2026},
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Linus" },
+        doc! { "$inc": { "fines": 3 }, "$set": { "lastSeen": 2026 } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Before, Linus had two fines and no `lastSeen` field:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 2 }
+```
+
+After, the count went up by three and a brand-new field appeared:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Linus",
+  "joined": 2023,
+  "fines": 5,
+  "lastSeen": 2026
+}
+```
+
+## Removing a field with $unset
+
+To delete a field entirely — not set it to `null`, but make it stop existing — use `$unset`. The value you give it is ignored; only the field name matters. Here we strip the `lastSeen` field back off Linus:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Linus" },
+      { $unset: { lastSeen: "" } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Linus" },
+      { $unset: { lastSeen: "" } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Linus"},
+        {"$unset": {"lastSeen": ""}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Linus"},
+        bson.M{"$unset": bson.M{"lastSeen": ""}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Linus" },
+        doc! { "$unset": { "lastSeen": "" } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The `lastSeen` field is gone again, and nothing else moved:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 }
+```
+
+## Working with arrays: $push and $pull
+
+Documents often hold arrays, and you rarely want to replace the whole array to add or remove one element. `$push` appends an element; `$pull` removes every element matching a value. Imagine each member carries a `borrowed` array of book titles. First we lend a book to Margaret:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Margaret" },
+      { $push: { borrowed: "Compilers" } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Margaret" },
+      { $push: { borrowed: "Compilers" } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Margaret"},
+        {"$push": {"borrowed": "Compilers"}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Margaret"},
+        bson.M{"$push": bson.M{"borrowed": "Compilers"}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Margaret" },
+        doc! { "$push": { "borrowed": "Compilers" } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+If the `borrowed` field did not exist yet, `$push` creates it as a one-element array:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+  "name": "Margaret",
+  "joined": 2023,
+  "fines": 0,
+  "borrowed": ["Compilers"]
+}
+```
+
+When the book comes back, `$pull` removes it by value:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Margaret" },
+      { $pull: { borrowed: "Compilers" } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Margaret" },
+      { $pull: { borrowed: "Compilers" } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Margaret"},
+        {"$pull": {"borrowed": "Compilers"}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Margaret"},
+        bson.M{"$pull": bson.M{"borrowed": "Compilers"}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Margaret" },
+        doc! { "$pull": { "borrowed": "Compilers" } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The element is gone and the array is empty again:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+  "name": "Margaret",
+  "joined": 2023,
+  "fines": 0,
+  "borrowed": []
+}
+```
+
+## updateMany: changing every match
+
+`updateMany` is the same call as `updateOne`, but it applies the change to **every** document the filter selects. Here we forgive one fine for everyone who currently owes something — note the negative `$inc`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateMany(
+      { fines: { $gt: 0 } },
+      { $inc: { fines: -1 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").updateMany(
+      { fines: { $gt: 0 } },
+      { $inc: { fines: -1 } }
+    );
+    console.log(res.matchedCount, res.modifiedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.update_many(
+        {"fines": {"$gt": 0}},
+        {"$inc": {"fines": -1}},
+    )
+    print(res.matched_count, res.modified_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.UpdateMany(
+        ctx,
+        bson.M{"fines": bson.M{"$gt": 0}},
+        bson.M{"$inc": bson.M{"fines": -1}},
+    )
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.MatchedCount, res.ModifiedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll
+        .update_many(
+            doc! { "fines": { "$gt": 0 } },
+            doc! { "$inc": { "fines": -1 } },
+        )
+        .await?;
+    println!("{} {}", res.matched_count, res.modified_count);
+    ```
+  </TabItem>
+</Tabs>
+
+The counts now reflect everyone who was touched in this single operation:
+
+```json
+{ "acknowledged": true, "matchedCount": 2, "modifiedCount": 2 }
+```
+
+**In Compass:** double-click any field value in the Documents tab to edit it inline, or use the **Update** button after entering a filter to apply an update document to many matches at once.
+
+## Tips and gotchas
+
+- **The most important gotcha:** if you pass an update document with *no operators* — a plain document like the one you would insert — MongoDB treats it as a **full replacement** and wipes every field you did not include. Almost always you want `$set`, not a bare replacement.
+- `matchedCount` and `modifiedCount` can differ. A document can match the filter yet not be modified, because the new value equals the old one. Re-running an idempotent update is the classic case.
+- `updateMany` has no built-in limit — it changes *every* match. Double-check your filter before running one; a too-broad filter quietly rewrites more documents than you meant.
+- `$set` creates missing fields, `$unset` removes them, and `$inc` works even when the field is absent (it starts from zero). These operators are forgiving about whether the field already exists.
+
+<Callout title="Reach for an operator, not a replacement">
+The single rule that prevents the worst update bug: to change part of a document, wrap your change in $set (or $inc, $push, $unset, …). A bare document with no operators replaces the whole thing.
+</Callout>
+
+export const quizUpdate = [
+  {
+    q: 'You call updateOne with a plain document and no operators. What happens?',
+    options: [
+      'Only the listed fields are changed; the rest are kept',
+      'The whole matching document is replaced, dropping fields you did not include',
+      'The call is rejected as invalid',
+      'A new document is inserted instead',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'matchedCount is 1 but modifiedCount is 0 after an update. Why?',
+    options: [
+      'The filter matched nothing',
+      'The update document was empty',
+      'A document matched, but the new value equalled the existing one',
+      'updateOne never reports modifiedCount',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which operator removes a field from a document entirely?',
+    options: ['$set with null', '$pull', '$unset', '$inc with 0'],
+    answer: 2,
+  },
+  {
+    q: 'How do you append one element to an array field without replacing the array?',
+    options: ['$set the whole array', '$push', '$inc', '$add'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="crud/update" questions={quizUpdate} />
+
+<ProgressTracker client:visible id="crud/update" />

@@ -1,0 +1,187 @@
+---
+title: Single-document atomicity
+description: Why any update to one document — including nested fields and arrays — is all-or-nothing, and how to model related data together so you rarely need a transaction.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The strongest guarantee MongoDB gives you is also the quietest, because it costs nothing and asks nothing of you. Every write to a **single document** happens as one indivisible step. If your update sets three fields, increments a counter, and pushes onto an array all at once, every reader sees either none of those changes or all of them — never a half-applied state. And if anything goes wrong mid-write, the document is left exactly as it was before. This is true no matter how deep the change goes: nested objects and arrays inside the document are part of the same atomic unit.
+
+We will keep working with our library `members`. Picture a member document that bundles together everything about one person — their fines, the books they currently hold, and a small activity log:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Ada",
+  "fines": 4,
+  "borrowed": ["Algorithms"],
+  "activity": { "lastVisit": 2025, "visits": 12 }
+}
+```
+
+## One write, many changes, still atomic
+
+Suppose Ada returns a book, pays off two fines, and visits the library — three logical changes that all happen on this one visit. Because they all live in **one document**, a single update applies them together. There is no transaction to open and no session to manage; the operators do the work and the whole update lands at once:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Ada" },
+      {
+        $inc: { fines: -2, "activity.visits": 1 },
+        $set: { "activity.lastVisit": 2026 },
+        $pull: { borrowed: "Algorithms" }
+      }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Ada" },
+      {
+        $inc: { fines: -2, "activity.visits": 1 },
+        $set: { "activity.lastVisit": 2026 },
+        $pull: { borrowed: "Algorithms" }
+      }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Ada"},
+        {
+            "$inc": {"fines": -2, "activity.visits": 1},
+            "$set": {"activity.lastVisit": 2026},
+            "$pull": {"borrowed": "Algorithms"},
+        },
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Ada"},
+        bson.M{
+            "$inc":  bson.M{"fines": -2, "activity.visits": 1},
+            "$set":  bson.M{"activity.lastVisit": 2026},
+            "$pull": bson.M{"borrowed": "Algorithms"},
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Ada" },
+        doc! {
+            "$inc": { "fines": -2, "activity.visits": 1 },
+            "$set": { "activity.lastVisit": 2026 },
+            "$pull": { "borrowed": "Algorithms" }
+        },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Every part of the change landed together, and no reader could ever have seen the document with, say, the fine reduced but the book still on loan:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Ada",
+  "fines": 2,
+  "borrowed": [],
+  "activity": { "lastVisit": 2026, "visits": 13 }
+}
+```
+
+The update operators themselves are atomic. An `$inc` reads the current value and adds to it as one step, so two concurrent increments never lose an update by both reading the same starting number. That property is exactly why counters and balances belong inside a single document rather than being computed in your application and written back.
+
+## Model so related data lives together
+
+The practical lesson is a modelling one. When data changes together, store it together, and the free atomicity will cover it. Our member document already does this: the fines, the loans, and the activity log are all embedded, so the whole of one member's state moves as a unit. Had we split the activity log into a separate `activity` collection keyed by member, that same visit would have spanned two documents and forced us to choose between giving up atomicity or paying for a transaction.
+
+This is the heart of why MongoDB's document model and its consistency model fit together. The relational habit of normalising everything into separate tables creates multi-row updates that need transactions to stay consistent. The document habit of embedding what belongs together turns many of those into a single atomic write.
+
+export const embedDiagram = `flowchart LR
+  A["One member document"] --> B["fines"]
+  A --> C["borrowed array"]
+  A --> D["activity object"]
+  B --> E["A single update changes all three atomically"]
+  C --> E
+  D --> E`
+
+<Mermaid code={embedDiagram} title="Embedding related data in one document means one atomic write keeps it all consistent" />
+
+**In Compass:** open a member document in the Documents tab and expand the nested `activity` object and the `borrowed` array. Editing several of these fields and clicking **Update** applies them as one atomic write, the same as the driver calls above.
+
+## Tips and gotchas
+
+- Atomicity is per **document**, not per **operation**. A single `updateMany` that touches a thousand documents is a thousand independent atomic writes, not one big atomic step — another reader can see some of them applied and others not yet.
+- Reads do not block on these writes. A reader either gets the document before the write or after it; it never waits for a half-written state, because there is no half-written state to wait for.
+- Embedding is not free in every case. If a document would grow without bound — an activity log with millions of entries — splitting it out may be the right call, and then you accept that those changes need a different consistency strategy.
+
+<Callout title="Embedding gives you atomicity for free">
+The cheapest transaction is the one you never need. Model data that changes together into a single document and one ordinary update keeps it consistent, with no session, no commit, and no extra cost.
+</Callout>
+
+export const quizSingle = [
+  {
+    q: 'An update sets two fields and pushes onto an array in one document. What can another reader observe?',
+    options: [
+      'Possibly the field changes without the array change',
+      'Either none of the changes or all of them — never a partial state',
+      'Always the array change first, then the fields',
+      'A locked document that returns an error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why are $inc counters safe under concurrency inside one document?',
+    options: [
+      'The driver retries until it wins',
+      'Each $inc reads and adds as one atomic step, so no update is lost',
+      'MongoDB serialises the whole collection',
+      'Counters are stored outside the document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the main modelling lesson of single-document atomicity?',
+    options: [
+      'Normalise everything into separate collections',
+      'Store data that changes together in the same document',
+      'Always use a transaction to be safe',
+      'Avoid arrays and nested objects entirely',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Is a single updateMany over many documents one atomic step?',
+    options: [
+      'Yes, the whole batch is atomic',
+      'No, it is many independent per-document atomic writes',
+      'Only if all documents are in one collection',
+      'Only with a write concern of majority',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/single-document-atomicity" questions={quizSingle} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/single-document-atomicity" />

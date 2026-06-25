@@ -1,0 +1,381 @@
+---
+title: $facet and buckets
+description: Run several sub-pipelines in one pass with $facet, and group values into histogram-style ranges with $bucket and $bucketAuto.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The last two stages in this module answer questions that need *several* summaries at once. `$facet` runs many sub-pipelines side by side over the same input, so you can get a page of results and the total count and a breakdown in a single trip. `$bucket` and `$bucketAuto` group documents into ranges, the way a histogram sorts values into bins. Together they power the "dashboard" style query: one request, many panels.
+
+We return to the flat `sales` collection, where each document is a single order with a `price`, `quantity`, and `genre`.
+
+## $facet runs sub-pipelines in parallel
+
+`$facet` takes an object whose keys are names you choose and whose values are **sub-pipelines**. Each sub-pipeline sees the **same** input documents — the ones that reached the `$facet` stage — and produces its own array of results. The output is one document with a field per facet. The classic use is "results plus a total count" for a paged listing:
+
+export const facetFlow = `flowchart LR
+  In["sales documents"] --> F["$facet"]
+  F --> A["pageResults sub-pipeline"]
+  F --> B["totalCount sub-pipeline"]
+  F --> C["byGenre sub-pipeline"]
+  A --> Out["one document with three fields"]
+  B --> Out
+  C --> Out`
+
+<Mermaid code={facetFlow} title="One stage, several sub-pipelines over the same input, merged into a single result document" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $facet: {
+          topOrders: [
+            { $sort: { price: -1 } },
+            { $limit: 2 },
+            { $project: { _id: 0, title: 1, price: 1 } }
+          ],
+          totalCount: [
+            { $count: "orders" }
+          ],
+          byGenre: [
+            { $group: { _id: "$genre", count: { $sum: 1 } } }
+          ]
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $facet: {
+          topOrders: [
+            { $sort: { price: -1 } },
+            { $limit: 2 },
+            { $project: { _id: 0, title: 1, price: 1 } },
+          ],
+          totalCount: [
+            { $count: "orders" },
+          ],
+          byGenre: [
+            { $group: { _id: "$genre", count: { $sum: 1 } } },
+          ],
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$facet": {
+            "topOrders": [
+                {"$sort": {"price": -1}},
+                {"$limit": 2},
+                {"$project": {"_id": 0, "title": 1, "price": 1}},
+            ],
+            "totalCount": [
+                {"$count": "orders"},
+            ],
+            "byGenre": [
+                {"$group": {"_id": "$genre", "count": {"$sum": 1}}},
+            ],
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$facet", bson.D{
+            {"topOrders", bson.A{
+                bson.D{{"$sort", bson.D{{"price", -1}}}},
+                bson.D{{"$limit", 2}},
+                bson.D{{"$project", bson.D{{"_id", 0}, {"title", 1}, {"price", 1}}}},
+            }},
+            {"totalCount", bson.A{
+                bson.D{{"$count", "orders"}},
+            }},
+            {"byGenre", bson.A{
+                bson.D{{"$group", bson.D{{"_id", "$genre"}, {"count", bson.D{{"$sum", 1}}}}}},
+            }},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$facet": {
+            "topOrders": [
+                { "$sort": { "price": -1 } },
+                { "$limit": 2 },
+                { "$project": { "_id": 0, "title": 1, "price": 1 } }
+            ],
+            "totalCount": [
+                { "$count": "orders" }
+            ],
+            "byGenre": [
+                { "$group": { "_id": "$genre", "count": { "$sum": 1 } } }
+            ]
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+One document comes back, each facet under its own key:
+
+```json
+[
+  {
+    "topOrders": [
+      { "title": "Cosmos", "price": 22 },
+      { "title": "Foundation", "price": 15 }
+    ],
+    "totalCount": [ { "orders": 6 } ],
+    "byGenre": [
+      { "_id": "fiction", "count": 4 },
+      { "_id": "science", "count": 2 }
+    ]
+  }
+]
+```
+
+**In Compass:** `$facet` is available in the **Aggregations** tab, and each sub-pipeline can be built and previewed before you combine them. It is the natural way to assemble a results-plus-count query for a paginated screen.
+
+## $bucket groups into explicit ranges
+
+`$bucket` sorts documents into bins you define by their **boundaries**. You give a `groupBy` expression, an ascending array of `boundaries`, a `default` bucket for values that fall outside, and an `output` of accumulators per bucket. Here we bin orders by price into "cheap," "mid," and "premium" bands:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $bucket: {
+          groupBy: "$price",
+          boundaries: [0, 10, 20, 100],
+          default: "other",
+          output: {
+            count: { $sum: 1 },
+            titles: { $push: "$title" }
+          }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $bucket: {
+          groupBy: "$price",
+          boundaries: [0, 10, 20, 100],
+          default: "other",
+          output: {
+            count: { $sum: 1 },
+            titles: { $push: "$title" },
+          },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$bucket": {
+            "groupBy": "$price",
+            "boundaries": [0, 10, 20, 100],
+            "default": "other",
+            "output": {
+                "count": {"$sum": 1},
+                "titles": {"$push": "$title"},
+            },
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$bucket", bson.D{
+            {"groupBy", "$price"},
+            {"boundaries", bson.A{0, 10, 20, 100}},
+            {"default", "other"},
+            {"output", bson.D{
+                {"count", bson.D{{"$sum", 1}}},
+                {"titles", bson.D{{"$push", "$title"}}},
+            }},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$bucket": {
+            "groupBy": "$price",
+            "boundaries": [0, 10, 20, 100],
+            "default": "other",
+            "output": {
+                "count": { "$sum": 1 },
+                "titles": { "$push": "$title" }
+            }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Each bucket's `_id` is its lower boundary, and the accumulators summarise the orders that landed there:
+
+```json
+[
+  { "_id": 0, "count": 2, "titles": ["Cheap Reads", "Pocket Atlas"] },
+  { "_id": 10, "count": 3, "titles": ["Dune", "Foundation", "Neuromancer"] },
+  { "_id": 20, "count": 1, "titles": ["Cosmos"] }
+]
+```
+
+## $bucketAuto picks the boundaries for you
+
+When you do not know good boundaries up front, `$bucketAuto` chooses them so the documents spread across a target number of buckets as evenly as it can. You give a `groupBy` and a `buckets` count; it returns each bucket's `min` and `max` inside its `_id`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $bucketAuto: {
+          groupBy: "$price",
+          buckets: 3
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $bucketAuto: {
+          groupBy: "$price",
+          buckets: 3,
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$bucketAuto": {
+            "groupBy": "$price",
+            "buckets": 3,
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$bucketAuto", bson.D{
+            {"groupBy", "$price"},
+            {"buckets", 3},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$bucketAuto": {
+            "groupBy": "$price",
+            "buckets": 3
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The boundaries are computed for you, each bucket carrying its range and a count:
+
+```json
+[
+  { "_id": { "min": 8, "max": 12 }, "count": 2 },
+  { "_id": { "min": 12, "max": 18 }, "count": 2 },
+  { "_id": { "min": 18, "max": 22 }, "count": 2 }
+]
+```
+
+## Tips and gotchas
+
+- Each `$facet` sub-pipeline starts from the **same** input. Filter *before* the `$facet` if you want every facet to share a narrowed set, rather than repeating the `$match` inside each one.
+- `$facet` cannot use an index on its sub-pipelines, since they run over already-streamed documents. Keep the input small by matching early.
+- `$bucket` requires `boundaries` in ascending order; a value below the first or above the last boundary goes to `default`, and without a `default` such values raise an error.
+- `$bucketAuto` aims for even bucket sizes but will not split identical values across buckets, so the counts can come out uneven when many documents share a value.
+
+<Callout title="Many answers in one pass, or values into bins">
+$facet computes several sub-pipelines over the same input and returns them as fields of one document — ideal for results-plus-count. $bucket and $bucketAuto group a numeric expression into ranges: you supply the boundaries for $bucket, and $bucketAuto picks them to balance the bins.
+</Callout>
+
+export const quizFacets = [
+  {
+    q: 'What input does each sub-pipeline of a $facet stage receive?',
+    options: [
+      'The output of the sub-pipeline listed before it',
+      'The same set of documents that reached the $facet stage',
+      'A random subset of the collection',
+      'Only the documents matched by the first facet',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A common use of $facet is to return paged results together with which other thing in one query?',
+    options: [
+      'A second copy of the collection',
+      'The total count of matching documents',
+      'The database server logs',
+      'A list of indexes',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In $bucket, where does a value that falls outside all boundaries go?',
+    options: [
+      'Into the first bucket',
+      'Into the last bucket',
+      'Into the default bucket (or an error if none is set)',
+      'It is silently dropped',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'How does $bucketAuto differ from $bucket?',
+    options: [
+      'It requires you to list boundaries explicitly',
+      'It chooses boundaries itself to spread documents across a target bucket count',
+      'It can only bucket strings',
+      'It returns a single grand-total document',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/facets-and-buckets" questions={quizFacets} />
+
+<ProgressTracker client:visible id="aggregation/facets-and-buckets" />

@@ -1,0 +1,167 @@
+---
+title: The shell and Compass
+description: mongosh basics, a tour of the Compass GUI, and how to connect to MongoDB from each of the five environments.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+There are three ways you will talk to MongoDB: the **mongosh** shell for quick, scriptable commands; **MongoDB Compass**, the official graphical client, for clicking around and exploring; and a **driver** in your application's language for the real work. This lesson covers all three, ending with how to open a connection from each of the five environments this course uses.
+
+Every one of them connects with the same kind of address — a **connection string** — so once you understand that, switching between tools is trivial.
+
+## mongosh basics
+
+`mongosh` is an interactive JavaScript shell. You type a command, it runs against the server, and it prints the result. A handful of commands cover almost everything you do day to day:
+
+```js
+show dbs
+```
+
+`show dbs` lists the databases on the server. To start working inside one — say a `library` database — you `use` it. The database does not need to exist yet; MongoDB creates it the moment you write the first document into it:
+
+```js
+use library
+```
+
+Now `db` refers to the `library` database. Reading documents out of a collection is `db.<collection>.find()`:
+
+```js
+db.members.find()
+```
+
+When a query returns more documents than fit on screen, mongosh shows the first batch and prints `Type "it" for more`. Typing `it` fetches the next batch — `it` stands for **iterate**:
+
+```js
+it
+```
+
+That is the core loop: `show dbs` to see what is there, `use` to pick a database, `db.coll.find()` to read, and `it` to page through results.
+
+## A tour of Compass
+
+**MongoDB Compass** is the official desktop GUI, and it is the friendliest way to explore data you do not yet understand. You connect by pasting a connection string into the box on the start screen — for a local Docker setup that is something like `mongodb://localhost:27017`, or `mongodb://root:secret@localhost:27017` if you enabled authentication — and clicking **Connect**.
+
+Once connected, the left sidebar lists your **databases**, and expanding one lists its **collections**. Clicking a collection opens it, and across the top you get a row of tabs that map onto the things you will learn in this course:
+
+- The **Documents** tab shows the actual documents. You can scroll them, edit a field by double-clicking its value, and add a new document with the green **ADD DATA** button in the top right.
+- The **Schema** tab samples the collection and draws a picture of which fields exist and what types they hold — a quick way to understand an unfamiliar collection without reading every document.
+- The **Aggregations** tab is a visual pipeline builder. You add stages one at a time and watch the documents transform, which makes the aggregation module much easier to follow.
+- The **Explain Plan** (available when you run a query) shows how MongoDB executed it — whether it used an index or scanned everything — which is the heart of the indexes module.
+
+Compass and the shell are complementary: Compass for seeing and exploring, the shell for repeating and scripting. Neither replaces a driver in your application code.
+
+## Connecting from each environment
+
+When it is time to write an application, you connect with a **driver**. The connection string is the same; only the API around it differs. Here is how to open a connection in each of the five environments — the shell simply starts with the string, while each driver creates a client and verifies it with a ping.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    mongosh "mongodb://localhost:27017"
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { MongoClient } from "mongodb";
+
+    const client = new MongoClient("mongodb://localhost:27017");
+    await client.connect();
+    await client.db("library").command({ ping: 1 });
+    console.log("connected");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import MongoClient
+
+    client = MongoClient("mongodb://localhost:27017")
+    client.admin.command("ping")
+    print("connected")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
+    if err != nil {
+        return err
+    }
+    if err := client.Ping(ctx, nil); err != nil {
+        return err
+    }
+    fmt.Println("connected")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let client = Client::with_uri_str("mongodb://localhost:27017").await?;
+    client
+        .database("library")
+        .run_command(doc! { "ping": 1 })
+        .await?;
+    println!("connected");
+    ```
+  </TabItem>
+</Tabs>
+
+Once a client is connected, you reuse it for the whole life of your program. Creating a fresh client per request is a common and costly mistake — the client manages a pool of connections that is meant to be shared.
+
+## Choosing a tool
+
+export const toolDiagram = `flowchart TD
+  Q["What do you want to do"] --> S["Quick one-off command or a script"]
+  Q --> C["Explore and understand unfamiliar data"]
+  Q --> D["Build a feature in your app"]
+  S --> SH["mongosh shell"]
+  C --> CO["Compass GUI"]
+  D --> DR["A driver in your language"]`
+
+<Mermaid code={toolDiagram} title="Pick the shell for scripting, Compass for exploring, and a driver for application code" />
+
+## Tips and gotchas
+
+- **The connection string format** is `mongodb://[user:password@]host:port[/database]`. The host and port are the only required parts; credentials and a default database are optional.
+- **Use the shell vs Compass vs a driver** by intent: the shell for fast and repeatable commands, Compass for visual exploration and schema discovery, and a driver for anything your application does in production.
+- **Authentication** changes the string, not the workflow. If you set a root user in the Docker lesson, include `root:secret@` before the host in every tool.
+- **Reuse one client.** All the drivers are built around a long-lived client object with an internal connection pool. Create it once at startup.
+
+<Callout title="One string, three doors">
+The shell, Compass, and every driver all open the same database through the same connection string. Learn the string once and you can reach MongoDB from anywhere.
+</Callout>
+
+export const quizShell = [
+  {
+    q: 'In mongosh, what does typing "it" do after a find()?',
+    options: [
+      'Inserts a test document',
+      'Iterates — fetches the next batch of results',
+      'Switches to a different database',
+      'Repeats the last command',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which Compass tab samples a collection and shows which fields and types exist?',
+    options: ['Documents', 'Schema', 'Explain Plan', 'Indexes'],
+    answer: 1,
+  },
+  {
+    q: 'What is the recommended lifecycle for a driver client object?',
+    options: [
+      'Create a new client for every request',
+      'Create one long-lived client at startup and reuse it',
+      'Create a client only when an error occurs',
+      'Never create a client; the shell handles it',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/the-shell-and-compass" questions={quizShell} />
+
+<ProgressTracker client:visible id="intro-and-documents/the-shell-and-compass" />

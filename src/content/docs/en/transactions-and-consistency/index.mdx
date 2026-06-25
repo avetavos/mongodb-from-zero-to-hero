@@ -1,0 +1,79 @@
+---
+title: Consistency in MongoDB
+description: Why a single-document write is already atomic, why multi-document transactions are a last resort, and how read and write concerns let you tune durability and visibility.
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+People arriving from the relational world often reach for a transaction the moment they need to change more than one thing. In MongoDB that instinct usually leads you astray. The database gives you a strong guarantee for free, and reaching past it for a multi-document transaction is something you do rarely and deliberately, not by default. This module is about understanding exactly what you already have, what you can ask for when you genuinely need more, and how to dial the durability and visibility of every operation up or down.
+
+The single fact that everything else hangs on is this: a write to **one document** is **atomic**. When you update a member's record, MongoDB applies the whole change — even if it touches a nested object, several fields, and an array all at once — as one indivisible step. No other reader ever sees the document half-changed, and if the write fails, the document is left exactly as it was. You do not open anything, you do not commit anything, and you do not pay any extra cost. The atomicity is simply how a document write works.
+
+## The shape of consistency here
+
+Because one document is the unit of atomicity, the way you **model** your data decides how much of your consistency comes for free. Data that changes together and belongs together should live in the same document, so a single write keeps it consistent. When related data is genuinely spread across documents or collections and must change as a unit, MongoDB offers **multi-document transactions** — real ACID transactions across a session. They work, but they cost more and require a replica set, so they sit at the bottom of the toolbox rather than the top.
+
+Layered on top of both is a pair of knobs that apply to every operation. A **write concern** controls how many replica-set members must acknowledge a write, and whether it must be flushed to the on-disk journal, before the driver calls the write done — this is the durability knob. A **read concern** controls how fresh and how committed the data you read must be — this is the visibility knob. Together they let you trade latency for safety, operation by operation.
+
+export const overview = `flowchart TD
+  W["A write request"] --> Q{"How many documents?"}
+  Q -->|"One document"| A["Atomic automatically — no transaction needed"]
+  Q -->|"Many documents as a unit"| T["Multi-document transaction in a session"]
+  A --> WC["Write concern tunes durability"]
+  T --> WC
+  WC --> RC["Read concern tunes what readers see"]`
+
+<Mermaid code={overview} title="The decision path: single-document atomicity by default, transactions only when several documents must change as one unit, with concerns tuning durability and visibility" />
+
+## What this module covers
+
+- **Single-document atomicity** — why any change to one document, however deep, is all-or-nothing, and how to model data so this covers most of your needs.
+- **Multi-document transactions** — opening a session, running several operations as one ACID unit, and committing or aborting, with the classic transfer-between-accounts example.
+- **Read and write concerns** — the `w`, `j`, and `wtimeout` settings for writes, the `local`, `majority`, and `linearizable` levels for reads, and read preference for choosing which member answers.
+- **Change streams** — subscribing to a live feed of inserts, updates, and deletes so your application can react to data changes as they happen.
+
+<Callout title="Reach for design before transactions">
+The most common consistency mistake is reaching for a multi-document transaction when a better document design would have made one atomic write enough. Always ask whether the data that must change together could live together first.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the unit of atomicity in MongoDB by default?',
+    options: [
+      'A whole collection',
+      'A single document, however deeply nested',
+      'A batch of up to 100 documents',
+      'An entire database',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you reach for a multi-document transaction?',
+    options: [
+      'For every write, as a safety habit',
+      'Only when several documents or collections must change as one unit',
+      'Whenever you update a nested array',
+      'Never, because MongoDB does not support them',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a write concern control?',
+    options: [
+      'Which fields are returned to the reader',
+      'How many members must acknowledge a write, and journal durability',
+      'The order of documents in a collection',
+      'Whether an index is used',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/index" />

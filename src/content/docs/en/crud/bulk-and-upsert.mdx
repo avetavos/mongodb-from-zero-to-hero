@@ -1,0 +1,350 @@
+---
+title: Upserts and bulk writes
+description: Insert-or-update with upsert, and combine many writes into one round trip with bulkWrite, ordered or unordered.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The last two moves in this module are about doing more with fewer round trips. An **upsert** answers a question you hit constantly: "update this document if it exists, otherwise create it." A **bulk write** lets you send a whole list of mixed operations — inserts, updates, deletes — to the server in a single call instead of one network trip per operation. Neither introduces new operators; they compose the methods you already know into something more efficient.
+
+We finish with our `members` collection one more time.
+
+## Upsert: update or insert
+
+Add the upsert option to an update, and when the filter matches nothing, MongoDB inserts a new document built from the filter plus the update. When the filter *does* match, it behaves like an ordinary update. Here we record a visit for "Katherine" — if she is not yet a member, this creates her:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Katherine" },
+      { $set: { joined: 2026 }, $inc: { visits: 1 } },
+      { upsert: true }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").updateOne(
+      { name: "Katherine" },
+      { $set: { joined: 2026 }, $inc: { visits: 1 } },
+      { upsert: true }
+    );
+    console.log(res.upsertedId);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.update_one(
+        {"name": "Katherine"},
+        {"$set": {"joined": 2026}, "$inc": {"visits": 1}},
+        upsert=True,
+    )
+    print(res.upserted_id)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Update().SetUpsert(true)
+    res, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Katherine"},
+        bson.M{"$set": bson.M{"joined": 2026}, "$inc": bson.M{"visits": 1}},
+        opts,
+    )
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.UpsertedID)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use mongodb::options::UpdateOptions;
+
+    let opts = UpdateOptions::builder().upsert(true).build();
+    let res = coll
+        .update_one(
+            doc! { "name": "Katherine" },
+            doc! { "$set": { "joined": 2026 }, "$inc": { "visits": 1 } },
+        )
+        .with_options(opts)
+        .await?;
+    println!("{:?}", res.upserted_id);
+    ```
+  </TabItem>
+</Tabs>
+
+Because no Katherine existed, the acknowledgement reports an `upsertedId` — the `_id` of the document that was created. `matchedCount` is `0`, which is your signal that an insert happened rather than an update:
+
+```json
+{
+  "acknowledged": true,
+  "matchedCount": 0,
+  "modifiedCount": 0,
+  "upsertedId": "65f0c5e6e4b0a1c2e4b0a1f0"
+}
+```
+
+The new document combines the filter and the update operators:
+
+```json
+{
+  "_id": "65f0c5e6e4b0a1c2e4b0a1f0",
+  "name": "Katherine",
+  "joined": 2026,
+  "visits": 1
+}
+```
+
+Run the very same call a second time and Katherine now exists, so it updates her instead: `matchedCount` becomes `1`, `visits` ticks up to `2`, and `upsertedId` is absent.
+
+## bulkWrite: many operations, one round trip
+
+`bulkWrite` takes a list of operations and sends them together. Each entry names its operation and carries the same filter and update you would pass individually, so you can mix inserts, updates, and deletes freely. Here we onboard one new member, charge a fine, and remove a lapsed member — all in a single call:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.bulkWrite([
+      { insertOne: { document: { name: "Tim", joined: 2026, fines: 0 } } },
+      { updateOne: { filter: { name: "Grace" }, update: { $inc: { fines: 1 } } } },
+      { deleteOne: { filter: { name: "Linus" } } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").bulkWrite([
+      { insertOne: { document: { name: "Tim", joined: 2026, fines: 0 } } },
+      { updateOne: { filter: { name: "Grace" }, update: { $inc: { fines: 1 } } } },
+      { deleteOne: { filter: { name: "Linus" } } },
+    ]);
+    console.log(res.insertedCount, res.modifiedCount, res.deletedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import InsertOne, UpdateOne, DeleteOne
+
+    res = db.members.bulk_write([
+        InsertOne({"name": "Tim", "joined": 2026, "fines": 0}),
+        UpdateOne({"name": "Grace"}, {"$inc": {"fines": 1}}),
+        DeleteOne({"name": "Linus"}),
+    ])
+    print(res.inserted_count, res.modified_count, res.deleted_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    models := []mongo.WriteModel{
+        mongo.NewInsertOneModel().SetDocument(bson.M{"name": "Tim", "joined": 2026, "fines": 0}),
+        mongo.NewUpdateOneModel().
+            SetFilter(bson.M{"name": "Grace"}).
+            SetUpdate(bson.M{"$inc": bson.M{"fines": 1}}),
+        mongo.NewDeleteOneModel().SetFilter(bson.M{"name": "Linus"}),
+    }
+    res, err := coll.BulkWrite(ctx, models)
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.InsertedCount, res.ModifiedCount, res.DeletedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use mongodb::options::WriteModel;
+
+    let res = coll
+        .client()
+        .bulk_write(vec![
+            WriteModel::InsertOne {
+                namespace: coll.namespace(),
+                document: doc! { "name": "Tim", "joined": 2026, "fines": 0 },
+            },
+            WriteModel::UpdateOne {
+                namespace: coll.namespace(),
+                filter: doc! { "name": "Grace" },
+                update: doc! { "$inc": { "fines": 1 } }.into(),
+                array_filters: None,
+                collation: None,
+                hint: None,
+                upsert: None,
+            },
+            WriteModel::DeleteOne {
+                namespace: coll.namespace(),
+                filter: doc! { "name": "Linus" },
+                collation: None,
+                hint: None,
+            },
+        ])
+        .await?;
+    println!("{} {} {}", res.inserted_count, res.modified_count, res.deleted_count);
+    ```
+  </TabItem>
+</Tabs>
+
+One acknowledgement summarises everything that happened across all three operations:
+
+```json
+{
+  "acknowledged": true,
+  "insertedCount": 1,
+  "matchedCount": 1,
+  "modifiedCount": 1,
+  "deletedCount": 1,
+  "upsertedCount": 0
+}
+```
+
+The whole point is the round trip: instead of three separate conversations with the server, the driver batches the list and sends it once.
+
+export const bulkDiagram = `flowchart LR
+  App["Your app"] -->|"one bulkWrite call"| Batch["Batched: insert + update + delete"]
+  Batch -->|"single round trip"| Server["MongoDB server"]
+  Server --> R1["insertedCount: 1"]
+  Server --> R2["modifiedCount: 1"]
+  Server --> R3["deletedCount: 1"]`
+
+<Mermaid code={bulkDiagram} title="bulkWrite packs many operations into one round trip and returns a combined result" />
+
+## Ordered versus unordered
+
+By default `bulkWrite` is **ordered**: it runs the operations in sequence and stops at the first one that errors, leaving the rest unrun. Switch it to **unordered** and the server may run the operations in any order and keeps going past failures, applying every operation that can succeed. Unordered is often faster and is the right choice when the operations do not depend on each other.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.bulkWrite(
+      [
+        { insertOne: { document: { name: "Barbara", joined: 2026 } } },
+        { insertOne: { document: { name: "Tim", joined: 2026 } } }
+      ],
+      { ordered: false }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").bulkWrite(
+      [
+        { insertOne: { document: { name: "Barbara", joined: 2026 } } },
+        { insertOne: { document: { name: "Tim", joined: 2026 } } },
+      ],
+      { ordered: false }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import InsertOne
+
+    db.members.bulk_write(
+        [
+            InsertOne({"name": "Barbara", "joined": 2026}),
+            InsertOne({"name": "Tim", "joined": 2026}),
+        ],
+        ordered=False,
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    models := []mongo.WriteModel{
+        mongo.NewInsertOneModel().SetDocument(bson.M{"name": "Barbara", "joined": 2026}),
+        mongo.NewInsertOneModel().SetDocument(bson.M{"name": "Tim", "joined": 2026}),
+    }
+    opts := options.BulkWrite().SetOrdered(false)
+    _, err := coll.BulkWrite(ctx, models, opts)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use mongodb::options::{BulkWriteOptions, WriteModel};
+
+    let opts = BulkWriteOptions::builder().ordered(false).build();
+    coll.client()
+        .bulk_write(vec![
+            WriteModel::InsertOne {
+                namespace: coll.namespace(),
+                document: doc! { "name": "Barbara", "joined": 2026 },
+            },
+            WriteModel::InsertOne {
+                namespace: coll.namespace(),
+                document: doc! { "name": "Tim", "joined": 2026 },
+            },
+        ])
+        .with_options(opts)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In Compass:** there is no bulk-write panel, but upserts surface naturally — when you edit a document the **Update** action offers an **upsert** checkbox so a non-matching filter inserts instead.
+
+## Tips and gotchas
+
+- An upsert builds its new document from **both** the filter's equality conditions and the update operators. Make the filter specific (the fields that identify the record) so the inserted document comes out the way you expect.
+- After an upsert, check `matchedCount`: `0` plus an `upsertedId` means a document was created; `1` means an existing one was updated.
+- Ordered `bulkWrite` stops at the first error. If you want every independent operation attempted regardless of failures, set the unordered option.
+- `bulkWrite` is about efficiency, not transactions. Unless you wrap it in a transaction, the operations are not all-or-nothing — some can succeed while others fail.
+
+<Callout title="Fewer round trips, same building blocks">
+Upserts and bulk writes do not add new query language — they pack the inserts, updates, and deletes you already know into a single trip to the server. That is most of what "making CRUD fast" means in practice.
+</Callout>
+
+export const quizBulk = [
+  {
+    q: 'An upsert runs and its filter matches no existing document. What happens?',
+    options: [
+      'Nothing changes and an error is returned',
+      'A new document is inserted from the filter plus the update operators',
+      'Every document in the collection is updated',
+      'The filter is ignored and a blank document is created',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the main benefit of bulkWrite over separate calls?',
+    options: [
+      'It makes every operation atomic by default',
+      'It validates each document against a schema',
+      'It sends many operations to the server in a single round trip',
+      'It automatically retries failed operations',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'How does an ordered bulkWrite behave when one operation fails?',
+    options: [
+      'It runs the remaining operations anyway',
+      'It stops at the failure, leaving later operations unrun',
+      'It rolls back all previously applied operations',
+      'It converts the batch to unordered automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'After an upsert, which result signals that a new document was created?',
+    options: [
+      'modifiedCount is 1',
+      'matchedCount is 0 and an upsertedId is present',
+      'deletedCount is 1',
+      'acknowledged is false',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="crud/bulk-and-upsert" questions={quizBulk} />
+
+<ProgressTracker client:visible id="crud/bulk-and-upsert" />

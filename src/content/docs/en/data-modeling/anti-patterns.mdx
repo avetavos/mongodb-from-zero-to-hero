@@ -1,0 +1,118 @@
+---
+title: Anti-patterns
+description: Common MongoDB modeling mistakes — massive unbounded arrays, the bloated single document, over-referencing, case-insensitive matching without collation, and the one-giant-collection trap — and how to fix each.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Most bad MongoDB schemas are not bad because someone ignored the rules — they are bad because a reasonable-looking decision aged badly. An embedded array that was fine with ten elements becomes a liability at ten thousand. A "keep everything together" instinct that simplified version one buries the database in version two. This final lesson collects the **anti-patterns** that recur most often: how each one looks, why it hurts, and the concrete fix. Recognizing them in a design review is one of the most valuable modeling skills you can build.
+
+## Massive, unbounded arrays
+
+The most common anti-pattern is embedding an array that grows without limit — every comment on a popular post, every event in a user's history. Each append makes the document larger and slower to load, and the array marches toward the 16 MB ceiling. **The fix:** move the children into their own collection and reference the parent from each child, or apply the Bucket pattern to cap growth per window. A post should *not* embed every comment:
+
+```json
+{ "_id": "post_310", "title": "Why documents win", "commentCount": 8421 }
+```
+
+Comments live separately, each pointing back, so the post stays small and comments can be paged:
+
+```json
+{ "_id": "cmt_9", "postId": "post_310", "user": "Grace", "text": "Great read." }
+```
+
+## The bloated single document
+
+Closely related is the urge to cram *everything* about an entity into one document — a user with their full activity log, every order, every preference, every session, all nested inside. The document becomes huge, and a read for just the email address drags megabytes off disk. **The fix:** keep the hot, frequently-read fields in the main document and move cold or large sub-data to referenced collections. Read locality only helps when the data is actually read together; embedding cold data buys you nothing and costs you on every read.
+
+## Over-referencing
+
+The opposite mistake is splitting data so aggressively that rendering one screen requires a dozen lookups, recreating the relational join problem MongoDB was meant to relieve. If displaying an order means fetching the order, then the customer, then each product, then each product's category, you have over-referenced. **The fix:** embed data that is genuinely read together and bounded, or use the Extended Reference pattern to copy the one or two fields you always display, so the common read stops fanning out into application-side joins.
+
+## Case-insensitive matching without collation
+
+A subtle one: needing case-insensitive lookups (matching `"Ada"`, `"ada"`, and `"ADA"`) and reaching for a regular expression like `/^ada$/i`. It works, but it cannot use a normal index efficiently, so it quietly degrades into a scan. **The fix:** define a **collation** with a case-insensitive strength on the collection or index, then ordinary equality queries match case-insensitively *and* use the index. Collation is the supported, indexable way to do case-insensitive matching — regex flags are not.
+
+## Everything in one collection
+
+Finally, the instinct to dump unrelated entities — users, orders, products, logs — into a single collection distinguished only by a `type` field. Indexes become bloated with documents they do not care about, validation cannot describe a coherent shape, and every query must filter by `type` first. **The fix:** give each distinct entity its own collection. Collections are cheap; a clean one-entity-per-collection layout keeps indexes tight, validators meaningful, and queries simple.
+
+## The anti-patterns and their fixes
+
+Each mistake has a direct remedy you have already met in this module:
+
+export const antiPatternDiagram = `flowchart LR
+  A1["Massive unbounded array"] --> F1["Reference children or use the Bucket pattern"]
+  A2["Bloated single document"] --> F2["Keep hot fields, reference cold and large data"]
+  A3["Over-referencing everywhere"] --> F3["Embed co-accessed data or extend the reference"]
+  A4["Case-insensitive via regex"] --> F4["Use a case-insensitive collation"]
+  A5["Everything in one collection"] --> F5["One entity per collection"]`
+
+<Mermaid code={antiPatternDiagram} title="Each modeling anti-pattern maps to a concrete fix drawn from earlier lessons" />
+
+Notice that every fix is just the disciplined application of the earlier lessons: model for access, bound your embedded arrays, reference what is shared and large, embed what is read together, and let cardinality and access patterns — not habit — decide each relationship.
+
+## Tips and gotchas
+
+- Anti-patterns rarely look wrong on day one. They reveal themselves at scale, so review schemas with growth in mind, not just the current data size.
+- "Unbounded array" and "bloated document" are two faces of the same disease: embedding data that should have been referenced. The cure is the same.
+- Over-referencing is the over-correction — splitting everything because embedding once burned you. The answer is judgment per relationship, not a blanket rule.
+- MongoDB Atlas surfaces several of these as **Schema Anti-Pattern** advisories in its performance tooling; if you run on Atlas, let it flag the unbounded arrays and bloated documents for you.
+- Collections are inexpensive. When in doubt about mixing entity types, split them — a clean per-entity layout almost always ages better.
+
+<Callout title="Most bad schemas were once reasonable">
+Anti-patterns are not exotic mistakes; they are ordinary decisions that did not survive growth. The defenses are the habits from this whole module: bound your arrays, reference what is shared and large, embed what is read together, give each entity its own collection, and use collation — not regex — for case-insensitive matching.
+</Callout>
+
+export const quizAntiPatterns = [
+  {
+    q: 'A document embeds an array that grows without limit. What is the recommended fix?',
+    options: [
+      'Increase the 16 MB document limit',
+      'Reference the children in their own collection, or use the Bucket pattern',
+      'Delete old elements at random',
+      'Convert the array to a string',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What problem does over-referencing recreate?',
+    options: [
+      'The relational join problem — one screen needs many lookups',
+      'The 16 MB document limit',
+      'Loss of all duplication',
+      'Schema validation errors',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'What is the supported, index-friendly way to do case-insensitive matching in MongoDB?',
+    options: [
+      'A case-insensitive regular expression',
+      'A collation with a case-insensitive strength',
+      'Storing every value in lowercase only',
+      'Disabling indexes on the field',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is storing unrelated entities in one collection with a type field an anti-pattern?',
+    options: [
+      'MongoDB forbids more than one type per document',
+      'Indexes bloat, validators cannot describe a coherent shape, and every query must filter by type',
+      'It exceeds the document size limit automatically',
+      'Collections are too expensive to create',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/anti-patterns" questions={quizAntiPatterns} />
+
+<ProgressTracker client:visible id="data-modeling/anti-patterns" />

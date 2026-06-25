@@ -1,0 +1,312 @@
+---
+title: Querying arrays
+description: Match a single array element, require multiple conditions on one element with $elemMatch, require several values with $all, filter by length with $size, and reach elements by index with dot paths.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A document field can hold an array, and querying one has a friendly surprise built in: when you filter an array field against a plain value, MongoDB checks **every element** and matches if *any* of them satisfies the condition. That single rule makes simple array queries read exactly like scalar ones. The subtleties show up only when you need several conditions to hold on the *same* element, which is where `$elemMatch` earns its keep.
+
+For this lesson each member carries a `borrowed` array of book titles, and some carry a `tags` array of interest labels.
+
+## Matching a single element
+
+To ask "who currently has *Compilers* checked out?", filter the array field by the value as if it were scalar. MongoDB looks inside the array for you:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ borrowed: "Compilers" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ borrowed: "Compilers" })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"borrowed": "Compilers"}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"borrowed": "Compilers"})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "borrowed": "Compilers" })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Any member whose array contains that title matches, no matter where it sits in the list:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "borrowed": ["Algorithms", "Compilers"]
+  }
+]
+```
+
+## Several conditions on the same element: $elemMatch
+
+Here is the trap. Suppose `scores` holds an array of numbers and you want documents with an element greater than 80 **and** less than 90. Writing `{ scores: { $gt: 80, $lt: 90 } }` does *not* mean that — it matches if *some* element is over 80 and *some* (possibly different) element is under 90. To pin both conditions to **one** element, use `$elemMatch`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      scores: { $elemMatch: { $gt: 80, $lt: 90 } }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      scores: { $elemMatch: { $gt: 80, $lt: 90 } }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "scores": {"$elemMatch": {"$gt": 80, "$lt": 90}}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "scores": bson.M{"$elemMatch": bson.M{"$gt": 80, "$lt": 90}},
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "scores": { "$elemMatch": { "$gt": 80, "$lt": 90 } }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Only documents with a single element in the 81–89 range match — here `85` qualifies, even though the array also holds values outside the band:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "scores": [70, 85, 95] }
+]
+```
+
+## Requiring several values: $all
+
+`$all` matches when the array contains **every** listed value, in any order. It is the AND of membership. "Who has borrowed both *Algorithms* and *Compilers* at once?" is exactly this:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      borrowed: { $all: ["Algorithms", "Compilers"] }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      borrowed: { $all: ["Algorithms", "Compilers"] }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "borrowed": {"$all": ["Algorithms", "Compilers"]}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "borrowed": bson.M{"$all": bson.A{"Algorithms", "Compilers"}},
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "borrowed": { "$all": ["Algorithms", "Compilers"] }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Only members holding both titles are returned; having one is not enough:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "borrowed": ["Algorithms", "Compilers"]
+  }
+]
+```
+
+## Filtering by length: $size
+
+`$size` matches arrays of an exact length. "Who currently has exactly two books out?" is a one-operator query:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ borrowed: { $size: 2 } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ borrowed: { $size: 2 } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"borrowed": {"$size": 2}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"borrowed": bson.M{"$size": 2}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "borrowed": { "$size": 2 } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Members whose `borrowed` array has precisely two elements match:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "borrowed": ["Algorithms", "Compilers"]
+  }
+]
+```
+
+## Reaching an element by index
+
+Array positions are addressable with a dotted numeric path: `borrowed.0` is the first element, `borrowed.1` the second, and so on. Use this to query the element at a known position — "whose *first* borrowed book is *Algorithms*?":
+
+```js
+db.members.find({ "borrowed.0": "Algorithms" })
+```
+
+The same dot path works when the array holds sub-documents — `reviews.0.rating` reaches into the first review's `rating` field, a pattern the next lesson explores in depth.
+
+**In Compass:** array filters go in the filter bar just like scalar ones, for example `{ borrowed: { $size: 2 } }`. Compass renders matching arrays inline and lets you expand them to see each element.
+
+## Tips and gotchas
+
+- **Why `$elemMatch` matters:** without it, multiple conditions on an array field are checked *across all elements*, so `{ scores: { $gt: 80, $lt: 90 } }` can match an array like `[70, 95]` — one element clears each bar separately. `$elemMatch` forces all conditions onto a single element, which is almost always what you actually meant.
+- **`$all` is order-independent.** It only checks that each value is present somewhere; it says nothing about position or about extra elements. `$size`, by contrast, fixes the exact length.
+- **`$size` takes a literal number only.** You cannot write `{ $size: { $gt: 1 } }`. To query "more than one element", model a length field or use the aggregation framework.
+- **A single-value filter on an array matches by containment.** `{ borrowed: "Compilers" }` matches any array that *contains* that title — it does not require the array to equal `["Compilers"]`.
+
+<Callout title="Across elements vs within one element">
+The defining question for every array query is: must the conditions hold on the same element, or merely somewhere in the array? Plain multi-condition filters spread across elements; $elemMatch locks them to one. Choosing wrong is the single most common array-query bug.
+</Callout>
+
+export const quizArrays = [
+  {
+    q: 'You filter an array field borrowed against the plain value "Compilers". What matches?',
+    options: [
+      'Only arrays exactly equal to ["Compilers"]',
+      'Any document whose borrowed array contains "Compilers"',
+      'Nothing; arrays need $in',
+      'Only the first element of the array',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why use $elemMatch instead of two conditions directly on an array field?',
+    options: [
+      'It is faster but otherwise identical',
+      'It forces all conditions to hold on the same single element',
+      'It is required for any array query',
+      'It sorts the array first',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does { borrowed: { $all: ["Algorithms", "Compilers"] } } match?',
+    options: [
+      'Arrays containing either title',
+      'Arrays containing both titles, in any order',
+      'Arrays equal to exactly those two elements in order',
+      'Arrays of length 2 only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you match documents whose array has exactly three elements?',
+    options: ['{ field: { $len: 3 } }', '{ field: { $size: 3 } }', '{ field: { $count: 3 } }', '{ field: { $all: 3 } }'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="querying/querying-arrays" questions={quizArrays} />
+
+<ProgressTracker client:visible id="querying/querying-arrays" />

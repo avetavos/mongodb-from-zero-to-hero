@@ -1,0 +1,215 @@
+---
+title: Multi-document transactions
+description: Run several operations across documents and collections as one ACID unit using a session, withTransaction, commit and abort, shown with the classic transfer between accounts.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Sometimes a single operation genuinely has to change several documents, and either all of them must succeed or none of them may. The textbook case is moving money: debit one account and credit another. If the debit lands but the credit fails, money has vanished. When the documents involved cannot be merged into one — because they are separate accounts, or live in separate collections — MongoDB offers a real **multi-document transaction**. It gives you the full ACID guarantee across every operation inside it: they all commit together or they all roll back together.
+
+The price of that guarantee is that a transaction needs a **session** to run in, requires a **replica set** (a standalone server cannot run one), and costs more than an ordinary write. So this is a deliberate tool, not a default.
+
+## A transaction lives in a session
+
+The flow is always the same. You start a **session**, then run your operations inside a transaction tied to that session. The driver helpers called `withTransaction` wrap the whole thing: they begin the transaction, run your callback, **commit** if it returns cleanly, and **abort** (rolling everything back) if it throws. They also retry the commit automatically on certain transient errors, which is why you should prefer them over starting and committing by hand.
+
+export const txnFlow = `flowchart TD
+  S["startSession"] --> B["Begin transaction"]
+  B --> O1["Debit the source account"]
+  O1 --> O2["Credit the destination account"]
+  O2 --> C{"Both succeeded?"}
+  C -->|"Yes"| COMMIT["Commit — both changes become visible together"]
+  C -->|"No"| ABORT["Abort — every change is rolled back"]`
+
+<Mermaid code={txnFlow} title="A transaction begins in a session, runs its operations, then commits all changes together or aborts and rolls every one back" />
+
+## Transferring between accounts
+
+Here we move three units of value from Ada to Linus across two documents in an `accounts` collection. Every operation passes the **session**, which is what binds it to the transaction. If either update fails — say the source has insufficient balance and we throw — the whole transfer is rolled back and neither balance changes:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const session = db.getMongo().startSession();
+    session.withTransaction(() => {
+      const accounts = session.getDatabase("library").accounts;
+      accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });
+      accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } });
+    });
+    session.endSession();
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const session = client.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const accounts = client.db("library").collection("accounts");
+        await accounts.updateOne(
+          { name: "Ada" },
+          { $inc: { balance: -3 } },
+          { session }
+        );
+        await accounts.updateOne(
+          { name: "Linus" },
+          { $inc: { balance: 3 } },
+          { session }
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with client.start_session() as session:
+        def transfer(s):
+            accounts = client.library.accounts
+            accounts.update_one(
+                {"name": "Ada"}, {"$inc": {"balance": -3}}, session=s
+            )
+            accounts.update_one(
+                {"name": "Linus"}, {"$inc": {"balance": 3}}, session=s
+            )
+
+        session.with_transaction(transfer)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    session, err := client.StartSession()
+    if err != nil {
+        return err
+    }
+    defer session.EndSession(ctx)
+
+    _, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (interface{}, error) {
+        accounts := client.Database("library").Collection("accounts")
+        if _, err := accounts.UpdateOne(sc,
+            bson.M{"name": "Ada"}, bson.M{"$inc": bson.M{"balance": -3}}); err != nil {
+            return nil, err
+        }
+        if _, err := accounts.UpdateOne(sc,
+            bson.M{"name": "Linus"}, bson.M{"$inc": bson.M{"balance": 3}}); err != nil {
+            return nil, err
+        }
+        return nil, nil
+    })
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut session = client.start_session().await?;
+    let accounts = client
+        .database("library")
+        .collection::<Document>("accounts");
+
+    session
+        .start_transaction()
+        .and_run((), |session, _| {
+            let accounts = accounts.clone();
+            async move {
+                accounts
+                    .update_one(doc! { "name": "Ada" }, doc! { "$inc": { "balance": -3 } })
+                    .session(&mut *session)
+                    .await?;
+                accounts
+                    .update_one(doc! { "name": "Linus" }, doc! { "$inc": { "balance": 3 } })
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .boxed()
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Before the transfer, the two accounts stand like this:
+
+```json
+[
+  { "_id": 1, "name": "Ada", "balance": 10 },
+  { "_id": 2, "name": "Linus", "balance": 4 }
+]
+```
+
+After a successful commit, the three units have moved and the total is preserved. No reader ever saw a moment where Ada's three units had left her but not yet arrived for Linus:
+
+```json
+[
+  { "_id": 1, "name": "Ada", "balance": 7 },
+  { "_id": 2, "name": "Linus", "balance": 7 }
+]
+```
+
+**In Compass:** Compass does not drive transactions from its document editor, but you can open the **mongosh** tab embedded at the bottom of the window and run the session-based script there against the same connection.
+
+## Tips and gotchas
+
+- **Transactions require a replica set.** A single standalone `mongod` cannot run one. The local Docker setups in this course already run a one-node replica set so you can try these examples.
+- **Keep transactions short.** A transaction holds resources for its whole lifetime and has a default time limit. Do only the writes that must be atomic inside it, and do slow work — network calls, heavy computation — outside.
+- **There is a real performance cost.** Transactions are slower than the equivalent single-document writes, and they can abort under write conflicts and need retrying. Use them where correctness demands it, not as a comfort blanket.
+- **Pass the session everywhere.** An operation inside the callback that forgets to pass the session runs *outside* the transaction and will not be rolled back.
+
+<Callout title="Prefer single-document design first">
+Before writing a transaction, ask whether the documents could be reshaped so the change fits in one of them. A single-document write is simpler, faster, and atomic for free. Transactions are the answer only when the data truly cannot be brought together.
+</Callout>
+
+export const quizMulti = [
+  {
+    q: 'What binds an operation to a multi-document transaction?',
+    options: [
+      'A special collection name',
+      'Passing the session to every operation in the transaction',
+      'Setting a write concern of majority',
+      'Running it inside a stored procedure',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does withTransaction do when the callback throws?',
+    options: [
+      'Commits the work done so far',
+      'Aborts the transaction and rolls back every change',
+      'Retries forever until it succeeds',
+      'Ignores the error and continues',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What deployment is required to run a transaction?',
+    options: [
+      'A standalone server',
+      'A replica set',
+      'A sharded cluster only',
+      'Any deployment, including standalone',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is good advice for the body of a transaction?',
+    options: [
+      'Do as much work as possible inside it',
+      'Keep it short and move slow work outside it',
+      'Always include a network call inside it',
+      'Never pass the session to operations',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/multi-document-transactions" questions={quizMulti} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/multi-document-transactions" />

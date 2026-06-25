@@ -1,0 +1,95 @@
+---
+title: Running MongoDB in production
+description: The four production concerns — high availability with replica sets, horizontal scale with sharding, performance, and security — and how they fit together.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A single `mongod` running on your laptop is wonderful for learning, and exactly the wrong thing to put in front of real users. The moment a database holds data people depend on, four questions arrive that a lone server cannot answer well. What happens when that one machine dies? What happens when one machine can no longer hold all the data or all the traffic? Why did a query that was instant last week now take two seconds? And who, exactly, is allowed to read this data, and over what kind of connection?
+
+This module is about those four questions, and MongoDB has a distinct answer for each. **High availability** comes from a *replica set* — several copies of your data that elect a new leader automatically when one fails. **Horizontal scale** comes from *sharding* — splitting one logical collection across many machines so the dataset and the load divide. **Performance** comes from understanding where time goes: profiling slow queries, keeping the working set in memory, and reaching for the right index. **Security** comes from turning on the protections that are off by default: authentication, encryption in transit, and a network that does not expose the database to the open internet.
+
+## The shape of a production deployment
+
+The two structural ideas — replication and sharding — stack on top of each other. A replica set gives one copy of the data resilience. A sharded cluster is several replica sets, each holding a *slice* of the data, with a router in front that knows which slice is where:
+
+export const productionOverview = `flowchart TB
+  App["Application"] --> Router["mongos router"]
+  Router --> CSRS["Config servers (replica set)"]
+  Router --> ShardA
+  Router --> ShardB
+  subgraph ShardA["Shard A — replica set"]
+    PA["Primary"] --> S1A["Secondary"]
+    PA --> S2A["Secondary"]
+  end
+  subgraph ShardB["Shard B — replica set"]
+    PB["Primary"] --> S1B["Secondary"]
+    PB --> S2B["Secondary"]
+  end`
+
+<Mermaid code={productionOverview} title="A sharded cluster is many replica sets behind a router; each shard is itself highly available" />
+
+Read that diagram from the bottom up. Each shaded box is a **replica set**: one primary plus secondaries holding the same data, so a single failed node does not lose anything. Stack two of those side by side, give each a different slice of the collection, and put a **mongos** router in front to direct every request to the right slice — that is a **sharded cluster**. You do not have to start sharded; most deployments live happily as a single replica set for a long time and only shard once one machine genuinely cannot keep up.
+
+## What this module covers
+
+The lessons follow the same order as the four questions:
+
+1. **Running MongoDB in production** — this overview of availability, scale, performance, and security.
+2. **Replica sets** — primaries, secondaries, the oplog that keeps them in sync, and the automatic election that picks a new primary when one fails.
+3. **Sharding** — partitioning a collection by a shard key across shards, the role of the balancer and the config servers, and how to choose a shard key you will not regret.
+4. **Performance and profiling** — finding slow queries with the database profiler, re-reading `explain`, and the common fixes that make queries fast again.
+5. **Security and Atlas** — authentication and roles, TLS, locking down the network, encryption at rest, and how MongoDB Atlas hands you all of it as a managed service.
+
+## Tips and gotchas
+
+- These features compose rather than compete. You almost always run a replica set first for availability, and only add sharding later when scale forces it. Security applies to both from day one.
+- Sharding is not a performance band-aid for a slow query. A missing index hurts just as much across ten shards as on one. Fix performance first, scale second.
+- The single most common production mistake is the easiest to avoid: leaving a database reachable on the internet with authentication switched off. The security lesson exists so you never do that.
+
+<Callout title="Four concerns, four answers">
+Production MongoDB is four problems with four named solutions: replica sets for availability, sharding for scale, profiling and indexes for performance, and auth plus TLS plus network rules for security. The rest of this module takes them one at a time.
+</Callout>
+
+export const quizOverview = [
+  {
+    q: 'Which MongoDB feature provides high availability — surviving the failure of a single server?',
+    options: [
+      'Sharding',
+      'A replica set',
+      'The database profiler',
+      'A compound index',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a sharded cluster, structurally?',
+    options: [
+      'A single very large server with extra memory',
+      'Several replica sets, each holding a slice of the data, behind a router',
+      'A read-only copy of one database',
+      'A backup stored on a second machine',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you reach for sharding?',
+    options: [
+      'Immediately, for every new deployment',
+      'To fix a single slow query',
+      'When one machine can no longer hold the data or carry the load',
+      'Only when authentication is enabled',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/index" questions={quizOverview} />
+
+<ProgressTracker client:visible id="operations-and-scaling/index" />

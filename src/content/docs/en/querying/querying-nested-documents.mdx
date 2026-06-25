@@ -1,0 +1,264 @@
+---
+title: Querying nested documents
+description: Reach embedded fields with dot notation, understand why matching a whole sub-document is order-sensitive while matching by field is not, and query arrays of sub-documents.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Documents nest. A member can carry an embedded `address` object, and that object has its own fields. There are two distinct ways to query into a sub-document, and they behave very differently: you can reach a single inner field with **dot notation**, or you can match the **whole sub-document** at once. The first is forgiving; the second is an exact, order-sensitive comparison that surprises people. This lesson makes the difference concrete.
+
+Each member now has an embedded `address` with `city` and `zip`, and a `contact` with `email` and `phone`.
+
+## Reaching an inner field with dot notation
+
+To match on one field buried inside an embedded object, name the path with a dot: `"address.city"`. The quotes are required because the key contains a dot. Here we find every member living in Cambridge:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ "address.city": "Cambridge" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ "address.city": "Cambridge" })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"address.city": "Cambridge"}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"address.city": "Cambridge"})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "address.city": "Cambridge" })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The query reaches into `address` and matches only its `city`, ignoring whatever else the sub-document holds:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
+    "name": "Grace",
+    "address": { "city": "Cambridge", "zip": "02139" }
+  }
+]
+```
+
+Dot paths chain as deep as your data goes and combine freely with operators — `{ "address.zip": { $exists: true } }` works exactly as you would expect.
+
+## Matching a whole sub-document: order matters
+
+You can also hand the `address` field an entire document as its value. This is **not** the same as a dotted query. It demands an *exact* match: the same fields, the same values, and the **same order**, with no extra fields allowed. Here we match the full address:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      address: { city: "Cambridge", zip: "02139" }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      address: { city: "Cambridge", zip: "02139" }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "address": {"city": "Cambridge", "zip": "02139"}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "address": bson.D{
+            {Key: "city", Value: "Cambridge"},
+            {Key: "zip", Value: "02139"},
+        },
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "address": { "city": "Cambridge", "zip": "02139" }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+This matches Grace — but only because her stored `address` has `city` first and `zip` second, with no other fields:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
+    "name": "Grace",
+    "address": { "city": "Cambridge", "zip": "02139" }
+  }
+]
+```
+
+If the stored document listed `zip` before `city`, or added a `country` field, this same filter would return **nothing** — that is the order-sensitivity trap, and it is why dot notation is usually the safer choice. Note the Go example uses `bson.D`, an ordered document, precisely because order is significant here.
+
+## Arrays of sub-documents
+
+The most common real shape is an array whose elements are sub-documents. Say each member has a `reviews` array, each review a `book` and a `rating`. A plain dotted query like `"reviews.rating"` checks the condition across *all* reviews, so to require both fields on the *same* review you combine the dot path's spirit with `$elemMatch`. Here we find members with a review of *Algorithms* rated at least 4:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "reviews": {"$elemMatch": {"book": "Algorithms", "rating": {"$gte": 4}}}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "reviews": bson.M{"$elemMatch": bson.M{
+            "book":   "Algorithms",
+            "rating": bson.M{"$gte": 4},
+        }},
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "reviews": { "$elemMatch": { "book": "Algorithms", "rating": { "$gte": 4 } } }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Only members whose *same* review names that book and clears the rating bar match:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "reviews": [
+      { "book": "Algorithms", "rating": 5 },
+      { "book": "Networks", "rating": 3 }
+    ]
+  }
+]
+```
+
+**In Compass:** the filter bar accepts dotted keys directly, for example `{ "address.city": "Cambridge" }`. The Documents tab shows nested objects as expandable tree nodes, which makes it easy to confirm the exact field order before you attempt a whole-sub-document match.
+
+## Tips and gotchas
+
+- **Order sensitivity is the big one.** Matching an embedded document by handing the field a full document compares the whole thing literally — same fields, same values, same order, no extras. Re-arrange the keys and the match silently disappears.
+- **Dot notation is order-independent and partial.** `{ "address.city": "Cambridge" }` cares about one field and nothing else, which is why it is the everyday choice for embedded data.
+- **Quote any key with a dot.** `address.city` must be written as the string `"address.city"`; an unquoted dotted identifier is not valid in most drivers' document literals.
+- **Arrays of sub-documents need `$elemMatch` for multi-field conditions**, for the same reason scalar arrays do — otherwise the conditions spread across different elements of the array.
+
+<Callout title="Dot for a field, full document for the whole thing">
+To match one buried field, use a quoted dot path — partial and order-free. To match an entire embedded document, hand the field a complete document — but know it is an exact, ordered comparison that breaks the moment the stored keys are reordered or a field is added.
+</Callout>
+
+export const quizNested = [
+  {
+    q: 'How do you match the city field inside an embedded address object?',
+    options: [
+      '{ address: { city: "Cambridge" } }',
+      '{ "address.city": "Cambridge" }',
+      '{ city: "Cambridge" }',
+      '{ address: "city.Cambridge" }',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is special about matching a whole embedded sub-document, like { address: { city, zip } }?',
+    options: [
+      'It matches any document that has those fields',
+      'It is an exact comparison: same fields, same values, same order, no extras',
+      'It is identical to dot notation',
+      'It only checks the first field',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does the Go example use bson.D for a whole-sub-document match?',
+    options: [
+      'bson.D is faster than bson.M',
+      'Because field order is significant and bson.D preserves it',
+      'bson.M cannot hold strings',
+      'It is required for all queries',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'To require book and rating on the SAME element of a reviews array, you use:',
+    options: ['Two dotted conditions', '$all', '$elemMatch', '$size'],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="querying/querying-nested-documents" questions={quizNested} />
+
+<ProgressTracker client:visible id="querying/querying-nested-documents" />

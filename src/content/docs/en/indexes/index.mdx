@@ -1,0 +1,140 @@
+---
+title: Why indexes matter
+description: How a query without an index scans every document, and how an index turns those scans into fast ordered seeks.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A query that returns the right answer can still be a slow query. When you ask MongoDB to find every member who joined in 2023, and there is nothing helping it, the server has only one option: open the collection at the first document and read forward, checking each one, until it has looked at every single document. That brute-force read is called a **collection scan**, and MongoDB labels it `COLLSCAN` in its diagnostics. On a handful of library members it is invisible. On a collection of ten million documents it is the difference between a reply in a millisecond and a reply that crawls.
+
+An **index** is the fix. It is a separate, ordered data structure that the server maintains alongside your collection, holding the values of one or more fields in sorted order, each paired with a pointer back to the full document. Because the values are sorted, the server can jump straight to the ones it wants instead of reading everything — the same reason you flip to the back of a textbook rather than reading every page to find where a term is defined. This whole module is about building the right index for the right query, and proving the win with `explain`.
+
+## A scan versus a seek
+
+Picture the two strategies side by side. Without an index, the query walks the entire collection. With an index, it descends a sorted tree and lands directly on the matching range:
+
+export const scanVsIndexDiagram = `flowchart TB
+  subgraph NoIndex["Without an index — COLLSCAN"]
+    Q1["Query: joined equals 2023"] --> S0["Read doc 1"]
+    S0 --> S1["Read doc 2"]
+    S1 --> S2["Read doc 3"]
+    S2 --> S3["...read every document"]
+    S3 --> R1["Return the matches"]
+  end
+  subgraph WithIndex["With an index — IXSCAN"]
+    Q2["Query: joined equals 2023"] --> B0["Index root"]
+    B0 --> B1["Sorted branch"]
+    B1 --> B2["Leaf: joined equals 2023"]
+    B2 --> R2["Follow pointers to matching docs"]
+  end`
+
+<Mermaid code={scanVsIndexDiagram} title="A scan reads every document; an index seek jumps to the matching range and follows pointers" />
+
+The right-hand path touches only the documents it needs. The left-hand path touches all of them and then throws most away. That wasted reading is exactly what an index removes.
+
+## A first index
+
+Creating an index is a single call. You name the field and a direction — `1` for ascending — and the server builds the structure for you. Here we index the `joined` field on our library `members` so that filtering or sorting by join year becomes a seek:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ joined: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ joined: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("joined", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "joined", Value: 1}}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "joined": 1 }).build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The call returns the name MongoDB gave the new index — it derives the name from the field and direction unless you supply your own:
+
+```json
+{ "createdIndexes": ["joined_1"], "ok": 1 }
+```
+
+**In Compass:** open a collection and choose the **Indexes** tab. You will always see the built-in `_id_` index there, and you can add a new one with the **Create Index** button by typing the field name and picking a direction.
+
+## What this module covers
+
+The lessons build from one field to the full toolbox:
+
+1. **Why indexes matter** — scans versus seeks, and the cost of having none.
+2. **Single and compound indexes** — indexing one field, then several, and the prefix rule that decides which queries a compound index can serve.
+3. **The ESR rule** — the field ordering (Equality, Sort, Range) that makes a compound index pull its weight.
+4. **Explain and query plans** — reading `explain` output to confirm an index was used and to spot a covered query.
+5. **Index types** — multikey, text, TTL, partial, unique, and sparse indexes for the cases a plain index cannot cover.
+
+## Tips and gotchas
+
+- Every collection starts with one index already: a unique index on `_id`. You never have to create it, and you cannot drop it.
+- Indexes are not free. They speed up reads but add work to every insert, update, and delete, because the index must be kept in sync. Index the fields your queries actually use, not every field.
+- An index lives on disk and in memory like the data it describes. A pile of unused indexes wastes both, so it is worth removing ones no query relies on.
+
+<Callout title="The one idea behind every index">
+An index trades a little extra write cost and storage for the ability to find documents by seeking through sorted values instead of scanning every document. The rest of this module is just choosing which fields to sort.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does MongoDB do to answer a query when no useful index exists?',
+    options: [
+      'It refuses to run the query',
+      'It reads every document in the collection (a COLLSCAN)',
+      'It returns only the first document it finds',
+      'It builds an index automatically and then answers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is an index, fundamentally?',
+    options: [
+      'A cached copy of the most recent query results',
+      'A separate ordered structure of field values with pointers to the documents',
+      'A backup of the collection on another server',
+      'A faster replacement for the collection itself',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which index does every collection have without you creating it?',
+    options: ['An index on the first field you insert', 'A unique index on _id', 'A text index', 'No index until you add one'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="indexes/index" />

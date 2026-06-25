@@ -1,0 +1,217 @@
+---
+title: Read and write concerns
+description: Tune durability with write concern (w, j, wtimeout) and visibility with read concern (local, majority, linearizable), plus read preference and the latency trade-off.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A replica set keeps several copies of your data: one **primary** that takes all writes, and one or more **secondaries** that copy those writes over. This redundancy is what makes the durability and visibility knobs meaningful. When you write, you can decide how many of those copies must confirm the write before you consider it done. When you read, you can decide how committed and how fresh the data you get back must be. The two settings are the **write concern** and the **read concern**, and they let you slide between fast-but-weaker and slow-but-stronger on every operation.
+
+## Write concern: how durable, how confirmed
+
+A write concern has three parts. The `w` value says how many members must acknowledge the write: `w: 1` means only the primary, while `w: "majority"` means a majority of the set has stored it — the level at which a write survives the loss of any single member. The `j` value, when true, requires the write to be flushed to the on-disk **journal** before it is acknowledged, so it survives a crash, not just a process restart. And `wtimeout` caps how long the driver waits for those acknowledgements before giving up with an error.
+
+Here we insert a member and demand that a majority of the set confirms it, journalled, within five seconds:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertOne(
+      { name: "Grace", fines: 0 },
+      { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").insertOne(
+      { name: "Grace", fines: 0 },
+      { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import WriteConcern
+
+    db.members.with_options(
+        write_concern=WriteConcern(w="majority", j=True, wtimeout=5000)
+    ).insert_one({"name": "Grace", "fines": 0})
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    wc := writeconcern.Majority()
+    coll := client.Database("library").Collection(
+        "members", options.Collection().SetWriteConcern(wc),
+    )
+    _, err := coll.InsertOne(ctx, bson.M{"name": "Grace", "fines": 0})
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let wc = WriteConcern::builder()
+        .w(Acknowledgment::Majority)
+        .journal(true)
+        .build();
+    let coll = client
+        .database("library")
+        .collection::<Document>("members")
+        .clone_with_options(CollectionOptions::builder().write_concern(wc).build());
+    coll.insert_one(doc! { "name": "Grace", "fines": 0 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The acknowledgement comes back only once the majority has stored the write:
+
+```json
+{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1e7" }
+```
+
+## Read concern and read preference: how fresh, from where
+
+A **read concern** controls which version of the data a read may return. With `local`, you get whatever the member you queried has right now, even if that data could later be rolled back. With `majority`, you only see data that a majority of the set has stored, so what you read will not be undone. With `linearizable`, a read on the primary reflects every write that was acknowledged before it began — the strongest and slowest option. A separate setting, the **read preference**, chooses *which member* answers: `primary` always gives the freshest data, while `secondary` spreads read load across copies at the cost of possibly trailing slightly behind.
+
+Here we read with a majority read concern from the primary, asking for data we know cannot be rolled back:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ fines: 0 })
+      .readConcern("majority")
+      .readPref("primary")
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: 0 }, {
+        readConcern: { level: "majority" },
+        readPreference: "primary"
+      })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import ReadPreference
+    from pymongo.read_concern import ReadConcern
+
+    docs = list(
+        db.members.with_options(
+            read_concern=ReadConcern("majority"),
+            read_preference=ReadPreference.PRIMARY,
+        ).find({"fines": 0})
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    coll := client.Database("library").Collection(
+        "members",
+        options.Collection().
+            SetReadConcern(readconcern.Majority()).
+            SetReadPreference(readpref.Primary()),
+    )
+    cur, err := coll.Find(ctx, bson.M{"fines": 0})
+    if err != nil {
+        return err
+    }
+    defer cur.Close(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let coll = client
+        .database("library")
+        .collection::<Document>("members")
+        .clone_with_options(
+            CollectionOptions::builder()
+                .read_concern(ReadConcern::majority())
+                .selection_criteria(SelectionCriteria::ReadPreference(ReadPreference::Primary))
+                .build(),
+        );
+    let mut cursor = coll.find(doc! { "fines": 0 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## The trade-off, drawn out
+
+Every step toward stronger guarantees costs latency. A `w: 1` write returns the instant the primary has it; a `w: "majority"` write waits for the data to travel to and be stored by other members first. The flow below shows where that extra time goes:
+
+export const ackFlow = `flowchart TD
+  C["Client sends a write"] --> P["Primary stores it"]
+  P --> R1["Secondary one replicates"]
+  P --> R2["Secondary two replicates"]
+  R1 --> M{"Majority has stored it?"}
+  R2 --> M
+  P --> M
+  M -->|"Yes"| ACK["Acknowledge to client — write is durable"]`
+
+<Mermaid code={ackFlow} title="With majority write concern the client waits until a majority of members has stored the write before it is acknowledged" />
+
+**In Compass:** the connection settings dialog lets you set a default read preference for the whole session, so reads you run in the Documents tab can be routed to secondaries without changing each query.
+
+## Tips and gotchas
+
+- `w: "majority"` is the sweet spot for durability that survives a failover; `w: 1` is faster but a not-yet-replicated write can be lost if the primary fails right after acknowledging it.
+- `wtimeout` only bounds the *wait*. If it fires, the write may still have been applied on the primary — it just was not confirmed by enough members in time, so treat the timeout as uncertain, not as a clean failure.
+- Reading from a secondary with read preference `secondary` can return slightly stale data, because secondaries trail the primary. Pair it with a read concern that matches how fresh your application actually needs the data to be.
+
+<Callout title="Pick the weakest guarantee that is still correct">
+Stronger concerns cost latency, so do not reach for linearizable reads or journalled majority writes everywhere by reflex. Choose the lightest setting that still meets the correctness your use case demands, and spend the latency only where it buys you something.
+</Callout>
+
+export const quizConcerns = [
+  {
+    q: 'What does a write concern of w: "majority" guarantee?',
+    options: [
+      'Only the primary has the write',
+      'A majority of the set has stored the write, so it survives one member failing',
+      'Every member has the write before acknowledging',
+      'The write skips the journal for speed',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the j option in a write concern require?',
+    options: [
+      'That the write is sent to a secondary first',
+      'That the write is flushed to the on-disk journal before acknowledgement',
+      'That a join is performed on the data',
+      'That the write is rejected if a conflict exists',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which read concern only returns data a majority has stored?',
+    options: ['local', 'majority', 'available', 'primary'],
+    answer: 1,
+  },
+  {
+    q: 'What does read preference control?',
+    options: [
+      'How many members acknowledge a write',
+      'Which member of the set answers a read',
+      'Whether the journal is used',
+      'The order of fields returned',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/read-and-write-concerns" questions={quizConcerns} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/read-and-write-concerns" />

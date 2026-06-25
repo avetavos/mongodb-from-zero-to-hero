@@ -1,5 +1,124 @@
 ---
-title: CRUD
-description: Create, read, update, and delete documents with mongosh and the official drivers.
+title: CRUD ใน MongoDB
+description: ภาพรวมของกลุ่มการทำงาน CRUD ทั้งสี่กลุ่มใน MongoDB และ method ที่คุณใช้ในแต่ละกลุ่ม
+sidebar:
+  order: 1
 ---
-Coming soon.
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ทุกฐานข้อมูลสรุปลงมาเหลือสี่สิ่งที่คุณทำกับข้อมูลของคุณได้ นั่นคือ ใส่ระเบียนใหม่เข้าไป อ่านมันกลับออกมา เปลี่ยนแปลงมัน และทิ้งมันไป ผู้คนย่อสี่กริยานี้ให้เหลือ **CRUD** — Create, Read, Update, Delete ใน MongoDB "ระเบียน" เหล่านั้นคือ document ที่มีลักษณะคล้าย JSON ซึ่งอยู่ภายใน collection และกริยาเหล่านั้นจับคู่กับชุด method เล็ก ๆ ที่คาดเดาได้ ซึ่งหน้าตาแทบจะเหมือนกันไม่ว่าคุณจะพิมพ์มันลงในเชลล์ หรือเรียกมันจาก driver ใน Node.js, Python, Go หรือ Rust
+
+โมดูลนี้คือหัวใจในการทำงานของคอร์สนี้ เมื่อจบโมดูลนี้คุณจะสามารถโหลด document เข้าไปใน collection ดึงมันกลับออกมาด้วย filter เปลี่ยนแปลง field อย่างแม่นยำโดยไม่ไปทำลายส่วนที่เหลือของ document ลบเฉพาะสิ่งที่คุณตั้งใจจะลบ และรวมการเขียนหลาย ๆ ครั้งให้เป็นการเดินทางไปกลับ (round trip) ที่มีประสิทธิภาพเพียงครั้งเดียว เราจะจงใจให้ข้อมูลมีขนาดเล็กและเป็นเรื่องสมมติ — สมาชิกห้องสมุดในจินตนาการไม่กี่คนกับหนังสือที่พวกเขายืม — เพื่อให้การทำงานต่าง ๆ อยู่ในจุดสนใจ
+
+export const crudFlowDiagram = `flowchart LR
+  App["Your app or mongosh"] -->|"insert / find / update / delete"| Driver["Driver or shell"]
+  Driver --> Coll["Collection: members"]
+  Coll --> D1["{ _id, name, fines }"]
+  Coll --> D2["{ _id, name, fines }"]
+  Coll --> D3["{ _id, name, fines }"]`
+
+<Mermaid code={crudFlowDiagram} title="การเรียก CRUD เดินทางจากโค้ดของคุณ ผ่าน driver เข้าไปยัง collection ของ document" />
+
+## กลุ่มการทำงานทั้งสี่
+
+แต่ละกลุ่มมี method แบบเอกพจน์ที่แตะต้อง document ได้มากที่สุดหนึ่งรายการ และ method แบบพหูพจน์ที่แตะต้องได้หลายรายการ นี่คือคำศัพท์ทั้งหมดที่คุณจะใช้เวลาในโมดูลนี้เรียนรู้:
+
+- **Create** — `insertOne` เพิ่ม document หนึ่งรายการ, `insertMany` เพิ่ม array ของพวกมัน
+- **Read** — `findOne` คืน document แรกที่ตรงกัน (หรือไม่คืนอะไรเลย), `find` คืน cursor ครอบทุกรายการที่ตรงกัน
+- **Update** — `updateOne` เปลี่ยนรายการแรกที่ตรงกัน, `updateMany` เปลี่ยนทุกรายการที่ตรงกัน ทั้งคู่ใช้ update operator อย่าง `$set` และ `$inc`
+- **Delete** — `deleteOne` ลบรายการแรกที่ตรงกัน, `deleteMany` ลบทุกรายการที่ตรงกัน
+
+รูปแบบเดียวกันนี้ปรากฏในทั้งห้าแท็บที่คุณจะเห็นตลอดทั้งโมดูลนี้ ลองสังเกตว่าการ insert อ่านแล้วแทบจะเหมือนกันทั้งในเชลล์และในแต่ละ driver:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertOne({ name: "Ada", fines: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").insertOne({ name: "Ada", fines: 0 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.insert_one({"name": "Ada", "fines": 0})
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    coll.InsertOne(ctx, bson.M{"name": "Ada", "fines": 0})
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.insert_one(doc! { "name": "Ada", "fines": 0 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+หลังจากการ insert นั้น document ที่ถูกจัดเก็บจะมีหน้าตาแบบนี้ — สังเกต `_id` ที่ MongoDB เพิ่มให้คุณ:
+
+```json
+{ "_id": "65f0a1c2e4b0a1c2e4b0a1c2", "name": "Ada", "fines": 0 }
+```
+
+**ใน Compass:** กลุ่มทั้งสี่เดียวกันนี้จับคู่กับ GUI — Compass แสดง document ในแท็บ **Documents** ที่ซึ่งคุณสามารถ insert ด้วยปุ่มสีเขียว **ADD DATA** แก้ไข field แบบ inline และลบ document ด้วยไอคอนถังขยะที่ปรากฏขึ้นเมื่อเอาเมาส์ไปวาง
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+บทเรียนที่ตามมาจะหยิบแต่ละกลุ่มมาทีละกลุ่ม แล้วจบด้วยสองท่าไม้ตายที่รวมหลายกลุ่มเข้าด้วยกัน:
+
+1. **Insert** — การเพิ่ม document หนึ่งรายการหรือหลายรายการ และ `_id` อัตโนมัติ
+2. **Read** — `find` เทียบกับ `findOne`, filter แบบ equality และแบบหลาย field และการได้ลิ้มลอง projection เป็นครั้งแรก
+3. **Update** — `$set`, `$inc`, `$unset`, `$push`, `$pull` และการอ่านจำนวนที่ตรงกัน (match count) ที่การเขียนคืนกลับมา
+4. **Delete** — การลบ document อย่างแม่นยำ บวกกับรูปแบบ soft-delete
+5. **Upsert และ bulk write** — "insert ถ้ายังไม่มี ไม่อย่างนั้นก็ update" และการอัด operation หลาย ๆ รายการเข้าไปในการเดินทางไปยังเซิร์ฟเวอร์เพียงครั้งเดียว
+
+## เคล็ดลับและจุดที่ต้องระวัง
+
+- method แบบเอกพจน์ (`insertOne`, `findOne`, `updateOne`, `deleteOne`) ไม่เคยส่งผลต่อ document มากกว่าหนึ่งรายการ แม้ว่าจะมีหลายรายการตรงกัน — สะดวกในฐานะราวกันตก
+- method แบบเขียนคืนค่า **acknowledgement** ที่อธิบายว่าเกิดอะไรขึ้น (จำนวนนับ, id ที่ถูก insert) การอ่านผลลัพธ์นั้นคือวิธีที่คุณยืนยันว่า operation ทำในสิ่งที่คุณตั้งใจ
+- filter ที่ไม่ตรงกับอะไรเลยไม่ใช่ error การ update หรือ delete ที่ตรงกับ document ศูนย์รายการก็เพียงแค่รายงานว่ามีการเปลี่ยนแปลงศูนย์รายการ
+
+<Callout title="แบบจำลองทางความคิด">
+CRUD ก็เป็นเพียงสี่กริยาที่กระทำต่อถุงของ document ฝึกฝนรูปแบบเอกพจน์ของแต่ละกริยาให้ชำนาญก่อน รูปแบบพหูพจน์ก็คือการเรียกเดียวกันด้วย filter ที่บังเอิญตรงกับมากกว่าหนึ่ง document
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'method ใดอ่าน document แรกที่ตรงกับ filter กลับคืนมา?',
+    options: ['getOne', 'findOne', 'readOne', 'selectOne'],
+    answer: 1,
+  },
+  {
+    q: 'รูปแบบเอกพจน์ของ method แบบเขียน (เช่น updateOne) รับประกันอะไร?',
+    options: [
+      'มันเร็วกว่ารูปแบบพหูพจน์ในทุกกรณี',
+      'มันส่งผลต่อ document อย่างมากที่สุดหนึ่งรายการ แม้ว่าจะมีหลายรายการตรงกัน',
+      'มันข้ามขั้นตอน acknowledgement',
+      'มันไม่สามารถรับ filter ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'CRUD ย่อมาจากการทำงานสี่อย่างใด?',
+    options: [
+      'Connect, Read, Update, Disconnect',
+      'Create, Replace, Undo, Delete',
+      'Create, Read, Update, Delete',
+      'Cache, Read, Upsert, Drop',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="crud/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="crud/index" />

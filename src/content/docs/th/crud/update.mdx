@@ -1,0 +1,462 @@
+---
+title: การ update document
+description: เปลี่ยน document ด้วย updateOne และ updateMany โดยใช้ $set, $inc, $unset, $push และ $pull และอ่านจำนวนที่ตรงกัน (match count) ที่การเขียนคืนกลับมา
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การ update คือ operation ที่ผู้คนมักทำผิดแบบแนบเนียนบ่อยที่สุด เพราะแบบจำลองทางความคิดที่ดูเหมือนจะถูก — "ค้นหา document แล้วเขียนทับ field" — ไม่ใช่วิธีที่ MongoDB ทำงานโดยปริยาย การ update คือ document สองตัว นั่นคือ **filter** ที่เลือกว่าจะเปลี่ยน document ใด และ **update document** ที่สร้างขึ้นจาก **operator** ที่อธิบายการเปลี่ยนแปลง operator นั่นแหละคือหัวใจทั้งหมด มันทำให้คุณเพิ่มตัวเลข กำหนด field ลบ field หรือ push เข้า array ได้โดยไม่ไปแตะต้องอะไรอย่างอื่นใน document
+
+เราจะแก้ไข `members` ห้องสมุดของเราต่อไป ทุกตัวอย่างด้านล่างแสดง document ทั้ง **ก่อน** และ **หลัง** เพื่อให้คุณเห็นได้ชัดเจนว่าแต่ละ operator ทำอะไรไป
+
+## updateOne กับ $set
+
+`$set` เขียนค่าลงไปใน field ถ้า field มีอยู่แล้วมันถูกเขียนทับ ถ้ายังไม่มีมันถูกสร้างขึ้น `updateOne` ใช้การเปลี่ยนแปลงกับ document **แรก** ที่ตรงกับ filter แล้วหยุดที่นั่น ในที่นี้เราบันทึกว่า Edsger จ่ายค่าปรับครบแล้ว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Edsger" },
+      { $set: { fines: 0 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").updateOne(
+      { name: "Edsger" },
+      { $set: { fines: 0 } }
+    );
+    console.log(res.matchedCount, res.modifiedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.update_one(
+        {"name": "Edsger"},
+        {"$set": {"fines": 0}},
+    )
+    print(res.matched_count, res.modified_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Edsger"},
+        bson.M{"$set": bson.M{"fines": 0}},
+    )
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.MatchedCount, res.ModifiedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll
+        .update_one(
+            doc! { "name": "Edsger" },
+            doc! { "$set": { "fines": 0 } },
+        )
+        .await?;
+    println!("{} {}", res.matched_count, res.modified_count);
+    ```
+  </TabItem>
+</Tabs>
+
+ก่อนการ update Edsger ติดหนี้อยู่ห้า:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d3", "name": "Edsger", "joined": 2022, "fines": 5 }
+```
+
+หลังจากนั้น เปลี่ยนแปลงเฉพาะ field `fines` เท่านั้น:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d3", "name": "Edsger", "joined": 2022, "fines": 0 }
+```
+
+acknowledgement บอกคุณว่า operation เป็นอย่างไร `matchedCount` คือจำนวน document ที่ filter พบ ส่วน `modifiedCount` คือจำนวนที่เปลี่ยนแปลงไปจริง ๆ:
+
+```json
+{ "acknowledged": true, "matchedCount": 1, "modifiedCount": 1 }
+```
+
+ถ้าคุณรันการ update เดียวกันเป๊ะ ๆ อีกครั้ง ค่าก็เป็น `0` อยู่แล้ว ดังนั้น `matchedCount` ยังคงเป็น `1` แต่ `modifiedCount` เป็น `0` — document ตรงกันแต่ไม่มีอะไรที่ต้องเปลี่ยน
+
+## $inc และการเพิ่ม field ใหม่
+
+`$inc` บวกตัวเลขเข้าไปใน field (ใช้ตัวเลขติดลบเพื่อลบออก) มันเป็น atomic ซึ่งเป็นเครื่องมือที่ถูกต้องสำหรับตัวนับและยอดคงเหลือ `$set` ยังทำหน้าที่เป็นวิธี **เพิ่ม** field ที่ไม่เคยมีอยู่อีกด้วย — ในที่นี้เราทั้งคิดค่าปรับล่าช้าและประทับปี `lastSeen` ให้สมาชิกในการเรียกครั้งเดียว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Linus" },
+      { $inc: { fines: 3 }, $set: { lastSeen: 2026 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Linus" },
+      { $inc: { fines: 3 }, $set: { lastSeen: 2026 } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Linus"},
+        {"$inc": {"fines": 3}, "$set": {"lastSeen": 2026}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Linus"},
+        bson.M{
+            "$inc": bson.M{"fines": 3},
+            "$set": bson.M{"lastSeen": 2026},
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Linus" },
+        doc! { "$inc": { "fines": 3 }, "$set": { "lastSeen": 2026 } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ก่อนหน้านี้ Linus มีค่าปรับสองและไม่มี field `lastSeen`:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 2 }
+```
+
+หลังจากนั้น จำนวนเพิ่มขึ้นสามและ field ใหม่เอี่ยมปรากฏขึ้น:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Linus",
+  "joined": 2023,
+  "fines": 5,
+  "lastSeen": 2026
+}
+```
+
+## การลบ field ด้วย $unset
+
+ในการลบ field ทิ้งไปทั้งหมด — ไม่ใช่กำหนดให้เป็น `null` แต่ทำให้มันเลิกมีอยู่ — ให้ใช้ `$unset` ค่าที่คุณให้มันถูกเพิกเฉย มีเพียงชื่อ field เท่านั้นที่สำคัญ ในที่นี้เราถอด field `lastSeen` ออกจาก Linus กลับไป:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Linus" },
+      { $unset: { lastSeen: "" } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Linus" },
+      { $unset: { lastSeen: "" } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Linus"},
+        {"$unset": {"lastSeen": ""}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Linus"},
+        bson.M{"$unset": bson.M{"lastSeen": ""}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Linus" },
+        doc! { "$unset": { "lastSeen": "" } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+field `lastSeen` หายไปอีกครั้ง และไม่มีอะไรอย่างอื่นขยับ:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 }
+```
+
+## การทำงานกับ array: $push และ $pull
+
+document มักเก็บ array ไว้ และคุณแทบไม่อยากแทนที่ array ทั้งก้อนเพื่อเพิ่มหรือลบ element เพียงตัวเดียว `$push` ต่อท้าย element หนึ่งตัว ส่วน `$pull` ลบทุก element ที่ตรงกับค่าหนึ่ง ลองนึกภาพว่าสมาชิกแต่ละคนถือ array `borrowed` ของชื่อหนังสือ ก่อนอื่นเราให้ Margaret ยืมหนังสือเล่มหนึ่ง:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Margaret" },
+      { $push: { borrowed: "Compilers" } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Margaret" },
+      { $push: { borrowed: "Compilers" } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Margaret"},
+        {"$push": {"borrowed": "Compilers"}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Margaret"},
+        bson.M{"$push": bson.M{"borrowed": "Compilers"}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Margaret" },
+        doc! { "$push": { "borrowed": "Compilers" } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ถ้า field `borrowed` ยังไม่มีอยู่ `$push` จะสร้างมันขึ้นเป็น array ที่มี element เดียว:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+  "name": "Margaret",
+  "joined": 2023,
+  "fines": 0,
+  "borrowed": ["Compilers"]
+}
+```
+
+เมื่อหนังสือถูกส่งคืน `$pull` ลบมันออกตามค่า:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Margaret" },
+      { $pull: { borrowed: "Compilers" } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Margaret" },
+      { $pull: { borrowed: "Compilers" } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.update_one(
+        {"name": "Margaret"},
+        {"$pull": {"borrowed": "Compilers"}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Margaret"},
+        bson.M{"$pull": bson.M{"borrowed": "Compilers"}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "name": "Margaret" },
+        doc! { "$pull": { "borrowed": "Compilers" } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+element หายไปและ array ว่างเปล่าอีกครั้ง:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+  "name": "Margaret",
+  "joined": 2023,
+  "fines": 0,
+  "borrowed": []
+}
+```
+
+## updateMany: เปลี่ยนทุกรายการที่ตรงกัน
+
+`updateMany` คือการเรียกเดียวกันกับ `updateOne` แต่มันใช้การเปลี่ยนแปลงกับ document **ทุก** รายการที่ filter เลือก ในที่นี้เรายกค่าปรับให้หนึ่งครั้งสำหรับทุกคนที่ติดหนี้อยู่ในตอนนี้ — สังเกต `$inc` ที่เป็นค่าติดลบ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateMany(
+      { fines: { $gt: 0 } },
+      { $inc: { fines: -1 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").updateMany(
+      { fines: { $gt: 0 } },
+      { $inc: { fines: -1 } }
+    );
+    console.log(res.matchedCount, res.modifiedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.update_many(
+        {"fines": {"$gt": 0}},
+        {"$inc": {"fines": -1}},
+    )
+    print(res.matched_count, res.modified_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.UpdateMany(
+        ctx,
+        bson.M{"fines": bson.M{"$gt": 0}},
+        bson.M{"$inc": bson.M{"fines": -1}},
+    )
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.MatchedCount, res.ModifiedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll
+        .update_many(
+            doc! { "fines": { "$gt": 0 } },
+            doc! { "$inc": { "fines": -1 } },
+        )
+        .await?;
+    println!("{} {}", res.matched_count, res.modified_count);
+    ```
+  </TabItem>
+</Tabs>
+
+ตอนนี้จำนวนนับสะท้อนทุกคนที่ถูกแตะต้องใน operation เดียวนี้:
+
+```json
+{ "acknowledged": true, "matchedCount": 2, "modifiedCount": 2 }
+```
+
+**ใน Compass:** ดับเบิลคลิกค่าของ field ใด ๆ ในแท็บ Documents เพื่อแก้ไขมันแบบ inline หรือใช้ปุ่ม **Update** หลังจากป้อน filter เพื่อใช้ update document กับหลายรายการที่ตรงกันในคราวเดียว
+
+## เคล็ดลับและจุดที่ต้องระวัง
+
+- **จุดที่ต้องระวังที่สำคัญที่สุด:** ถ้าคุณส่ง update document ที่ *ไม่มี operator เลย* — document ธรรมดาแบบที่คุณจะใช้ insert — MongoDB จะปฏิบัติกับมันเป็น **การแทนที่ทั้งก้อน (full replacement)** และล้างทุก field ที่คุณไม่ได้ใส่ไว้ทิ้ง เกือบจะเสมอที่คุณต้องการ `$set` ไม่ใช่การแทนที่เปล่า ๆ
+- `matchedCount` และ `modifiedCount` สามารถต่างกันได้ document สามารถตรงกับ filter แต่ไม่ถูกแก้ไข เพราะค่าใหม่เท่ากับค่าเก่า การรัน update ที่เป็น idempotent ซ้ำคือกรณีคลาสสิก
+- `updateMany` ไม่มีลิมิตในตัว — มันเปลี่ยน *ทุก* รายการที่ตรงกัน ตรวจ filter ของคุณให้ดีก่อนรัน filter ที่กว้างเกินไปจะเขียนทับ document มากกว่าที่คุณตั้งใจไว้อย่างเงียบ ๆ
+- `$set` สร้าง field ที่ขาดหายไป `$unset` ลบมันออก และ `$inc` ทำงานได้แม้ field จะไม่มีอยู่ (มันเริ่มจากศูนย์) operator เหล่านี้ให้อภัยในเรื่องว่า field มีอยู่แล้วหรือยัง
+
+<Callout title="เอื้อมไปหา operator ไม่ใช่การแทนที่">
+กฎข้อเดียวที่ป้องกันบั๊ก update ที่เลวร้ายที่สุด นั่นคือ ในการเปลี่ยนส่วนหนึ่งของ document ให้ห่อการเปลี่ยนแปลงของคุณไว้ใน $set (หรือ $inc, $push, $unset, …) document เปล่า ๆ ที่ไม่มี operator จะแทนที่ทั้งก้อน
+</Callout>
+
+export const quizUpdate = [
+  {
+    q: 'คุณเรียก updateOne ด้วย document ธรรมดาที่ไม่มี operator เลย จะเกิดอะไรขึ้น?',
+    options: [
+      'เปลี่ยนเฉพาะ field ที่ระบุไว้เท่านั้น ที่เหลือถูกเก็บไว้',
+      'document ทั้งก้อนที่ตรงกันถูกแทนที่ ทำให้ field ที่คุณไม่ได้ใส่ไว้หายไป',
+      'การเรียกถูกปฏิเสธว่าไม่ถูกต้อง',
+      'document ใหม่ถูก insert แทน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'matchedCount เป็น 1 แต่ modifiedCount เป็น 0 หลังการ update เพราะอะไร?',
+    options: [
+      'filter ไม่ตรงกับอะไรเลย',
+      'update document ว่างเปล่า',
+      'document ตรงกัน แต่ค่าใหม่เท่ากับค่าที่มีอยู่',
+      'updateOne ไม่เคยรายงาน modifiedCount',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'operator ใดลบ field ออกจาก document ทั้งหมด?',
+    options: ['$set ด้วย null', '$pull', '$unset', '$inc ด้วย 0'],
+    answer: 2,
+  },
+  {
+    q: 'คุณต่อท้าย element หนึ่งตัวเข้าไปใน field ที่เป็น array โดยไม่แทนที่ array ได้อย่างไร?',
+    options: ['$set ทั้ง array', '$push', '$inc', '$add'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="crud/update" questions={quizUpdate} />
+
+<ProgressTracker client:visible id="crud/update" />

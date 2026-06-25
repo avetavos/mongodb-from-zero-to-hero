@@ -1,0 +1,158 @@
+---
+title: Modeling relationships
+description: How to model one-to-one, one-to-many, and many-to-many relationships in MongoDB with embedding and referencing, plus the 16 MB document limit and the danger of unbounded arrays.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Every relationship between entities falls into one of three shapes by **cardinality** — how many of one thing relate to how many of another. A user has one profile (one-to-one). A user writes many posts (one-to-many). A student enrolls in many courses, and each course has many students (many-to-many). In a relational database the shape dictates a fixed mechanic: foreign keys and join tables. In MongoDB the shape only narrows your options; you still choose embed or reference for each, guided by the trade-offs from the previous lesson. This lesson walks the three shapes and the size limits that constrain them.
+
+## One-to-one
+
+When one document relates to exactly one other, embedding is usually the natural fit — the related data is bounded, owned by a single parent, and read alongside it. A user and their profile become one document:
+
+```json
+{
+  "_id": "user_42",
+  "email": "ada@example.com",
+  "profile": {
+    "displayName": "Ada Lovelace",
+    "bio": "Writes algorithms for engines that do not exist yet.",
+    "joinedYear": 2024
+  }
+}
+```
+
+export const oneToOneDiagram = `flowchart LR
+  U["User document"] --> P["profile sub-object embedded inside"]`
+
+<Mermaid code={oneToOneDiagram} title="One-to-one: embed the related data as a sub-object in the same document" />
+
+You would only split a one-to-one into two documents if the related part is large, rarely read, or accessed independently — for example, keeping a heavyweight binary or a rarely-touched audit block in its own collection so the hot document stays small.
+
+## One-to-many
+
+A one-to-many relationship — one parent, many children — has two good shapes. If the children are few and bounded, **embed them as an array**. A blog post with its handful of tags is a clean embed:
+
+```json
+{
+  "_id": "post_310",
+  "title": "Why documents win",
+  "tags": ["mongodb", "modeling", "nosql"]
+}
+```
+
+But when the "many" side can grow large or is queried on its own, **reference from the child** instead: each child document stores the parent's id. A user with potentially thousands of posts keeps the posts in their own collection, each pointing back:
+
+```json
+{ "_id": "post_310", "authorId": "user_42", "title": "Why documents win" }
+```
+
+export const oneToManyDiagram = `flowchart TB
+  subgraph FewBounded["Few and bounded — embed array"]
+    A0["Post document"] --> A1["tags: array of values"]
+  end
+  subgraph ManyUnbounded["Many or unbounded — reference from child"]
+    B0["User document"]
+    B1["Post: authorId points to user"]
+    B2["Post: authorId points to user"]
+    B1 --> B0
+    B2 --> B0
+  end`
+
+<Mermaid code={oneToManyDiagram} title="One-to-many: embed an array when children are few and bounded; reference from the child when the many side grows large" />
+
+The dividing question is "could this list grow without limit?" A post's tags will not; a user's posts might. That single question usually picks the model for you.
+
+## Many-to-many
+
+In a many-to-many relationship, each side relates to many of the other — students and courses, articles and tags, actors and films. The clean approach is **referencing with id arrays**, on one side or both. Putting the array on the side you most often read from gives you the fastest common query. Here each student carries the courses they are enrolled in:
+
+```json
+{ "_id": "student_7", "name": "Linus", "courseIds": ["c_db", "c_os", "c_net"] }
+```
+
+And the course documents stand on their own, referenced by id:
+
+```json
+{ "_id": "c_db", "title": "Database Systems", "term": "Fall 2026" }
+```
+
+export const manyToManyDiagram = `flowchart TB
+  S1["Student: courseIds array"]
+  S2["Student: courseIds array"]
+  C1["Course c_db"]
+  C2["Course c_os"]
+  S1 --> C1
+  S1 --> C2
+  S2 --> C1`
+
+<Mermaid code={manyToManyDiagram} title="Many-to-many: store an array of referenced ids on the side you read from most" />
+
+Storing the reference array on **both** sides (students list their courses *and* courses list their students) makes both directions fast to read, but doubles the write work — enrolling a student now means updating two documents and keeping them consistent. Choose two-sided references only when you genuinely read both directions often.
+
+## The 16 MB limit and unbounded arrays
+
+Every MongoDB document has a hard ceiling of **16 megabytes**. That is generous for normal data, but it turns embedding into a trap whenever the embedded array has no natural upper bound. An order with a few line items is safe forever; a chat room that embeds every message, or a stock ticker that embeds every price tick, will eventually slam into the limit — and long before it does, the ever-growing document becomes slow to read and rewrite, because the server moves the whole document on each update.
+
+The rule that follows: **never embed an array that can grow without bound.** If the count is open-ended, reference the children into their own collection, or use the Bucket pattern from the next lesson to cap each document's growth. Embed only what is naturally limited.
+
+## Tips and gotchas
+
+- The cardinality shape narrows your options, but you still pick embed or reference for each relationship based on size, growth, and access — there is no automatic answer.
+- One-to-one almost always embeds; the exception is a large or rarely-read sub-part that earns its own collection.
+- For one-to-many, ask "can the many side grow without limit?" If yes, reference from the child. If no, an embedded array is simpler and faster.
+- Two-sided references in many-to-many make both reads fast but every write must update both sides — only worth it when both directions are hot.
+- The 16 MB limit is a hard wall, but document *performance* degrades well before you reach it. Treat unbounded growth as the real enemy, not just the ceiling.
+
+<Callout title="Cardinality narrows; access decides">
+Let the relationship's shape rule out the obviously-wrong options, then let your access pattern and the growth question pick between what remains. And whatever you do, never embed an array that has no natural limit — that is how an embedding decision becomes a 16 MB cliff.
+</Callout>
+
+export const quizRelationships = [
+  {
+    q: 'For a one-to-one relationship where the related data is small and read together, what is usually best?',
+    options: [
+      'Reference it from a separate collection',
+      'Embed it as a sub-object in the same document',
+      'Store it in a join table',
+      'Split it across many documents',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a one-to-many relationship, when should you reference from the child rather than embed an array?',
+    options: [
+      'Always, regardless of size',
+      'When the many side can grow large or is queried on its own',
+      'Only when there is exactly one child',
+      'Never — embedding is always correct',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the hard maximum size of a single MongoDB document?',
+    options: ['1 MB', '16 MB', '256 MB', 'There is no limit'],
+    answer: 1,
+  },
+  {
+    q: 'Why is embedding an unbounded array dangerous even before it reaches 16 MB?',
+    options: [
+      'MongoDB rejects all arrays over ten elements',
+      'The ever-growing document becomes slow to read and rewrite',
+      'Arrays cannot be indexed',
+      'It automatically deletes old elements',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/modeling-relationships" questions={quizRelationships} />
+
+<ProgressTracker client:visible id="data-modeling/modeling-relationships" />

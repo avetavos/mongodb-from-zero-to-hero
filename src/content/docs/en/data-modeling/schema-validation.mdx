@@ -1,0 +1,214 @@
+---
+title: Schema validation
+description: Enforce an optional schema in MongoDB with $jsonSchema validators — bsonType, required, and properties — and control how strictly they apply with validationLevel and validationAction.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MongoDB is schema-flexible by default: a collection will happily accept documents of wildly different shapes, which is freeing during prototyping and dangerous in production. **Schema validation** lets you opt back into enforcement — to declare, for a given collection, which fields must exist, what types they must be, and what values are allowed — without giving up the document model's flexibility where you still want it. You attach the rules with a **`$jsonSchema`** validator, and from then on the server checks every write against them. It is the safety rail you add once a collection's shape has settled.
+
+## What a validator looks like
+
+A validator is a query expression that every document must satisfy. The `$jsonSchema` operator is the standard way to write one, built from three core keywords:
+
+- **`bsonType`** — the type a field (or the document) must be, such as `"object"`, `"string"`, `"int"`, or `"array"`.
+- **`required`** — an array of field names that must be present.
+- **`properties`** — a per-field map describing each field's type and constraints.
+
+Here is a validator for a `members` collection: every member must have a string `name` and an integer `joined` year of at least 1900, and if `fines` is present it must be a non-negative number.
+
+export const validationFlowDiagram = `flowchart LR
+  W["Incoming write"] --> V{"Matches $jsonSchema?"}
+  V -->|"Yes"| A["Accepted and stored"]
+  V -->|"No, action error"| R["Rejected with a validation error"]
+  V -->|"No, action warn"| L["Stored but logged as a warning"]`
+
+<Mermaid code={validationFlowDiagram} title="Each write is checked against the validator; the validationAction decides whether a failure is rejected or merely logged" />
+
+## Creating a collection with a validator
+
+Attaching a validator is part of creating the collection. The call below builds `members` with the rules described above. This is a real operation, so it looks slightly different in the shell and in each driver:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.createCollection("members", {
+      validator: {
+        $jsonSchema: {
+          bsonType: "object",
+          required: ["name", "joined"],
+          properties: {
+            name: { bsonType: "string" },
+            joined: { bsonType: "int", minimum: 1900 },
+            fines: { bsonType: "number", minimum: 0 }
+          }
+        }
+      },
+      validationLevel: "strict",
+      validationAction: "error"
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.createCollection("members", {
+      validator: {
+        $jsonSchema: {
+          bsonType: "object",
+          required: ["name", "joined"],
+          properties: {
+            name: { bsonType: "string" },
+            joined: { bsonType: "int", minimum: 1900 },
+            fines: { bsonType: "number", minimum: 0 },
+          },
+        },
+      },
+      validationLevel: "strict",
+      validationAction: "error",
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.create_collection(
+        "members",
+        validator={
+            "$jsonSchema": {
+                "bsonType": "object",
+                "required": ["name", "joined"],
+                "properties": {
+                    "name": {"bsonType": "string"},
+                    "joined": {"bsonType": "int", "minimum": 1900},
+                    "fines": {"bsonType": "number", "minimum": 0},
+                },
+            }
+        },
+        validationLevel="strict",
+        validationAction="error",
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    schema := bson.M{
+        "$jsonSchema": bson.M{
+            "bsonType": "object",
+            "required": bson.A{"name", "joined"},
+            "properties": bson.M{
+                "name":   bson.M{"bsonType": "string"},
+                "joined": bson.M{"bsonType": "int", "minimum": 1900},
+                "fines":  bson.M{"bsonType": "number", "minimum": 0},
+            },
+        },
+    }
+    opts := options.CreateCollection().
+        SetValidator(schema).
+        SetValidationLevel("strict").
+        SetValidationAction("error")
+    err := db.CreateCollection(ctx, "members", opts)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let validator = doc! {
+        "$jsonSchema": {
+            "bsonType": "object",
+            "required": ["name", "joined"],
+            "properties": {
+                "name": { "bsonType": "string" },
+                "joined": { "bsonType": "int", "minimum": 1900 },
+                "fines": { "bsonType": "number", "minimum": 0 }
+            }
+        }
+    };
+    db.create_collection("members")
+        .validator(validator)
+        .validation_level(ValidationLevel::Strict)
+        .validation_action(ValidationAction::Error)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A document that satisfies every rule is stored without comment:
+
+```json
+{ "name": "Ada", "joined": 2024, "fines": 0 }
+```
+
+A document that breaks a rule is rejected. This one is missing the required `joined` field and gives `name` the wrong type, so the write fails with a validation error rather than being silently stored:
+
+```json
+{ "name": 42 }
+```
+
+## validationLevel and validationAction
+
+Two knobs control how the rules bite. **`validationLevel`** decides *which* writes are checked: `"strict"` (the default) validates every insert and update, while `"moderate"` validates inserts and updates to documents that already satisfy the schema but leaves existing invalid documents alone — useful when you add validation to a collection that already holds messy data. **`validationAction`** decides what happens on failure: `"error"` (the default) rejects the write, while `"warn"` allows it but records a warning in the server log — a gentle way to discover violations without breaking writes during a migration.
+
+A common rollout is to begin with `validationAction: "warn"` and `validationLevel: "moderate"`, watch the logs to learn how much existing data violates the new rules, fix the offenders, then tighten to `"error"` and `"strict"`.
+
+**In Compass:** open a collection and go to the **Validation** tab. You can paste or edit a `$jsonSchema` document there, pick the validation level and action from dropdowns, and Compass will preview which existing documents would pass or fail before you save the rules — a safe way to test a validator against real data.
+
+## Tips and gotchas
+
+- Validation is opt-in and per-collection. A collection with no validator behaves exactly as before — nothing is enforced.
+- `bsonType` is stricter than JSON's loose number handling: `"int"`, `"long"`, `"double"`, and `"decimal"` are distinct. If a driver sends a value as a double where you required an int, the write fails — a frequent surprise.
+- `required` only checks that a field is *present*; the per-field rules in `properties` check its type and value. Use both together to fully pin a field down.
+- Use `"moderate"` plus `"warn"` when adding validation to an existing collection so you do not break writes to documents that predate the rules.
+- You can change or remove a validator later with the `collMod` command — validation is not a one-way door.
+
+<Callout title="Flexible by default, strict on purpose">
+MongoDB lets you start without a schema and add one once the shape settles. A `$jsonSchema` validator with `required` and `properties` turns "anything goes" into "these fields, these types," and `validationLevel` plus `validationAction` let you roll it out gently — warn first, enforce once the data is clean.
+</Callout>
+
+export const quizValidation = [
+  {
+    q: 'Which operator expresses a MongoDB schema validation rule?',
+    options: ['$schema', '$jsonSchema', '$validate', '$type'],
+    answer: 1,
+  },
+  {
+    q: 'What does the required keyword in a $jsonSchema validator do?',
+    options: [
+      'Sets default values for fields',
+      'Lists field names that must be present in the document',
+      'Forces every field to be a string',
+      'Makes the collection read-only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A validator uses validationAction set to "warn". What happens to a document that violates it?',
+    options: [
+      'The write is rejected with an error',
+      'The write is stored, and the violation is logged as a warning',
+      'The collection is dropped',
+      'The document is silently corrected',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why might you choose validationLevel "moderate" when adding rules to an existing collection?',
+    options: [
+      'It validates faster than strict',
+      'It leaves existing invalid documents alone while checking new writes',
+      'It disables the validator entirely',
+      'It is required for $jsonSchema',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/schema-validation" questions={quizValidation} />
+
+<ProgressTracker client:visible id="data-modeling/schema-validation" />

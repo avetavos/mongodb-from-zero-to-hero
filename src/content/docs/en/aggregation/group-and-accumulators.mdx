@@ -1,0 +1,323 @@
+---
+title: $group and accumulators
+description: Fold documents into groups by a key and summarise each group with accumulators like $sum, $avg, $min, $max, $push, and $addToSet, plus grand totals with _id null.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+`$group` is where aggregation earns its name. It collapses many documents into one document **per distinct value** of a key you choose, and for each group it computes summaries with **accumulators**. This is the stage that answers "how many per genre," "average price per buyer," "biggest order per title." If you have written `GROUP BY` in SQL, the instinct is the same; the spelling is different.
+
+We stay with the `sales` collection from the previous lessons.
+
+## Grouping by a key
+
+The `_id` of a `$group` stage is the grouping key — the field (or computed value) that documents are bucketed by. Every other field in the stage is an **accumulator**: an expression that folds all the documents in a group into a single value. Here we total the quantity sold per genre and also count the orders:
+
+export const groupFlow = `flowchart LR
+  In["sales documents"] --> G["$group _id genre"]
+  G --> A["accumulators: $sum quantity, $sum 1"]
+  A --> Out["one document per genre"]`
+
+<Mermaid code={groupFlow} title="Many documents fold into one result document for each distinct group key" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $group: {
+          _id: "$genre",
+          totalCopies: { $sum: "$quantity" },
+          orders: { $sum: 1 }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $group: {
+          _id: "$genre",
+          totalCopies: { $sum: "$quantity" },
+          orders: { $sum: 1 },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$group": {
+            "_id": "$genre",
+            "totalCopies": {"$sum": "$quantity"},
+            "orders": {"$sum": 1},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$group", bson.D{
+            {"_id", "$genre"},
+            {"totalCopies", bson.D{{"$sum", "$quantity"}}},
+            {"orders", bson.D{{"$sum", 1}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$group": {
+            "_id": "$genre",
+            "totalCopies": { "$sum": "$quantity" },
+            "orders": { "$sum": 1 }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+One document comes back per genre, each carrying its summaries:
+
+```json
+[
+  { "_id": "fiction", "totalCopies": 11, "orders": 4 },
+  { "_id": "science", "totalCopies": 5, "orders": 2 }
+]
+```
+
+## The common accumulators
+
+A handful of accumulators cover most needs. They all take an expression evaluated against each document in the group:
+
+- `$sum` — adds up a numeric expression, or counts with `$sum: 1`.
+- `$avg` — the mean of a numeric expression.
+- `$min` / `$max` — the smallest and largest value seen.
+- `$push` — collects every value into an array, duplicates included.
+- `$addToSet` — collects **distinct** values into an array.
+
+A dedicated `$count` stage also exists for the special case of "just count the documents." Here we profile each genre more fully — average price, the price range, and the set of buyers:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $group: {
+          _id: "$genre",
+          avgPrice: { $avg: "$price" },
+          cheapest: { $min: "$price" },
+          priciest: { $max: "$price" },
+          buyers: { $addToSet: "$buyer" }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $group: {
+          _id: "$genre",
+          avgPrice: { $avg: "$price" },
+          cheapest: { $min: "$price" },
+          priciest: { $max: "$price" },
+          buyers: { $addToSet: "$buyer" },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$group": {
+            "_id": "$genre",
+            "avgPrice": {"$avg": "$price"},
+            "cheapest": {"$min": "$price"},
+            "priciest": {"$max": "$price"},
+            "buyers": {"$addToSet": "$buyer"},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$group", bson.D{
+            {"_id", "$genre"},
+            {"avgPrice", bson.D{{"$avg", "$price"}}},
+            {"cheapest", bson.D{{"$min", "$price"}}},
+            {"priciest", bson.D{{"$max", "$price"}}},
+            {"buyers", bson.D{{"$addToSet", "$buyer"}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$group": {
+            "_id": "$genre",
+            "avgPrice": { "$avg": "$price" },
+            "cheapest": { "$min": "$price" },
+            "priciest": { "$max": "$price" },
+            "buyers": { "$addToSet": "$buyer" }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Each genre now has a full profile, and `buyers` holds each name only once:
+
+```json
+[
+  { "_id": "fiction", "avgPrice": 12.5, "cheapest": 9, "priciest": 15, "buyers": ["Ada", "Linus"] },
+  { "_id": "science", "avgPrice": 20, "cheapest": 18, "priciest": 22, "buyers": ["Grace"] }
+]
+```
+
+**In Compass:** the `$group` stage in the **Aggregations** tab gives you the same `_id` and accumulator structure. The preview is handy here — change the `_id` expression and watch the number of result documents change as the grouping coarsens or splits.
+
+## Grand totals with _id null
+
+Set the group `_id` to `null` and every document falls into a **single** group, giving you a grand total across the whole stream. This is how you compute "total revenue" or "overall average" with no per-key split:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $group: {
+          _id: null,
+          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
+          totalOrders: { $sum: 1 }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $group: {
+          _id: null,
+          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
+          totalOrders: { $sum: 1 },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$group": {
+            "_id": None,
+            "totalRevenue": {"$sum": {"$multiply": ["$price", "$quantity"]}},
+            "totalOrders": {"$sum": 1},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$group", bson.D{
+            {"_id", nil},
+            {"totalRevenue", bson.D{{"$sum", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}}}},
+            {"totalOrders", bson.D{{"$sum", 1}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$group": {
+            "_id": null,
+            "totalRevenue": { "$sum": { "$multiply": ["$price", "$quantity"] } },
+            "totalOrders": { "$sum": 1 }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A single summary document represents the whole collection:
+
+```json
+[
+  { "_id": null, "totalRevenue": 248, "totalOrders": 6 }
+]
+```
+
+## Tips and gotchas
+
+- After `$group`, only the fields you produced exist. The original document fields are gone unless you carried them through with an accumulator like `$push` or `$first`.
+- `$sum: 1` is the idiomatic "count rows in this group." `$sum: "$quantity"` adds a field's values instead.
+- `$push` keeps duplicates and order; `$addToSet` removes duplicates and does not promise an order. Reach for `$addToSet` when you want a *distinct* list.
+- Grouping does not sort. If you want the largest group first, add a `$sort` stage after `$group`.
+
+<Callout title="Group collapses, accumulators summarise">
+Picture $group as folding the stream by a key: one output document per distinct key. The accumulators decide what each fold remembers — a sum, an average, a set of values. Set _id to null to fold everything into one grand total.
+</Callout>
+
+export const quizGroup = [
+  {
+    q: 'What does the _id field of a $group stage specify?',
+    options: [
+      'The name of the output collection',
+      'The key documents are grouped by — one result document per distinct value',
+      'A filter applied before grouping',
+      'The sort order of the result',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you count the number of documents in each group?',
+    options: [
+      '$count: "$quantity"',
+      '$avg: 1',
+      '$sum: 1',
+      '$push: 1',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which accumulator collects only the distinct values into an array?',
+    options: ['$push', '$addToSet', '$sum', '$max'],
+    answer: 1,
+  },
+  {
+    q: 'What is the effect of setting a $group _id to null?',
+    options: [
+      'It is rejected as invalid',
+      'Every document falls into one group, producing a grand total',
+      'It groups by the _id field of each document',
+      'It removes the _id from the output',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/group-and-accumulators" questions={quizGroup} />
+
+<ProgressTracker client:visible id="aggregation/group-and-accumulators" />

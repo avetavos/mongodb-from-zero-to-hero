@@ -1,0 +1,127 @@
+---
+title: Documents and BSON
+description: Documents are stored as BSON, the common BSON types, and what the _id field and its ObjectId really encode.
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+You write documents as JSON, but MongoDB does not store them as JSON text. It stores them as **BSON** — short for **Binary JSON** — a compact binary format that adds the things JSON lacks: real numeric types, dates, binary data, and a few special types of its own. BSON is what makes a document fast to scan, precise about numbers, and able to carry types that plain JSON text cannot represent.
+
+You almost never see the raw BSON. The shell and drivers translate between BSON and the natural objects of your language for you. But knowing what types are available — and which one you are actually storing — saves you from a whole category of subtle bugs, especially around numbers and dates.
+
+## The common BSON types
+
+A document field can hold any of these. The everyday ones first:
+
+- **String** — UTF-8 text, like a name or a title.
+- **Int32** — a 32-bit integer, the default for whole numbers in many drivers.
+- **Int64** — a 64-bit integer, for whole numbers too large for 32 bits.
+- **Double** — a 64-bit floating-point number, the default for numbers with a decimal point.
+- **Boolean** — `true` or `false`.
+- **Date** — a moment in time, stored as milliseconds since the Unix epoch.
+- **Array** — an ordered list of values, which may themselves be any BSON type.
+- **Embedded document** — a full document nested inside a field, with its own fields.
+- **ObjectId** — a compact 12-byte identifier, the default type of the `_id` field.
+- **Null** — an explicit empty value (different from the field being absent).
+- **Decimal128** — a 128-bit decimal for exact base-10 arithmetic, the right type for money.
+
+A document is just these types composed together. Here is a rich example that uses most of them at once:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Ada",
+  "active": true,
+  "fines": 0,
+  "balance": "12.50",
+  "visits": 4815162342,
+  "joined": "2023-04-12T09:30:00Z",
+  "borrowed": ["Compilers", "Algorithms"],
+  "address": {
+    "city": "Cambridge",
+    "zip": "02139"
+  },
+  "nickname": null
+}
+```
+
+In that document `name` is a string, `active` a boolean, `fines` an int32, `balance` a Decimal128 (shown as a string so its precision survives), `visits` an int64, `joined` a Date, `borrowed` an array, `address` an embedded document, and `nickname` an explicit null. One field, one type — but a single document mixes them freely.
+
+## How the types nest
+
+The power of the document model is that arrays and embedded documents can contain more arrays and documents, to whatever depth your data needs.
+
+export const bsonDiagram = `flowchart TD
+  Doc["Document"] --> Scalars["Scalar fields\n string, int32, double, bool, date"]
+  Doc --> Id["_id: ObjectId"]
+  Doc --> Arr["Array field\n borrowed[ ]"]
+  Doc --> Emb["Embedded document\n address { }"]
+  Emb --> EmbF["city, zip"]`
+
+<Mermaid code={bsonDiagram} title="A document is scalar fields plus arrays and embedded documents nested to any depth" />
+
+## The _id field and ObjectId
+
+Every document has an `_id` field, and it is the document's **primary key** — unique within its collection. If you do not supply one when you insert, MongoDB generates an `_id` for you, and its default type is an **ObjectId**: a 12-byte value designed to be unique without coordinating with the server.
+
+Those 12 bytes are not random. An ObjectId encodes, in order:
+
+- A **4-byte timestamp** — the second the id was created. This is why ObjectIds sort roughly by creation time, and why you can extract a rough creation date from one.
+- A **5-byte random value** — unique per machine and process, so two processes do not collide.
+- A **3-byte counter** — incrementing per process, so even ids created in the same second differ.
+
+Because the timestamp comes first, sorting a collection by `_id` is almost the same as sorting by insertion time — a handy free side effect.
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Ada" }
+```
+
+You can also set `_id` yourself to any unique value — a string, a number, an email — when your data already has a natural key. MongoDB only requires that it exists and is unique; it does not have to be an ObjectId.
+
+## Tips and gotchas
+
+- **ObjectIds are generated client-side**, by the driver, not the server. That means your application knows the new `_id` the instant it builds the document, before the insert even reaches the database.
+- **Date is not the same as the BSON Timestamp type.** Use **Date** for the times you care about — when something happened. The separate **Timestamp** type is an internal value MongoDB uses for replication ordering, and is rarely what you want in your own data.
+- **Use Decimal128 for money.** A **Double** cannot represent values like `0.10` exactly, which leads to rounding errors in sums. Decimal128 does base-10 arithmetic exactly.
+- **Null is not absent.** A field set to `null` exists with a null value; a field that was never set does not exist at all. Queries can tell the two apart, so choose deliberately.
+
+<Callout title="JSON in, BSON underneath">
+You think in JSON, but MongoDB stores BSON — a binary format with real numbers, dates, and ObjectIds. Knowing which type a field actually holds, especially for numbers and dates, prevents a whole class of quiet bugs.
+</Callout>
+
+export const quizBson = [
+  {
+    q: 'What does BSON stand for, and why does MongoDB use it?',
+    options: [
+      'Basic Storage Object Notation; it is simpler than JSON',
+      'Binary JSON; a compact binary format that adds real types like dates and ObjectId',
+      'Buffered Serial Object Network; it streams data faster',
+      'Block Structured Object Notation; it stores data in fixed blocks',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the first part of an ObjectId encode?',
+    options: [
+      'A random number only',
+      'A 4-byte timestamp of when it was created',
+      'The collection name',
+      'The size of the document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which BSON type should you use to store money exactly?',
+    options: ['Double', 'Int32', 'Decimal128', 'String'],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/documents-and-bson" questions={quizBson} />
+
+<ProgressTracker client:visible id="intro-and-documents/documents-and-bson" />

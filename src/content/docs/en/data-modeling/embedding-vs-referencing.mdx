@@ -1,0 +1,138 @@
+---
+title: Embedding versus referencing
+description: The two ways to relate documents in MongoDB — nesting related data inside one document or storing an id and looking it up — and how to weigh read locality against duplication and document growth.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+There are exactly two ways to express a relationship between documents in MongoDB, and almost every modeling decision is a choice between them. You can **embed**: place the related data inside the parent document, nested as a sub-object or an array. Or you can **reference**: keep the related data in its own collection and store an identifier — usually the related document's `_id` — in the parent, then look it up with a second query when you need it. Embedding favors reading; referencing favors flexibility and avoids copies. Knowing which to reach for is the single most useful instinct in document modeling.
+
+We will use an order and its line items as the running example, because the same data can sensibly go either way depending on how the application behaves.
+
+## Embedding: keep it together
+
+When you embed, the related data lives inside the parent. The order below carries its items as a nested array, so the document is the complete answer to "show me this order":
+
+```json
+{
+  "_id": "order_5001",
+  "customer": "Grace Hopper",
+  "status": "shipped",
+  "items": [
+    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
+    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
+  ]
+}
+```
+
+The win is **read locality**: everything you need arrives in a single read, with no join and no second round trip. Embedded data is also updated atomically with its parent — a single write touches the order and all its items together. The costs are two. First, **duplication**: the item titles and prices are copies; if the canonical product price changes, this copy does not. Second, **document growth**: every embedded item makes the order bigger, and a document that grows without bound eventually runs into the hard 16 MB ceiling.
+
+## Referencing: keep it separate
+
+When you reference, the parent stores only an identifier and the real data lives elsewhere. Here the order keeps the customer as a reference and stores product ids for its items rather than copying product details:
+
+```json
+{
+  "_id": "order_5001",
+  "customerId": "cust_77",
+  "status": "shipped",
+  "items": [
+    { "productId": "BK-204", "qty": 1 },
+    { "productId": "BK-991", "qty": 2 }
+  ]
+}
+```
+
+The product details live once, in their own collection:
+
+```json
+{ "_id": "BK-204", "title": "Distributed Systems", "price": 42.0 }
+```
+
+Now there is **no duplication** — a price change in the `products` collection is seen everywhere instantly — and the order document stays small. The cost is the mirror image of embedding: rendering the order needs a **second lookup** (an application-side join, or a `$lookup` in the aggregation pipeline) to resolve those ids into titles and prices. You traded a fast single read for a guarantee that the data is never stale.
+
+## The two side by side
+
+The decision comes down to which pain you would rather have: the cost of a copy that can drift, or the cost of an extra lookup on every read.
+
+export const embedRefDiagram = `flowchart TB
+  subgraph Embed["Embedding — one document"]
+    E0["Read the order"] --> E1["Order document"]
+    E1 --> E2["items array nested inside"]
+    E2 --> E3["Done — one read, no join"]
+  end
+  subgraph Reference["Referencing — linked documents"]
+    F0["Read the order"] --> F1["Order document with productId values"]
+    F1 --> F2["Second lookup into products"]
+    F2 --> F3["Join results to render"]
+  end`
+
+<Mermaid code={embedRefDiagram} title="Embedding answers a read in one shot but copies data; referencing avoids copies but needs a second lookup" />
+
+A useful rule of thumb: embed data that is **read together, written together, and bounded in size**; reference data that is **large, shared across many parents, frequently updated on its own, or unbounded in count**. Customer names and order items that belong to exactly one order are natural embeds. A product catalog shared by thousands of orders, or a comment list that could grow forever, is a natural reference.
+
+**In Compass:** open the **Schema** tab on a collection and Compass samples your documents to show which fields exist, their types, and how often arrays and nested objects appear — a quick way to see whether you have been embedding or referencing in practice, and how large your embedded arrays have grown.
+
+## Tips and gotchas
+
+- Embedding gives you atomic writes for free: the parent and its embedded children change in one operation, with no multi-document coordination.
+- Referencing keeps shared data in one place, so an update is seen everywhere — but every read that needs the resolved data pays for an extra lookup.
+- You can mix both in one document. It is common to embed a small, denormalized snapshot (a few fields you display often) *and* keep a reference to the full record for when you need everything.
+- Watch document growth on embedded arrays. An array that only ever grows is the most common way an embedding decision quietly turns into a problem.
+
+<Callout title="Embed what you read together">
+The clearest signal for embedding is co-access: if your application almost always reads two pieces of data in the same breath, and the child is bounded and owned by exactly one parent, embed it. If the data is shared, large, or grows without limit, reference it instead.
+</Callout>
+
+export const quizEmbedRef = [
+  {
+    q: 'What is the main advantage of embedding related data in a document?',
+    options: [
+      'It guarantees the data is never duplicated',
+      'A single read returns everything with no join',
+      'It makes documents smaller',
+      'It removes the 16 MB document limit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the chief cost of referencing instead of embedding?',
+    options: [
+      'The parent document grows without bound',
+      'Reads need a second lookup to resolve the references',
+      'Writes can no longer be acknowledged',
+      'You must duplicate the referenced data',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which data is the most natural candidate for referencing rather than embedding?',
+    options: [
+      'A few address fields owned by one user',
+      'A product catalog shared across thousands of orders',
+      'A status string on its own document',
+      'A single timestamp field',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is duplication from embedding sometimes a problem?',
+    options: [
+      'MongoDB forbids storing the same value twice',
+      'The copy can drift out of sync when the canonical value changes',
+      'It always exceeds the document size limit',
+      'It disables atomic writes',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/embedding-vs-referencing" questions={quizEmbedRef} />
+
+<ProgressTracker client:visible id="data-modeling/embedding-vs-referencing" />

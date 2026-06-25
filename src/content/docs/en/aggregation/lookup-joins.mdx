@@ -1,0 +1,291 @@
+---
+title: $lookup — joining collections
+description: Join documents from another collection with $lookup using localField and foreignField, work with the resulting array, and use the pipeline form for richer joins.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MongoDB stores related data in separate collections often enough that you will sometimes need to stitch two of them back together. The `$lookup` stage does that join inside an aggregation pipeline: for each incoming document, it finds the matching documents in another collection and attaches them as an **array** field. It is a left outer join — every input document comes through, with an empty array when nothing matches.
+
+We add a second collection to the shop. Alongside `sales`, there is now a `books` collection describing each title:
+
+```json
+{ "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
+```
+
+A sales order references a book by its `title`:
+
+```json
+{ "_id": "a1", "title": "Dune", "quantity": 3, "price": 12 }
+```
+
+## The equality form: localField and foreignField
+
+The simplest `$lookup` matches one local field against one foreign field. You name the collection to join (`from`), the field on the incoming document (`localField`), the field on the foreign document (`foreignField`), and the name of the array field to add (`as`).
+
+export const joinFlow = `flowchart LR
+  S["sales: title = Dune"] --> L["$lookup from books on title"]
+  B["books: _id = Dune"] --> L
+  L --> O["sales doc with book array attached"]`
+
+<Mermaid code={joinFlow} title="Each sales document is joined to matching books and carries them in a new array field" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $lookup: {
+          from: "books",
+          localField: "title",
+          foreignField: "_id",
+          as: "book"
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $lookup: {
+          from: "books",
+          localField: "title",
+          foreignField: "_id",
+          as: "book",
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$lookup": {
+            "from": "books",
+            "localField": "title",
+            "foreignField": "_id",
+            "as": "book",
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$lookup", bson.D{
+            {"from", "books"},
+            {"localField", "title"},
+            {"foreignField", "_id"},
+            {"as", "book"},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$lookup": {
+            "from": "books",
+            "localField": "title",
+            "foreignField": "_id",
+            "as": "book"
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Each sales document now carries a `book` array holding the matched book document:
+
+```json
+[
+  {
+    "_id": "a1",
+    "title": "Dune",
+    "quantity": 3,
+    "price": 12,
+    "book": [
+      { "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
+    ]
+  }
+]
+```
+
+The result is **always an array**, even when at most one document matches, because a join can in general match many. A common next step is `$unwind` (the next lesson) to flatten that one-element array into a plain object.
+
+**In Compass:** the **Aggregations** tab offers `$lookup` from a dropdown and lets you pick the foreign collection and fields with form inputs. The preview shows the new array field appended to each document, which makes the "join attaches an array" behaviour concrete.
+
+## The pipeline form for richer joins
+
+When you need more than a single-field equality — filtering the foreign documents, projecting them, or matching on several conditions — use the **pipeline form**. You declare `let` variables from the local document and run a sub-pipeline against the foreign collection, comparing with `$expr`. Here we attach only books published after 1950, exposing just author and year:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $lookup: {
+          from: "books",
+          let: { t: "$title" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$t"] } } },
+            { $match: { year: { $gt: 1950 } } },
+            { $project: { _id: 0, author: 1, year: 1 } }
+          ],
+          as: "book"
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $lookup: {
+          from: "books",
+          let: { t: "$title" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$t"] } } },
+            { $match: { year: { $gt: 1950 } } },
+            { $project: { _id: 0, author: 1, year: 1 } },
+          ],
+          as: "book",
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$lookup": {
+            "from": "books",
+            "let": {"t": "$title"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$_id", "$$t"]}}},
+                {"$match": {"year": {"$gt": 1950}}},
+                {"$project": {"_id": 0, "author": 1, "year": 1}},
+            ],
+            "as": "book",
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$lookup", bson.D{
+            {"from", "books"},
+            {"let", bson.D{{"t", "$title"}}},
+            {"pipeline", bson.A{
+                bson.D{{"$match", bson.D{{"$expr", bson.D{{"$eq", bson.A{"$_id", "$$t"}}}}}}},
+                bson.D{{"$match", bson.D{{"year", bson.D{{"$gt", 1950}}}}}},
+                bson.D{{"$project", bson.D{{"_id", 0}, {"author", 1}, {"year", 1}}}},
+            }},
+            {"as", "book"},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$lookup": {
+            "from": "books",
+            "let": { "t": "$title" },
+            "pipeline": [
+                { "$match": { "$expr": { "$eq": ["$_id", "$$t"] } } },
+                { "$match": { "year": { "$gt": 1950 } } },
+                { "$project": { "_id": 0, "author": 1, "year": 1 } }
+            ],
+            "as": "book"
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The attached array now holds only the trimmed, filtered foreign document:
+
+```json
+[
+  {
+    "_id": "a1",
+    "title": "Dune",
+    "quantity": 3,
+    "price": 12,
+    "book": [ { "author": "Frank Herbert", "year": 1965 } ]
+  }
+]
+```
+
+Note the `$$t` syntax: a single `$` references a field of the foreign document, while `$$` references a `let` variable carried in from the local document.
+
+## Tips and gotchas
+
+- A `$lookup` runs a query against the foreign collection for every input document. **Index the `foreignField`** (or whatever the sub-pipeline matches on), or the join can become slow on real-world sizes.
+- It is a left outer join: input documents with no match still come through, with an empty `as` array. Filter those out afterward with `$match` if you only want joined rows.
+- Joins are powerful but not free. If you find yourself joining the same two collections on every read, that can be a sign the data wants to be **embedded** rather than referenced — a data-modeling question covered later.
+- The result field named in `as` is always an array. Pair `$lookup` with `$unwind` when you expect a single match and want a flat object.
+
+<Callout title="Lookup attaches an array">
+$lookup is a left outer join that hangs the matched foreign documents on a new array field. The equality form joins one field to one field; the pipeline form lets you filter and reshape the foreign side. Index the foreign field, because the join queries it once per input document.
+</Callout>
+
+export const quizLookup = [
+  {
+    q: 'In the equality form of $lookup, what does the "as" option name?',
+    options: [
+      'The foreign collection to join',
+      'The local field to match on',
+      'The new array field that holds the matched documents',
+      'The sort order of the join',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'A sales document matches exactly one book. What is the type of the field $lookup adds?',
+    options: [
+      'A plain embedded object',
+      'An array containing the matched document',
+      'A string with the matched _id',
+      'A null value',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which index most improves $lookup performance?',
+    options: [
+      'An index on the localField',
+      'An index on the foreignField in the joined collection',
+      'An index on the as field',
+      'No index helps a $lookup',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In the pipeline form, what does $$t refer to?',
+    options: [
+      'A field on the foreign document',
+      'A let variable carried in from the local document',
+      'The name of the foreign collection',
+      'A literal string',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/lookup-joins" questions={quizLookup} />
+
+<ProgressTracker client:visible id="aggregation/lookup-joins" />

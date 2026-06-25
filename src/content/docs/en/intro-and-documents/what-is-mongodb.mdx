@@ -1,0 +1,128 @@
+---
+title: What is MongoDB
+description: Document database versus relational, flexible schemas, and when MongoDB is the right fit and when a relational database wins.
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MongoDB is a **document database**. That single phrase carries the whole idea: the thing it stores is a **document**, a self-contained JSON-like object, and a group of documents is a **collection**. Where a relational database asks you to spread one logical record across several tables and stitch it back together with joins, MongoDB lets a record be one document that already holds everything that belongs together — nested objects and arrays included.
+
+The practical effect is that the data in the database tends to look like the objects in your program. A member with a name, a fine balance, and a list of borrowed books is one document, not a row in a `members` table plus rows in a `loans` table that you have to join every time you want the full picture.
+
+## A document instead of a row
+
+In a relational world a member and their borrowed books live in two tables linked by a key. In MongoDB the same information is one document with an embedded array.
+
+export const rowVsDocDiagram = `flowchart LR
+  subgraph RDBMS["Relational: two tables joined by a key"]
+    direction TB
+    T1["members table\n id | name | fines"]
+    T2["loans table\n id | member_id | title"]
+    T1 -->|"member_id = id"| T2
+  end
+  subgraph MONGO["MongoDB: one document"]
+    direction TB
+    D["members collection\n one document:\n name, fines, borrowed[ ... ]"]
+  end
+  RDBMS -.->|"same data, different shape"| MONGO`
+
+<Mermaid code={rowVsDocDiagram} title="The same record as joined relational rows versus a single MongoDB document" />
+
+Here is what that single document actually looks like — name, balance, and the borrowed books all in one place:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Grace",
+  "fines": 0,
+  "borrowed": ["Compilers", "Algorithms"]
+}
+```
+
+## Flexible schema
+
+A collection does not force every document to have the same fields. One member document can carry an `email`, another can leave it out, and a third can add a `phone` that no one else has. MongoDB does not reject the odd one out. This is called a **flexible** (or **dynamic**) schema, and it is the feature people notice first.
+
+Flexibility is a convenience, not an excuse for chaos. In practice you keep documents in a collection mostly consistent on purpose, and MongoDB lets you add **schema validation** rules when you want the database to enforce a shape. The point is that the schema lives in your hands and can evolve field by field, without a migration that rewrites every existing record up front.
+
+```json
+{ "_id": "1", "name": "Ada",  "fines": 0 }
+```
+
+```json
+{ "_id": "2", "name": "Alan", "fines": 2, "email": "alan@example.org" }
+```
+
+Both of these are perfectly valid members in the same collection, even though only one has an `email`.
+
+## When MongoDB fits
+
+MongoDB tends to be the comfortable choice when:
+
+- **Your data is naturally hierarchical or varied.** Documents, profiles, product catalogues, events, and content where records do not all share the same fields map cleanly onto documents.
+- **You read and write whole objects together.** If your app almost always wants the member *and* their borrowed books at once, embedding them in one document means one fast read instead of a join.
+- **Your schema is still moving.** Early products change shape constantly; a flexible schema lets you add a field today without a migration.
+- **You need to scale writes horizontally.** MongoDB shards across many machines, which the later Operations & Scaling module covers.
+
+## When a relational database is the better tool
+
+A document database is not always the right answer. Reach for a relational database (PostgreSQL, MySQL, and friends) when:
+
+- **Your data is highly relational and uniform.** Lots of many-to-many relationships between equally important entities are exactly what SQL joins were built for.
+- **You need multi-row transactions as the everyday case.** MongoDB supports multi-document transactions, but a banking-style ledger where almost every operation spans several records often fits a relational model more naturally.
+- **You rely on rich ad-hoc SQL and a mature reporting ecosystem.** Decades of SQL tooling, BI integrations, and analyst familiarity are a real advantage.
+- **Strict, enforced-up-front schemas are a feature you want**, not a constraint you are trying to escape.
+
+The honest summary: pick the database whose natural shape matches your data and your access patterns. MongoDB shines when records are self-contained objects you read and write as a unit.
+
+## Tips and gotchas
+
+- "Flexible schema" does not mean "no schema." It means the schema is your responsibility and can change gradually. Most healthy collections are quite consistent in practice.
+- MongoDB is **not** a key-value store and **not** schemaless JSON dumped on disk. It indexes fields, runs rich queries, and validates shapes when you ask it to.
+- The choice is rarely all-or-nothing. Many systems use MongoDB for some workloads and a relational database for others.
+
+<Callout title="The one-sentence definition">
+MongoDB stores your data as documents — flexible, JSON-like objects grouped into collections — so the database tends to mirror the objects in your code instead of scattering them across joined tables.
+</Callout>
+
+export const quizWhat = [
+  {
+    q: 'What does MongoDB store as its basic unit of data?',
+    options: [
+      'A row in a fixed-column table',
+      'A document — a flexible, JSON-like object in a collection',
+      'A single key-value pair',
+      'An SQL view',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "flexible schema" actually mean in MongoDB?',
+    options: [
+      'There is no schema at all and anything goes forever',
+      'Every document must share the exact same fields',
+      'Documents in a collection can differ in their fields, and the schema can evolve over time',
+      'The schema can never be enforced',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which workload is usually a better fit for a relational database than MongoDB?',
+    options: [
+      'Self-contained records read and written as a whole object',
+      'Highly relational, uniform data with many many-to-many joins',
+      'A catalogue where records have varied, optional fields',
+      'Data whose schema is still changing rapidly',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/what-is-mongodb" questions={quizWhat} />
+
+<ProgressTracker client:visible id="intro-and-documents/what-is-mongodb" />

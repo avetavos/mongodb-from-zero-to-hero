@@ -1,0 +1,129 @@
+---
+title: Document vs relational
+description: Mapping relational vocabulary to MongoDB — table to collection, row to document, JOIN to embedding or $lookup — and when to embed versus keep separate.
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+If you already know a relational database, the quickest way to get fluent in MongoDB is to translate the words you know into the words MongoDB uses. Most of the concepts line up directly; a couple of them differ in a way that is the whole point of the document model. This lesson is that translation table, plus a first look at the question that the Data Modeling module answers in full: when to **embed** related data and when to keep it in **separate** collections.
+
+## The vocabulary, mapped
+
+Here is the relational world on the left and its MongoDB counterpart on the right:
+
+- **Database → Database.** This one is the same word and the same idea: a named container for collections.
+- **Table → Collection.** A collection holds documents the way a table holds rows, but it does not pin every document to identical columns.
+- **Row → Document.** A document is one record. Unlike a row, it can nest arrays and sub-objects instead of being a flat list of cells.
+- **Column → Field.** A field is a key-value pair inside a document. Fields are per-document, so two documents in a collection need not have the same set of fields.
+- **JOIN → Embedding or `$lookup`.** Relationships are handled either by **embedding** related data inside one document, or by linking documents and combining them at read time with the `$lookup` aggregation stage.
+- **Schema → Flexible schema (with optional validation).** The shape of your data is flexible by default, and you can layer on validation rules when you want the database to enforce a structure.
+- **Primary key → `_id`.** Every document has a unique `_id`, the same role a primary key plays for a row.
+
+export const mappingDiagram = `flowchart LR
+  subgraph SQL["Relational"]
+    direction TB
+    R1["Database"]
+    R2["Table"]
+    R3["Row"]
+    R4["Column"]
+    R5["JOIN"]
+  end
+  subgraph MDB["MongoDB"]
+    direction TB
+    M1["Database"]
+    M2["Collection"]
+    M3["Document"]
+    M4["Field"]
+    M5["Embedding or lookup"]
+  end
+  R1 --> M1
+  R2 --> M2
+  R3 --> M3
+  R4 --> M4
+  R5 --> M5`
+
+<Mermaid code={mappingDiagram} title="Relational concepts and their MongoDB counterparts, side by side" />
+
+## The big difference: relationships
+
+In a relational database you almost always **normalise**: a member lives in a `members` table and their loans in a `loans` table, joined by a key. You assemble the full picture with a `JOIN` every time you query.
+
+MongoDB gives you a choice. You can **embed** the related data directly inside the parent document, so one read returns everything:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Ada",
+  "borrowed": [
+    { "title": "Compilers", "due": "2026-07-01" },
+    { "title": "Algorithms", "due": "2026-07-15" }
+  ]
+}
+```
+
+Or you can keep the data in **separate collections** and link by id, then combine them when you query using `$lookup` — MongoDB's join-at-read-time:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Ada" }
+```
+
+```json
+{ "_id": "a1", "member_id": "65f0b3d4e4b0a1c2e4b0a1d1", "title": "Compilers", "due": "2026-07-01" }
+```
+
+## When to embed vs keep separate
+
+The full treatment is the Data Modeling module, but the instinct to build now is this:
+
+- **Embed when** the related data belongs to one parent, is read together with it, and does not grow without bound. A member's borrowed books, an order's line items, a post's recent comments — these read as one document in one trip.
+- **Keep separate when** the data is shared between many parents, referenced independently, or grows large. A catalogue of books that many members borrow should be its own collection, referenced by id, not copied into every member.
+
+The guiding question is *how do I read this data?* If you almost always want the parent and the children together, embedding earns its keep. If the children have a life of their own, link them.
+
+## Tips and gotchas
+
+- **Do not reflexively normalise.** Coming from SQL, the urge is to split everything into separate collections. In MongoDB, data that is read together usually belongs together, in one document.
+- **A collection is not a table.** It does not enforce a fixed set of columns. Two documents can carry different fields, and that is allowed by design.
+- **`$lookup` exists, but it is not a free join.** Embedding is generally faster for data you read together; reach for `$lookup` when the data genuinely belongs in separate collections.
+- **`_id` is your primary key for free.** You get a unique, indexed identifier on every document without declaring one.
+
+<Callout title="Translate, then unlearn one habit">
+Most relational vocabulary maps straight onto MongoDB — table to collection, row to document, column to field. The one habit to unlearn is reflexive normalisation: in a document database, data you read together often belongs together.
+</Callout>
+
+export const quizMap = [
+  {
+    q: 'What is the MongoDB counterpart of a relational table?',
+    options: ['A document', 'A collection', 'A field', 'An index'],
+    answer: 1,
+  },
+  {
+    q: 'In MongoDB, how are relationships between records handled?',
+    options: [
+      'Only with foreign-key constraints',
+      'Only with mandatory JOINs',
+      'By embedding related data or linking documents and combining them with $lookup',
+      'They cannot be represented at all',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'When is embedding usually the better choice over separate collections?',
+    options: [
+      'When the data is shared by many parents and grows without bound',
+      'When the related data belongs to one parent and is read together with it',
+      'Whenever you come from a relational background',
+      'Only when the parent has no _id',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/document-vs-relational" questions={quizMap} />
+
+<ProgressTracker client:visible id="intro-and-documents/document-vs-relational" />

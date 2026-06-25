@@ -1,0 +1,133 @@
+---
+title: Schema design patterns
+description: Four reusable MongoDB modeling patterns — Subset, Computed, Bucket, and Extended Reference — with a short example and the problem each one solves.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Once you are comfortable choosing between embedding and referencing, you start meeting the same modeling problems again and again: a document that carries far more data than any one screen needs, a value that is expensive to recompute on every read, an array that wants to grow forever, a reference that forces a lookup just to show one extra field. The MongoDB community has named the recurring solutions as **schema design patterns**. They are not features you turn on — they are shapes you deliberately give your documents. This lesson covers four of the most useful: Subset, Computed, Bucket, and Extended Reference.
+
+## The Subset pattern
+
+**Problem:** a document embeds a large array, but most reads only need the first few elements. Loading the whole thing wastes memory and bandwidth. **Solution:** keep a *subset* — the few elements you actually display — in the main document, and push the full list to a separate collection. A product keeps its most recent reviews inline:
+
+```json
+{
+  "_id": "BK-204",
+  "title": "Distributed Systems",
+  "recentReviews": [
+    { "user": "Grace", "stars": 5, "text": "Indispensable." },
+    { "user": "Linus", "stars": 4, "text": "Dense but worth it." }
+  ],
+  "reviewCount": 1183
+}
+```
+
+**Use it when** the working set is a small slice of a large collection of children, and you want the common read to stay fast while the full data remains available on demand.
+
+## The Computed pattern
+
+**Problem:** a value is derived from many source documents and is read far more often than the sources change — recomputing it on every read is wasteful. **Solution:** compute it once at write time and store the result. An order rolls up its own total rather than re-summing items on every read:
+
+```json
+{
+  "_id": "order_5001",
+  "itemCount": 3,
+  "subtotal": 79.0,
+  "tax": 6.32,
+  "total": 85.32
+}
+```
+
+**Use it when** reads vastly outnumber writes and the computation is non-trivial. You trade a little extra work on write — and the responsibility of keeping the computed field correct — for cheap, instant reads.
+
+## The Bucket pattern
+
+**Problem:** you have a high-volume stream of small records (sensor readings, log lines, price ticks) and storing one document per reading creates millions of tiny documents — wasteful in overhead and index size. **Solution:** *bucket* many readings into one document grouped by a window, such as an hour. One bucket holds an hour of measurements:
+
+```json
+{
+  "_id": "sensor_9:2026-03-14T09",
+  "sensorId": "sensor_9",
+  "hour": "2026-03-14T09:00:00Z",
+  "count": 60,
+  "readings": [
+    { "t": "09:00:01Z", "celsius": 21.4 },
+    { "t": "09:01:01Z", "celsius": 21.5 }
+  ]
+}
+```
+
+**Use it when** you ingest time-series or streaming data. Bucketing caps each document's growth at a known window, so you get the read benefits of embedding without the unbounded-array trap from the previous lesson.
+
+## The Extended Reference pattern
+
+**Problem:** you reference another document but always need one or two of its fields when you render the parent — forcing a lookup just to show a name. **Solution:** copy that handful of fields alongside the reference, *extending* it. An order keeps the customer's id *and* the few customer fields it always displays:
+
+```json
+{
+  "_id": "order_5001",
+  "customer": { "id": "cust_77", "name": "Grace Hopper", "city": "Cambridge" },
+  "status": "shipped"
+}
+```
+
+**Use it when** a referenced field is read constantly but changes rarely. You avoid the lookup on every read, at the cost of refreshing the copied fields when they change — a worthwhile trade for stable data like a name or city.
+
+## Choosing a pattern by the problem
+
+Each pattern answers a specific pain. Match the symptom you have to the pattern that cures it:
+
+export const patternMapDiagram = `flowchart LR
+  P1["Large array, only top few read"] --> S["Subset pattern"]
+  P2["Expensive value, read often"] --> C["Computed pattern"]
+  P3["High-volume stream of tiny records"] --> B["Bucket pattern"]
+  P4["Reference needs one or two extra fields"] --> E["Extended Reference pattern"]`
+
+<Mermaid code={patternMapDiagram} title="Each design pattern maps to a specific recurring modeling problem" />
+
+These patterns combine freely. A time-series application might bucket its readings, store a computed hourly average on each bucket, and keep an extended reference to the sensor's name — three patterns in one document, each pulling its weight.
+
+## Tips and gotchas
+
+- Patterns are trade-offs, not free wins. Subset and Extended Reference both introduce a copy you must keep current; Computed adds write-time work; Bucket adds a small amount of grouping logic.
+- The Computed and Extended Reference patterns both denormalize — they store derived or copied data. That is fine in MongoDB, as long as you own a clear plan for refreshing it.
+- The Bucket pattern is the standard answer to time-series data, and it directly defuses the unbounded-array problem by capping growth per window.
+- Do not apply a pattern speculatively. Reach for one when you can name the specific problem it solves in your workload.
+
+<Callout title="Patterns are named trade-offs">
+Each pattern trades something — a copy to maintain, a little write-time work — for a faster or simpler read. Learn the problem each one solves so that when you meet the symptom, you already know the cure. Use a pattern because you have its problem, never just because it exists.
+</Callout>
+
+export const quizPatterns = [
+  {
+    q: 'Which pattern keeps only the few frequently-read elements in the main document and stores the full list elsewhere?',
+    options: ['Computed', 'Subset', 'Bucket', 'Extended Reference'],
+    answer: 1,
+  },
+  {
+    q: 'You store an order total instead of re-summing items on every read. Which pattern is that?',
+    options: ['Subset', 'Bucket', 'Computed', 'Extended Reference'],
+    answer: 2,
+  },
+  {
+    q: 'Which pattern groups many small time-series records into one document per window to cap growth?',
+    options: ['Bucket', 'Subset', 'Extended Reference', 'Computed'],
+    answer: 0,
+  },
+  {
+    q: 'You copy a customer name next to a customerId so you avoid a lookup when rendering an order. Which pattern is that?',
+    options: ['Computed', 'Subset', 'Bucket', 'Extended Reference'],
+    answer: 3,
+  },
+]
+
+<Quiz client:visible id="data-modeling/schema-design-patterns" questions={quizPatterns} />
+
+<ProgressTracker client:visible id="data-modeling/schema-design-patterns" />

@@ -1,0 +1,200 @@
+---
+title: การ insert document
+description: เพิ่ม document หนึ่งรายการหรือหลายรายการด้วย insertOne และ insertMany และทำความรู้จักกับ field _id อัตโนมัติ
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การ insert คือ operation ที่ละมุนละม่อมที่สุดใน MongoDB นั่นคือ คุณยื่น document ให้ฐานข้อมูล มันจัดเก็บไว้ แล้วมันก็บอกคุณว่ามันเก็บอะไรไป ไม่มี schema ให้นิยามก่อน และไม่มีคอลัมน์ของตารางให้ต้องจัดให้ตรงกัน — ถ้า document เป็นข้อมูลที่มีลักษณะคล้าย JSON ที่ถูกต้อง มันก็เข้าไปได้เลย อิสระตรงนี้แหละคือเหตุผลว่าทำไมการมีวินัยเล็ก ๆ น้อย ๆ รอบ field `_id` ถึงคุ้มค่า ซึ่งมันคืองานเก็บบันทึกชิ้นเดียวที่ทุกการ insert เกี่ยวข้องด้วย
+
+เราจะสร้างห้องสมุดในจินตนาการของเราต่อไป สมาชิกแต่ละคนคือ document หนึ่งรายการ และในบทเรียนนี้เราเพิ่มพวกเขาเข้าไปใน collection ชื่อ `members`
+
+## การ insert document เดียว
+
+`insertOne` รับ document มาหนึ่งรายการพอดีแล้วจัดเก็บไว้ ถ้าคุณไม่ได้ระบุ `_id` มาให้ MongoDB จะสร้างขึ้นให้คุณในรูปของ **ObjectId** — ค่าขนาด 12 ไบต์ที่ไม่ซ้ำกันทั่วทั้ง collection และยังเข้ารหัสเวลาที่สร้างไว้ด้วย id ที่ถูกสร้างนั้นคือ primary key ของ document
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertOne({ name: "Grace", joined: 2024, fines: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").insertOne({
+      name: "Grace",
+      joined: 2024,
+      fines: 0,
+    });
+    console.log(res.insertedId);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.insert_one({"name": "Grace", "joined": 2024, "fines": 0})
+    print(res.inserted_id)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.InsertOne(ctx, bson.M{"name": "Grace", "joined": 2024, "fines": 0})
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.InsertedID)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll
+        .insert_one(doc! { "name": "Grace", "joined": 2024, "fines": 0 })
+        .await?;
+    println!("{}", res.inserted_id);
+    ```
+  </TabItem>
+</Tabs>
+
+acknowledgement บอกคุณว่า operation สำเร็จและส่ง id ที่ถูกกำหนดให้กลับมา ในเชลล์มันมีหน้าตาแบบนี้:
+
+```json
+{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1d0" }
+```
+
+และตอนนี้ document ที่นั่งอยู่ใน collection มีหน้าตาแบบนี้ — `_id` คือสิ่งเดียวที่คุณไม่ได้พิมพ์เอง:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
+  "name": "Grace",
+  "joined": 2024,
+  "fines": 0
+}
+```
+
+**ใน Compass:** เปิด collection `members` คลิกปุ่มสีเขียว **ADD DATA** เลือก **Insert Document** วาง JSON ของคุณโดยไม่ต้องมี `_id` แล้ว Compass จะเติม id ให้คุณเองเมื่อคุณบันทึก
+
+## การ insert หลายรายการในครั้งเดียว
+
+เมื่อคุณมี document หนึ่งชุด `insertMany` ส่งพวกมันไปในการเดินทางไปกลับครั้งเดียวแทนที่จะเป็นการเรียกหนึ่งครั้งต่อ document หนึ่งรายการ คุณส่ง array เข้าไป แล้วคุณได้ id ของทุกอย่างที่ถูก insert กลับมา โดยมี key เป็นตำแหน่งของพวกมันใน array
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertMany([
+      { name: "Linus", joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2025, fines: 0 },
+      { name: "Edsger", joined: 2022, fines: 5 }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").insertMany([
+      { name: "Linus", joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2025, fines: 0 },
+      { name: "Edsger", joined: 2022, fines: 5 },
+    ]);
+    console.log(res.insertedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.insert_many([
+        {"name": "Linus", "joined": 2023, "fines": 2},
+        {"name": "Margaret", "joined": 2025, "fines": 0},
+        {"name": "Edsger", "joined": 2022, "fines": 5},
+    ])
+    print(len(res.inserted_ids))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    docs := []interface{}{
+        bson.M{"name": "Linus", "joined": 2023, "fines": 2},
+        bson.M{"name": "Margaret", "joined": 2025, "fines": 0},
+        bson.M{"name": "Edsger", "joined": 2022, "fines": 5},
+    }
+    res, err := coll.InsertMany(ctx, docs)
+    if err != nil {
+        return err
+    }
+    fmt.Println(len(res.InsertedIDs))
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let docs = vec![
+        doc! { "name": "Linus", "joined": 2023, "fines": 2 },
+        doc! { "name": "Margaret", "joined": 2025, "fines": 0 },
+        doc! { "name": "Edsger", "joined": 2022, "fines": 5 },
+    ];
+    let res = coll.insert_many(docs).await?;
+    println!("{}", res.inserted_ids.len());
+    ```
+  </TabItem>
+</Tabs>
+
+acknowledgement จับคู่ index ของแต่ละรายการใน array กับ id ที่ถูกสร้างให้กับมัน:
+
+```json
+{
+  "acknowledged": true,
+  "insertedIds": {
+    "0": "65f0b3d4e4b0a1c2e4b0a1d1",
+    "1": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "2": "65f0b3d4e4b0a1c2e4b0a1d3"
+  }
+}
+```
+
+## เคล็ดลับและจุดที่ต้องระวัง
+
+- คุณสามารถระบุ `_id` ของคุณเอง (เป็น string, number หรือค่าใด ๆ) แทนที่จะปล่อยให้ MongoDB สร้าง ObjectId — แต่มันต้องไม่ซ้ำกัน การ insert document ที่มี `_id` อยู่แล้วจะล้มเหลวพร้อม error แบบ **duplicate key**
+- `insertMany` เป็นแบบ **ordered** โดยปริยาย นั่นคือ มันหยุดที่ document แรกที่ล้มเหลว ดังนั้น document ที่อยู่หลังจาก error เรื่อง id ซ้ำจะไม่มีวันได้ถูก insert ส่ง option แบบ unordered เข้าไปเพื่อให้มันเดินหน้าต่อแม้มีความล้มเหลวและ insert ทุก document ที่ไม่ชนกัน
+- เพราะไม่มี schema document สองรายการใน collection เดียวกันสามารถมี field ที่ต่างกันโดยสิ้นเชิงได้ การ insert นั้นให้อภัย นั่นเป็นฟีเจอร์ ไม่ใช่บั๊ก — แค่ตั้งใจรักษาความสม่ำเสมอเอาไว้
+
+<Callout title="ปล่อยให้ MongoDB เป็นเจ้าของ id">
+ยกเว้นว่าคุณมีตัวระบุในโลกจริงที่รับประกันว่าไม่ซ้ำกัน (อย่าง ISBN) ก็ปล่อยให้ MongoDB สร้าง ObjectId มันไม่ซ้ำกัน เรียงลำดับตามเวลาที่สร้างได้ และเป็นอีกหนึ่งสิ่งที่คุณไม่ต้องเสี่ยงทำพลาด
+</Callout>
+
+export const quizInsert = [
+  {
+    q: 'ถ้าคุณ insert document โดยไม่มี field _id จะเกิดอะไรขึ้น?',
+    options: [
+      'การ insert ถูกปฏิเสธ',
+      'MongoDB สร้าง ObjectId ที่ไม่ซ้ำกันให้มัน',
+      'field นั้นว่างเปล่าจนกว่าคุณจะกำหนดค่าให้',
+      'document ถูกจัดเก็บโดยไม่มี primary key ใด ๆ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'โดยปริยาย insertMany แบบ ordered ทำอย่างไรเมื่อ document หนึ่งมี _id ซ้ำ?',
+    options: [
+      'มันข้าม document นั้นไปและ insert ที่เหลือ',
+      'มันหยุดที่ความล้มเหลว ทำให้ document ที่ตามมายังไม่ถูก insert',
+      'มัน roll back ทุก document ในชุด',
+      'มันเขียนทับ document ที่มีอยู่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'acknowledgement ของ insertMany มีอะไรอยู่ในนั้น?',
+    options: [
+      'เพียงแค่แฟล็กสำเร็จ true/false เท่านั้น',
+      'ข้อความเต็มของทุก document ที่ถูก insert',
+      'id ที่ถูกสร้างขึ้นโดยมี key เป็นตำแหน่งของพวกมันใน array ที่ป้อนเข้าไป',
+      'cursor ครอบ document ใหม่',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="crud/insert" questions={quizInsert} />
+
+<ProgressTracker client:visible id="crud/insert" />

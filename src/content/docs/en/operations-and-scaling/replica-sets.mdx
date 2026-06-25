@@ -1,0 +1,174 @@
+---
+title: Replica sets
+description: How a primary and its secondaries stay in sync through the oplog, and how an automatic election keeps the database available when the primary fails.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A replica set is the answer to one blunt question: what happens when the server holding your data stops responding? With a single `mongod`, the answer is that your application is down until someone fixes the machine. With a replica set, the answer is that another copy takes over in seconds, and most users never notice. A **replica set** is a group of `mongod` instances that all hold the same data — one **primary** that accepts every write, and one or more **secondaries** that keep their own copies in step with it.
+
+## Primary, secondaries, and the oplog
+
+Only the primary takes writes. Each write it applies is also recorded in a special capped collection called the **oplog** — the operations log. Every secondary continuously reads the primary's oplog and replays those same operations against its own data, so the copies converge. This is why secondaries are *eventually* consistent: there is a small lag between a write landing on the primary and that same write being replayed everywhere else.
+
+export const replicaFlow = `flowchart TB
+  Client["Application writes"] --> P["Primary"]
+  P -- "records every write" --> OL["Oplog (capped collection)"]
+  OL -- "tail and replay" --> S1["Secondary 1"]
+  OL -- "tail and replay" --> S2["Secondary 2"]
+  P -. "heartbeats every 2s" .- S1
+  P -. "heartbeats every 2s" .- S2`
+
+<Mermaid code={replicaFlow} title="The primary takes all writes and logs them; secondaries tail the oplog and replay it to stay in sync" />
+
+The members also exchange small **heartbeat** messages a few times per minute. Those heartbeats are how the set notices trouble: if the secondaries stop hearing from the primary, they conclude it has failed and start an election.
+
+## Automatic elections
+
+When the primary disappears, the remaining members hold a vote. A secondary that is eligible nominates itself, the others vote, and whichever candidate gets a majority of the votes becomes the new primary. This is the heart of high availability — it happens automatically, usually within about ten to twelve seconds, with no human paged at three in the morning.
+
+export const electionFlow = `flowchart TB
+  P["Primary fails — heartbeats stop"] --> Detect["Secondaries notice the silence"]
+  Detect --> Vote["Eligible members call an election"]
+  Vote --> Win["Candidate with a majority of votes wins"]
+  Win --> NewP["A secondary becomes the new primary"]
+  NewP --> Resume["Writes resume on the new primary"]`
+
+<Mermaid code={electionFlow} title="An election promotes a secondary to primary so writes can continue without manual intervention" />
+
+The word **majority** is doing real work here. A candidate must collect votes from more than half the voting members. That requirement is the reason for the most repeated piece of replica-set advice: keep an **odd** number of voting members. With three votes a single failure still leaves a clear majority of two; with two votes a single failure leaves a tie, and no one can win.
+
+## Connecting to a replica set
+
+A driver does not connect to one fixed server — it connects to the *set*. You list a few members as seeds and name the set with `replicaSet=`. The driver discovers the full topology from there, finds the current primary on its own, and follows the primary automatically across an election.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```bash
+    mongosh "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { MongoClient } from "mongodb";
+
+    const uri =
+      "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0";
+    const client = new MongoClient(uri);
+    await client.connect();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import MongoClient
+
+    uri = "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    client = MongoClient(uri)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    uri := "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    client, err := mongo.Connect(options.Client().ApplyURI(uri))
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let uri = "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0";
+    let client = Client::with_uri_str(uri).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+By default reads also go to the primary, which keeps them strongly consistent. If you can tolerate a little staleness — say, for analytics or a feed that does not need the absolute latest write — you can ask the driver to read from secondaries with a read preference such as `secondaryPreferred`, spreading read load off the primary.
+
+## Inspecting the set
+
+From `mongosh` connected to any member, `rs.status()` reports the live state of the whole set: who is primary, who is secondary, and how far behind each member is. This is the first command you run when something looks wrong.
+
+```js
+rs.status()
+```
+
+A trimmed reply shows each member with its role in the `stateStr` field:
+
+```json
+{
+  "set": "rs0",
+  "members": [
+    { "name": "host1:27017", "stateStr": "PRIMARY", "health": 1 },
+    { "name": "host2:27017", "stateStr": "SECONDARY", "health": 1 },
+    { "name": "host3:27017", "stateStr": "SECONDARY", "health": 1 }
+  ],
+  "ok": 1
+}
+```
+
+**In Atlas:** every cluster is a replica set already — you never configure one by hand. The cluster view shows which node is primary and lets you watch replication lag on a chart, and a failover is a one-click test you can trigger to see the election happen.
+
+## Tips and gotchas
+
+- Keep an **odd** number of voting members so a single failure always leaves a clear majority. Three is the common minimum for production.
+- An **arbiter** is a lightweight member that votes but holds no data. It can break a tie cheaply, but it cannot become primary and adds no durability, so prefer a real data-bearing secondary when you can afford the storage.
+- Secondaries lag. If your application reads its own writes immediately after writing, read from the primary or use a read concern that waits for the write to replicate, or you may not see your own change yet.
+- A replica set protects against a node failing, not against a bad query or a dropped collection — those replicate too. Replication is availability, not a backup.
+
+<Callout title="Availability through copies and votes">
+A replica set keeps many copies of your data in sync through the oplog and elects a new primary by majority vote when the old one fails. Use an odd number of voters so a single failure never produces a tie.
+</Callout>
+
+export const quizReplica = [
+  {
+    q: 'How do secondaries keep their data in sync with the primary?',
+    options: [
+      'They copy the primary\'s files on a fixed schedule',
+      'They tail the primary\'s oplog and replay each operation',
+      'They forward every read to the primary',
+      'They re-import the whole collection each minute',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What happens when the primary fails?',
+    options: [
+      'The database stops accepting writes until an admin intervenes',
+      'The remaining members hold an election and promote a secondary to primary',
+      'All secondaries become primaries at once',
+      'The oplog is deleted and rebuilt',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is an odd number of voting members recommended?',
+    options: [
+      'It makes the oplog smaller',
+      'So a single failure still leaves a clear majority and avoids a tied vote',
+      'Drivers only connect to odd-numbered sets',
+      'Even numbers are not allowed by MongoDB',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Reading from a secondary can return slightly stale data because:',
+    options: [
+      'Secondaries store a compressed copy of the data',
+      'There is replication lag between a write on the primary and its replay on secondaries',
+      'Secondaries only hold half the documents',
+      'Secondaries reject reads entirely',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/replica-sets" questions={quizReplica} />
+
+<ProgressTracker client:visible id="operations-and-scaling/replica-sets" />

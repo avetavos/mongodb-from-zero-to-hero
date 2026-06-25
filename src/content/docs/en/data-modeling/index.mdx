@@ -1,0 +1,115 @@
+---
+title: Thinking in documents
+description: Why MongoDB data modeling is the opposite of relational design — you model for how your application reads and writes data, not for normalization — and why embedding versus referencing is the central choice.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+If you arrive at MongoDB from a relational background, the hardest habit to unlearn is the one that served you best in SQL: splitting your data into many narrow tables, each holding one kind of thing, joined back together at query time. That discipline is called **normalization**, and it exists to remove duplication so that a fact lives in exactly one place. MongoDB asks you to think the other way around. You do not start from "what are my entities and how do I avoid repeating them"; you start from "what does my application ask for, and how can a single read hand back everything that one screen needs."
+
+The unit of storage is the **document** — a rich, nested, JSON-like structure that can hold arrays and sub-objects, not just flat columns. Because a document can contain related data inside itself, the question that dominates every modeling decision is no longer "which table does this column belong to" but **"do I nest this related data inside the document, or do I keep it separate and store a reference to it?"** That single choice — embedding versus referencing — is what this entire module turns on.
+
+## Relational habits versus document thinking
+
+In a relational schema you design around the data's shape and let queries pay the cost of reassembling it. In a document schema you design around the queries and let the data's shape absorb the cost up front. The two mindsets pull in opposite directions:
+
+export const mindsetDiagram = `flowchart TB
+  subgraph Relational["Relational — model for storage"]
+    R0["Start: list the entities"] --> R1["Split into normalized tables"]
+    R1 --> R2["No duplication — one fact, one place"]
+    R2 --> R3["Reassemble with JOINs at read time"]
+  end
+  subgraph Document["Document — model for access"]
+    D0["Start: list the queries"] --> D1["Group data that is read together"]
+    D1 --> D2["Embed or reference based on access"]
+    D2 --> D3["One read returns a whole screen"]
+  end`
+
+<Mermaid code={mindsetDiagram} title="Relational design optimizes storage and pays at read time; document design optimizes the read and decides duplication up front" />
+
+Neither approach is universally "correct." The relational instinct is excellent when data is highly interrelated and updated from many directions. The document instinct shines when an application repeatedly fetches the same shaped bundle of data — a user and their settings, an order and its line items, an article and its tags. MongoDB lets you store that bundle the way the application wants to consume it.
+
+## A worked example: an order
+
+Consider an online order. A relational system would keep the order in one table, the line items in another, and the customer in a third, stitching them with foreign keys. In MongoDB you can keep the whole order — its items embedded as an array — in a single document, so reading the order is one operation rather than three joins:
+
+```json
+{
+  "_id": "order_5001",
+  "customer": "Grace Hopper",
+  "placedAt": "2026-03-14T09:12:00Z",
+  "status": "shipped",
+  "items": [
+    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
+    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
+  ],
+  "total": 79.0
+}
+```
+
+That one document is everything an "order details" page needs. No join, no second round trip — the data is already shaped like the answer. The trade-off is that the item titles and prices are now copies of data that may also live in a `products` collection, and copies can drift. Deciding when that trade is worth it is the craft of data modeling, and the rest of this module gives you the tools to decide well.
+
+## What this module covers
+
+The lessons build from the core choice outward into reusable structure:
+
+1. **Embedding versus referencing** — the two ways to relate documents, and the trade-offs of read locality, duplication, and document growth.
+2. **Modeling relationships** — one-to-one, one-to-many, and many-to-many, plus the 16 MB document limit and the danger of unbounded arrays.
+3. **Schema design patterns** — the Subset, Computed, Bucket, and Extended Reference patterns that solve recurring problems.
+4. **Schema validation** — making schemas optional-but-enforced with `$jsonSchema` rules.
+5. **Anti-patterns** — the modeling mistakes that look fine at first and hurt at scale, and how to fix each one.
+
+## Tips and gotchas
+
+- MongoDB is **schema-flexible**, not schema-less. Documents in a collection can differ, but a deliberate, consistent shape is what makes a collection fast and maintainable.
+- "Model for your queries" means you should know your main access patterns *before* you design. A schema that is perfect for one read pattern can be wrong for another.
+- Embedding is not always better than referencing, and referencing is not always more "correct." Each lesson here is about reading the trade-off, not memorizing a rule.
+- Duplication is allowed and sometimes desirable in MongoDB. The cost of a copy is keeping it in sync; the benefit is a faster, simpler read.
+
+<Callout title="Model for access, not for storage">
+The relational reflex asks "where does this data belong so I never repeat it." The document reflex asks "what does my application read together, so it can read it in one shot." Start every schema from the queries, and the embed-or-reference decision follows naturally.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the central question that drives MongoDB data modeling?',
+    options: [
+      'Which table does each column belong to?',
+      'Do I embed related data in the document, or reference it separately?',
+      'How many indexes can I create?',
+      'What is the smallest possible document size?',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Compared with relational normalization, document modeling primarily optimizes for what?',
+    options: [
+      'Eliminating all duplication',
+      'The way the application reads and writes data',
+      'Minimizing the number of collections',
+      'Strict column typing',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why might embedding order items inside the order document be attractive?',
+    options: [
+      'It guarantees no data is ever duplicated',
+      'One read returns the whole order without joins',
+      'It makes the document smaller',
+      'It is required by MongoDB',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="data-modeling/index" />
+

@@ -1,0 +1,296 @@
+---
+title: $unwind — flattening arrays
+description: Turn one array-bearing document into one document per element with $unwind, pair it with $group to summarise, and keep empty arrays with preserveNullAndEmptyArrays.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Arrays are everywhere in MongoDB documents — tags on a post, items in an order, lessons in a course. To *summarise* across the elements of those arrays, you usually need to look at them one at a time. `$unwind` does exactly that: it takes a document with an array field and emits **one document per element**, copying the rest of the document onto each. A document with a three-element array becomes three documents.
+
+For this lesson each `sales` document records an order with several line items in an `items` array:
+
+```json
+{
+  "_id": "o1",
+  "buyer": "Ada",
+  "items": [
+    { "title": "Dune", "qty": 2 },
+    { "title": "Foundation", "qty": 1 }
+  ]
+}
+```
+
+## One document per array element
+
+Give `$unwind` the path to an array field (with the `$` prefix), and it fans the document out. Every emitted document is identical except that the array field is replaced by a single one of its elements.
+
+export const unwindFlow = `flowchart LR
+  In["one order with items array of two"] --> U["$unwind items"]
+  U --> D1["order, items = Dune"]
+  U --> D2["order, items = Foundation"]`
+
+<Mermaid code={unwindFlow} title="A single document with a two-element array becomes two documents, one per element" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $unwind: "$items" }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $unwind: "$items" },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$unwind": "$items"},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$unwind", "$items"}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$unwind": "$items" },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The single order becomes one document per line item, with `items` now a plain object rather than an array:
+
+```json
+[
+  { "_id": "o1", "buyer": "Ada", "items": { "title": "Dune", "qty": 2 } },
+  { "_id": "o1", "buyer": "Ada", "items": { "title": "Foundation", "qty": 1 } }
+]
+```
+
+**In Compass:** add an `$unwind` stage in the **Aggregations** tab and point it at the array field. The preview shows the document count *grow* — a sign you have flattened an array — which is the opposite of what `$match` and `$group` do.
+
+## The classic pairing: $unwind then $group
+
+`$unwind` is rarely the last word. Its usual job is to flatten an array so a later `$group` can summarise across the elements. Here we flatten every order's items, then total the quantity sold per title across all orders:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $unwind: "$items" },
+      { $group: {
+          _id: "$items.title",
+          sold: { $sum: "$items.qty" }
+      } },
+      { $sort: { sold: -1 } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $unwind: "$items" },
+      { $group: {
+          _id: "$items.title",
+          sold: { $sum: "$items.qty" },
+      } },
+      { $sort: { sold: -1 } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$unwind": "$items"},
+        {"$group": {
+            "_id": "$items.title",
+            "sold": {"$sum": "$items.qty"},
+        }},
+        {"$sort": {"sold": -1}},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$unwind", "$items"}},
+        {{"$group", bson.D{
+            {"_id", "$items.title"},
+            {"sold", bson.D{{"$sum", "$items.qty"}}},
+        }}},
+        {{"$sort", bson.D{{"sold", -1}}}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$unwind": "$items" },
+        doc! { "$group": {
+            "_id": "$items.title",
+            "sold": { "$sum": "$items.qty" }
+        } },
+        doc! { "$sort": { "sold": -1 } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Now each title has its total quantity, summed across every order's line items:
+
+```json
+[
+  { "_id": "Dune", "sold": 5 },
+  { "_id": "Foundation", "sold": 3 }
+]
+```
+
+## Keeping empty and missing arrays
+
+By default, `$unwind` **drops** a document whose array field is empty, missing, or `null` — there is no element to emit, so the document vanishes. When you want those documents to survive (with the field absent), pass the long form with `preserveNullAndEmptyArrays`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $unwind: {
+          path: "$items",
+          preserveNullAndEmptyArrays: true
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $unwind: {
+          path: "$items",
+          preserveNullAndEmptyArrays: true,
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$unwind": {
+            "path": "$items",
+            "preserveNullAndEmptyArrays": True,
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$unwind", bson.D{
+            {"path", "$items"},
+            {"preserveNullAndEmptyArrays", true},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$unwind": {
+            "path": "$items",
+            "preserveNullAndEmptyArrays": true
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+An order with no items still appears once, simply without an `items` field:
+
+```json
+[
+  { "_id": "o2", "buyer": "Grace" }
+]
+```
+
+## Tips and gotchas
+
+- `$unwind` **multiplies** documents. An order with five items becomes five documents — flattening can grow the stream a lot before a later `$group` shrinks it again.
+- Without `preserveNullAndEmptyArrays`, documents with an empty or missing array are silently dropped. If your counts come up short after an unwind, this is the usual culprit.
+- After unwinding, reference the element's fields through the original path: once `items` is a single object, `"$items.qty"` reads that element's quantity.
+- If the field is not actually an array, `$unwind` treats a single scalar as a one-element array and emits the document once — so it is forgiving of non-array values.
+
+<Callout title="Unwind fans out, then group folds back">
+$unwind turns one document with an N-element array into N documents. On its own it just inflates the stream. Its real power shows when a $group follows to summarise across all those flattened elements. Set preserveNullAndEmptyArrays when documents with empty arrays must survive.
+</Callout>
+
+export const quizUnwind = [
+  {
+    q: 'A document has an items array with 3 elements. What does $unwind on items produce?',
+    options: [
+      'One document with the array unchanged',
+      'Three documents, each carrying one element in items',
+      'One document with items removed',
+      'An error, because items is an array',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which stage most commonly follows $unwind to summarise the flattened elements?',
+    options: ['$project', '$group', '$lookup', '$match'],
+    answer: 1,
+  },
+  {
+    q: 'By default, what happens to a document whose unwound array is empty or missing?',
+    options: [
+      'It is kept with the field set to null',
+      'It is dropped from the output',
+      'It causes the aggregation to fail',
+      'It is emitted once with an empty array',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you keep documents with empty or missing arrays in the output?',
+    options: [
+      'Add a $match before $unwind',
+      'Use the long form with preserveNullAndEmptyArrays set to true',
+      'Set the array to null first',
+      'It is not possible',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/unwind-arrays" questions={quizUnwind} />
+
+<ProgressTracker client:visible id="aggregation/unwind-arrays" />

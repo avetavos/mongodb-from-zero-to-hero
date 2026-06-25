@@ -1,5 +1,124 @@
 ---
-title: CRUD
-description: Create, read, update, and delete documents with mongosh and the official drivers.
+title: CRUD in MongoDB
+description: An overview of the four CRUD operation families in MongoDB and the methods you use for each.
+sidebar:
+  order: 1
 ---
-Coming soon.
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Every database boils down to four things you can do with your data: put new records in, read them back, change them, and throw them away. People shorten those four verbs to **CRUD** — Create, Read, Update, Delete. In MongoDB the "records" are JSON-like documents living inside a collection, and the verbs map onto a small, predictable set of methods that look almost identical whether you type them into the shell or call them from a driver in Node.js, Python, Go, or Rust.
+
+This module is the working heart of the course. By the end of it you will be able to load documents into a collection, pull them back out with filters, surgically change fields without clobbering the rest of a document, remove exactly what you mean to remove, and combine many writes into a single efficient round trip. We will keep the data deliberately small and made-up — a handful of imaginary library members and the books they borrow — so the operations stay in the spotlight.
+
+export const crudFlowDiagram = `flowchart LR
+  App["Your app or mongosh"] -->|"insert / find / update / delete"| Driver["Driver or shell"]
+  Driver --> Coll["Collection: members"]
+  Coll --> D1["{ _id, name, fines }"]
+  Coll --> D2["{ _id, name, fines }"]
+  Coll --> D3["{ _id, name, fines }"]`
+
+<Mermaid code={crudFlowDiagram} title="A CRUD call travels from your code, through the driver, into a collection of documents" />
+
+## The four operation families
+
+Each family has a singular method that touches at most one document and a plural method that can touch many. Here is the whole vocabulary you will spend this module learning:
+
+- **Create** — `insertOne` adds a single document, `insertMany` adds an array of them.
+- **Read** — `findOne` returns the first matching document (or nothing), `find` returns a cursor over every match.
+- **Update** — `updateOne` changes the first match, `updateMany` changes every match. Both use update operators like `$set` and `$inc`.
+- **Delete** — `deleteOne` removes the first match, `deleteMany` removes every match.
+
+The same shape shows up across all five tabs you will see throughout this module. Watch how an insert reads almost the same in the shell and in each driver:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertOne({ name: "Ada", fines: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").insertOne({ name: "Ada", fines: 0 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.insert_one({"name": "Ada", "fines": 0})
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    coll.InsertOne(ctx, bson.M{"name": "Ada", "fines": 0})
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.insert_one(doc! { "name": "Ada", "fines": 0 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+After that insert the stored document looks like this — note the `_id` that MongoDB added for you:
+
+```json
+{ "_id": "65f0a1c2e4b0a1c2e4b0a1c2", "name": "Ada", "fines": 0 }
+```
+
+**In Compass:** the same four families map to the GUI — Compass shows documents in the **Documents** tab, where you can insert with the green **ADD DATA** button, edit a field inline, and delete a document with the trash icon that appears on hover.
+
+## What this module covers
+
+The lessons that follow take each family in turn, then finish with the two power moves that combine families:
+
+1. **Insert** — adding one or many documents, and the automatic `_id`.
+2. **Read** — `find` versus `findOne`, equality and multi-field filters, and a first taste of projection.
+3. **Update** — `$set`, `$inc`, `$unset`, `$push`, `$pull`, and reading the match counts a write returns.
+4. **Delete** — removing documents precisely, plus the soft-delete pattern.
+5. **Upsert and bulk writes** — "insert if missing, otherwise update" and packing many operations into one trip to the server.
+
+## Tips and gotchas
+
+- The singular methods (`insertOne`, `findOne`, `updateOne`, `deleteOne`) never affect more than one document, even if many match — handy as a safety rail.
+- Write methods return an **acknowledgement** describing what happened (counts, inserted ids). Reading that result is how you confirm an operation did what you intended.
+- A filter that matches nothing is not an error. An update or delete that matches zero documents simply reports zero changes.
+
+<Callout title="Mental model">
+CRUD is just four verbs over a bag of documents. Master the singular form of each verb first; the plural form is the same call with a filter that happens to match more than one document.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Which method reads back the first document that matches a filter?',
+    options: ['getOne', 'findOne', 'readOne', 'selectOne'],
+    answer: 1,
+  },
+  {
+    q: 'What does the singular form of a write method (like updateOne) guarantee?',
+    options: [
+      'It is faster than the plural form in every case',
+      'It affects at most one document, even if many match',
+      'It skips the acknowledgement step',
+      'It cannot be given a filter',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'CRUD stands for which four operations?',
+    options: [
+      'Connect, Read, Update, Disconnect',
+      'Create, Replace, Undo, Delete',
+      'Create, Read, Update, Delete',
+      'Cache, Read, Upsert, Drop',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="crud/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="crud/index" />

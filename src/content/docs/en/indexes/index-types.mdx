@@ -1,0 +1,373 @@
+---
+title: Index types
+description: Beyond the plain index — multikey for arrays, text for search, TTL for auto-expiry, partial and sparse for subsets, and unique for enforcing one-of-a-kind values.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A plain ascending index covers most needs, but MongoDB ships several specialized index types for cases a plain index cannot handle gracefully: fields that hold arrays, full-text search, documents that should expire on their own, indexes that cover only a slice of a collection, and indexes that enforce uniqueness. Each is a small variation on `createIndex`, and knowing they exist saves you from awkward workarounds. We will take them one at a time, keeping our library `members` collection.
+
+## Multikey: indexing arrays
+
+When you index a field that holds an array, MongoDB automatically makes it a **multikey** index — it indexes every element of the array separately, so a query for any one element seeks straight to the matching documents. You do not ask for multikey; it happens because the field's values are arrays. Index the `borrowed` array of book titles:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ borrowed: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ borrowed: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("borrowed", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "borrowed", Value: 1}}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "borrowed": 1 }).build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A query like finding everyone who borrowed `"Compilers"` now seeks instead of scans, even though the value sits inside an array.
+
+## Text: searching words
+
+A **text index** tokenizes string fields so you can search for words with the `$text` operator instead of matching exact strings. Index the `notes` field of each member as text, then query it:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ notes: "text" })
+    db.members.find({ $text: { $search: "overdue reminder" } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ notes: "text" });
+    await db.collection("members")
+      .find({ $text: { $search: "overdue reminder" } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("notes", "text")])
+    list(db.members.find({"$text": {"$search": "overdue reminder"}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "notes", Value: "text"}}},
+    )
+    if err != nil {
+        return err
+    }
+    cur, err := coll.Find(ctx, bson.M{"$text": bson.M{"$search": "overdue reminder"}})
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "notes": "text" }).build(),
+    )
+    .await?;
+    let cur = coll.find(doc! { "$text": { "$search": "overdue reminder" } }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The search matches either word and ranks results by relevance. A collection may hold only one text index, though it can span several string fields.
+
+## TTL: documents that expire
+
+A **TTL** (time to live) index deletes documents automatically once a date field is older than a set number of seconds. It is built by indexing a date field with an `expireAfterSeconds` option. Here, member session records expire one hour after their `createdAt` timestamp:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("sessions").createIndex(
+      { createdAt: 1 },
+      { expireAfterSeconds: 3600 }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.sessions.create_index([("createdAt", 1)], expireAfterSeconds=3600)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys:    bson.D{{Key: "createdAt", Value: 1}},
+            Options: options.Index().SetExpireAfterSeconds(3600),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "createdAt": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(3600))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A background task sweeps and removes expired documents. The sweep runs about once a minute, so deletion is prompt but not instant.
+
+## Partial: indexing a subset
+
+A **partial** index covers only the documents that match a filter expression, which keeps the index small when you query just one slice of a collection. Index only members who actually owe fines, by attaching a `partialFilterExpression`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex(
+      { fines: 1 },
+      { partialFilterExpression: { fines: { $gt: 0 } } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex(
+      { fines: 1 },
+      { partialFilterExpression: { fines: { $gt: 0 } } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index(
+        [("fines", 1)],
+        partialFilterExpression={"fines": {"$gt": 0}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys: bson.D{{Key: "fines", Value: 1}},
+            Options: options.Index().SetPartialFilterExpression(
+                bson.M{"fines": bson.M{"$gt": 0}},
+            ),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "fines": 1 })
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(doc! { "fines": { "$gt": 0 } })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Members with zero fines never enter the index, so it stays lean and serves the "who owes money" query without indexing everyone.
+
+## Unique and sparse
+
+A **unique** index rejects any insert or update that would duplicate an indexed value — the way you guarantee, say, that no two members share a `cardNumber`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ cardNumber: 1 }, { unique: true })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ cardNumber: 1 }, { unique: true });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("cardNumber", 1)], unique=True)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
+            Options: options.Index().SetUnique(true),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "cardNumber": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A **sparse** index goes one step further by skipping documents that lack the indexed field entirely, rather than indexing them with a null. Pairing sparse with unique lets many documents omit `cardNumber` while still forbidding duplicates among those that have one:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ cardNumber: 1 }, { unique: true, sparse: true })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex(
+      { cardNumber: 1 },
+      { unique: true, sparse: true }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("cardNumber", 1)], unique=True, sparse=True)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
+            Options: options.Index().SetUnique(true).SetSparse(true),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "cardNumber": 1 })
+            .options(
+                IndexOptions::builder().unique(true).sparse(true).build(),
+            )
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In Compass:** the **Create Index** dialog in the **Indexes** tab exposes these as options — you can tick **Unique**, set a **TTL** value, or supply a **Partial Filter Expression** without leaving the GUI.
+
+## Tips and gotchas
+
+- Multikey indexes have a limit: a compound index can include at most one array field, because indexing two arrays together would multiply out into an explosion of index entries.
+- TTL deletion is approximate in timing. The background sweep runs roughly once a minute, so an expired document may linger for up to a minute past its deadline before it is removed.
+- A partial index serves a query only when the query is guaranteed to fall inside the index's filter. A query that could match excluded documents cannot use the partial index, even for the part that overlaps.
+- A unique index counts a missing field as a `null` value, so without `sparse` it allows only one document with the field absent. Add `sparse` when many documents will lack the field.
+
+<Callout title="Pick the index that fits the shape of the data">
+Most queries want a plain index, but arrays want multikey, words want text, expiring data wants TTL, a queried subset wants partial, one-of-a-kind values want unique, and optional fields want sparse. Match the type to the job and the index stays small and fast.
+</Callout>
+
+export const quizTypes = [
+  {
+    q: 'When does MongoDB make an index multikey?',
+    options: [
+      'When you pass a multikey option',
+      'Automatically, when the indexed field holds array values',
+      'Only for text indexes',
+      'When the collection has more than one index',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a TTL index do?',
+    options: [
+      'Caches query results for a fixed time',
+      'Deletes documents automatically once a date field passes the configured age',
+      'Limits how long a query may run',
+      'Compresses old documents to save space',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why combine a unique index with sparse?',
+    options: [
+      'To make the index faster to build',
+      'To allow many documents to omit the field while still forbidding duplicate values among those that have it',
+      'To index two array fields at once',
+      'To enable full-text search on the field',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/index-types" questions={quizTypes} />
+
+<ProgressTracker client:visible id="indexes/index-types" />

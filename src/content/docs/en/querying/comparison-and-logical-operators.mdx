@@ -1,0 +1,314 @@
+---
+title: Comparison and logical operators
+description: Filter beyond exact matches with $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, combine conditions with $and, $or, $not, $nor, and test fields with $exists and $type.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+An exact-match filter — field equals value — only gets you so far. Real questions are ranges and sets: "who owes more than three fines?", "who joined in 2022 or 2023?", "which records are missing a field entirely?". MongoDB answers these with **query operators**, special keys that begin with a dollar sign and live *inside* the value position of a field. The pattern is always the same: instead of giving a field a plain value, you give it a small document whose key is an operator.
+
+We keep editing our library `members`. Each example shows the filter and the documents it would return.
+
+## Comparison operators
+
+The comparison family compares a field against a value: `$eq` (equal), `$ne` (not equal), `$gt` (greater than), `$gte` (greater-or-equal), `$lt` (less than), and `$lte` (less-or-equal). Writing a plain value is just shorthand for `$eq`. Here we ask for every member who owes more than two fines:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ fines: { $gt: 2 } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: { $gt: 2 } })
+      .toArray();
+    console.log(docs);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"fines": {"$gt": 2}}))
+    print(docs)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"fines": bson.M{"$gt": 2}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "fines": { "$gt": 2 } })
+        .await?;
+    while let Some(doc) = cursor.try_next().await? {
+        println!("{:?}", doc);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Only members above the threshold come back:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+]
+```
+
+You can combine two comparisons on the **same** field by putting both operators in one document — here, members who joined in a window of years:
+
+```js
+db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
+```
+
+## Membership: $in and $nin
+
+`$in` matches when a field equals **any** value in a list, and `$nin` matches when it equals **none** of them. This is far cleaner than chaining `$or` of equalities. Here we pull the members who joined in either 2021 or 2023:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ joined: { $in: [2021, 2023] } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ joined: { $in: [2021, 2023] } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"joined": {"$in": [2021, 2023]}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"joined": bson.M{"$in": bson.A{2021, 2023}}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "joined": { "$in": [2021, 2023] } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Both matching years are returned together:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+]
+```
+
+## Combining conditions: $and, $or, $not, $nor
+
+Several field/value pairs in one filter already mean AND, so `$and` is only needed when you would otherwise write the same field twice. `$or` is the everyday one — it takes a list of filters and matches if **any** holds. Here we find members who either owe nothing or joined in 2021:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      $or: [{ fines: 0 }, { joined: 2021 }]
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      $or: [{ fines: 0 }, { joined: 2021 }]
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "$or": [{"fines": 0}, {"joined": 2021}]
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "$or": bson.A{
+            bson.M{"fines": 0},
+            bson.M{"joined": 2021},
+        },
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "$or": [
+                doc! { "fines": 0 },
+                doc! { "joined": 2021 },
+            ]
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Anyone matching either branch appears:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d2", "name": "Margaret", "joined": 2023, "fines": 0 },
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+]
+```
+
+`$not` inverts a single operator expression, and `$nor` matches documents where **none** of its branches hold — the logical opposite of `$or`. As an example, "owes a non-zero amount AND did not join in 2021" reads naturally with `$nor`:
+
+```js
+db.members.find({ $nor: [{ fines: 0 }, { joined: 2021 }] })
+```
+
+## Testing for a field: $exists and $type
+
+Documents in one collection need not all share the same fields. `$exists` asks whether a field is present at all, regardless of its value, and `$type` asks what BSON type the value has. Here we find members who have *no* `fines` field recorded yet:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ fines: { $exists: false } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: { $exists: false } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"fines": {"$exists": False}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"fines": bson.M{"$exists": false}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "fines": { "$exists": false } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Only the document that never got a `fines` field comes back:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d5", "name": "Ada", "joined": 2024 }
+]
+```
+
+To match by type instead — say, every document where `joined` is stored as a number rather than a string someone typed by mistake — name the type:
+
+```js
+db.members.find({ joined: { $type: "int" } })
+```
+
+**In Compass:** type any of these filters straight into the filter bar at the top of the Documents tab, for example `{ fines: { $gt: 2 } }`, and press **Find**. Compass parses the same operator syntax the shell uses.
+
+## Tips and gotchas
+
+- **A plain value is `$eq`.** Writing `{ fines: 0 }` and `{ fines: { $eq: 0 } }` are identical. Reach for the explicit operators only when you need a comparison other than equality.
+- **`$ne` and `$nin` also match missing fields.** A document with no `fines` field is "not equal to 5", so it satisfies `{ fines: { $ne: 5 } }`. If you mean "has a fines field and it is not 5", combine with `$exists`.
+- **Two operators on one field go in one document.** Range queries like `{ $gte: 2022, $lte: 2023 }` are a single value document, not two separate filters — you cannot repeat the same field key at the top level.
+- **Prefer `$in` over a pile of `$or` equalities.** They mean the same thing, but `$in` is shorter, reads better, and lets the query planner use an index more directly.
+
+<Callout title="Operators live in the value, logic lives at the top">
+Comparison and element operators ($gt, $in, $exists, $type) sit inside a field's value. Logical operators ($and, $or, $not, $nor) sit at the top level of the filter and take whole sub-filters. Keeping that split straight in your head prevents most malformed queries.
+</Callout>
+
+export const quizComparison = [
+  {
+    q: 'How do you find documents where fines is greater than 2?',
+    options: [
+      '{ fines > 2 }',
+      '{ fines: { $gt: 2 } }',
+      '{ $gt: { fines: 2 } }',
+      '{ fines: ">2" }',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A document has no fines field. Does it match { fines: { $ne: 5 } }?',
+    options: [
+      'No, a missing field never matches anything',
+      'Yes, a missing field counts as not equal to 5',
+      'Only if you also pass $exists: true',
+      'It raises an error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which operator matches when a field equals any value in a list?',
+    options: ['$or', '$all', '$in', '$exists'],
+    answer: 2,
+  },
+  {
+    q: 'Where do logical operators like $or belong in a filter?',
+    options: [
+      'Inside a field value, like a comparison operator',
+      'At the top level of the filter, taking a list of sub-filters',
+      'Only inside a projection',
+      'They cannot be combined with field conditions',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="querying/comparison-and-logical-operators" questions={quizComparison} />
+
+<ProgressTracker client:visible id="querying/comparison-and-logical-operators" />

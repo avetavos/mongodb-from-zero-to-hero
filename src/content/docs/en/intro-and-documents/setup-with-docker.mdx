@@ -1,0 +1,155 @@
+---
+title: Setup with Docker
+description: Run MongoDB locally from the official Docker image with a single docker run command or a docker-compose file, then verify and connect.
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The fastest way to get a real MongoDB to play with is **Docker**. The official `mongo` image gives you a clean, isolated server in one command, with nothing installed permanently on your machine and nothing to uninstall afterwards. This lesson gets you from "Docker is running" to "I can talk to MongoDB" — first with a one-liner, then with a small `docker-compose.yml` you can keep in your project.
+
+You only need Docker Desktop (or the Docker engine) installed and running. Everything else comes from the image.
+
+## A one-line docker run
+
+This command pulls the official image, starts a container named `mongo-dev`, publishes the default MongoDB port `27017` to your machine, stores the data in a named volume so it survives a restart, and sets a root username and password:
+
+```bash
+docker run -d \
+  --name mongo-dev \
+  -p 27017:27017 \
+  -v mongo-data:/data/db \
+  -e MONGO_INITDB_ROOT_USERNAME=root \
+  -e MONGO_INITDB_ROOT_PASSWORD=secret \
+  mongo:7
+```
+
+A few things worth understanding in that command:
+
+- **`-d`** runs the container in the background (detached) so it does not tie up your terminal.
+- **`-p 27017:27017`** maps the container's port `27017` to the same port on your host, which is where MongoDB listens by default.
+- **`-v mongo-data:/data/db`** mounts a **named volume** at `/data/db`, the directory MongoDB writes its files to. The volume lives outside the container, so deleting and recreating the container does not lose your data.
+- **`-e MONGO_INITDB_ROOT_USERNAME` / `-e MONGO_INITDB_ROOT_PASSWORD`** create an administrative user the first time the container initialises an empty data directory.
+
+## A docker-compose file
+
+For anything beyond a quick test, a `docker-compose.yml` is nicer: the configuration lives in a file you can commit, and a single command brings everything up. This version runs MongoDB and adds **mongo-express**, a lightweight web UI for poking at your data in the browser:
+
+```yaml
+services:
+  mongo:
+    image: mongo:7
+    container_name: mongo-dev
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: secret
+    volumes:
+      - mongo-data:/data/db
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: secret
+      ME_CONFIG_MONGODB_URL: "mongodb://root:secret@mongo:27017/"
+    depends_on:
+      - mongo
+
+volumes:
+  mongo-data:
+```
+
+Bring the whole stack up from the directory that holds the file:
+
+```bash
+docker compose up -d
+```
+
+When it is running you can open mongo-express at `http://localhost:8081` to browse databases and collections in a browser. The `mongo-express` service is optional — delete it if you only want the database.
+
+## How the pieces fit together
+
+The container runs MongoDB and listens on port `27017`. Your published port forwards `localhost:27017` into it, the named volume keeps the data safe outside the container, and anything that speaks the MongoDB protocol — mongosh, Compass, or your application — connects through that port.
+
+export const dockerDiagram = `flowchart LR
+  App["Your app / mongosh / Compass"] -->|"mongodb://localhost:27017"| Port["Host port 27017"]
+  Port --> Container["mongo container"]
+  Container -->|"writes to /data/db"| Volume["named volume: mongo-data"]`
+
+<Mermaid code={dockerDiagram} title="Your client connects through the published port to the container, which persists data in a named volume" />
+
+## Verify it is running
+
+Check that the container is up with `docker ps`:
+
+```bash
+docker ps
+```
+
+You should see a row for the `mongo` image with a status of `Up` and the port mapping `0.0.0.0:27017->27017/tcp`. Now connect with the shell. The `mongosh` client ships inside the image, so you can run it without installing anything:
+
+```bash
+docker exec -it mongo-dev mongosh "mongodb://root:secret@localhost:27017"
+```
+
+If you have `mongosh` installed on your host instead, point it at the published port directly:
+
+```bash
+mongosh "mongodb://localhost:27017"
+```
+
+A successful connection drops you at a `test>` prompt. From there, typing `db.runCommand({ ping: 1 })` and getting back `{ ok: 1 }` confirms the server is alive and answering.
+
+## Tips and gotchas
+
+- **Data persistence lives in the volume, not the container.** As long as you keep the `mongo-data` volume, you can stop, remove, and recreate the container without losing anything. Running `docker volume rm mongo-data` is what actually deletes the data.
+- **The root user is created only on first init.** The `MONGO_INITDB_ROOT_*` variables take effect when the data directory is empty. If you change them later against an existing volume, they are ignored — the existing user stays.
+- **Port `27017` is the MongoDB default.** If something else already uses it, change the host side of the mapping, for example `-p 27018:27017`, and connect to `27018`.
+- **Pin a major version** like `mongo:7` rather than `mongo:latest` so an image update does not surprise you with a different server version.
+
+<Callout title="One command, real MongoDB">
+Docker turns "install and configure a database" into "run an image." Keep your data in a named volume, pin a version tag, and you have a disposable yet persistent MongoDB you can wipe and recreate at will.
+</Callout>
+
+export const quizDocker = [
+  {
+    q: 'Why mount a named volume at /data/db when running the mongo container?',
+    options: [
+      'It makes MongoDB start faster',
+      'It persists the data outside the container so recreating the container does not lose it',
+      'It is required for the container to start at all',
+      'It disables authentication',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which port does MongoDB listen on by default?',
+    options: ['8081', '5432', '27017', '3306'],
+    answer: 2,
+  },
+  {
+    q: 'When do the MONGO_INITDB_ROOT_USERNAME and PASSWORD variables take effect?',
+    options: [
+      'Every time the container restarts',
+      'Only the first time, when the data directory is empty',
+      'Only when mongo-express is also running',
+      'Never — they are ignored by the image',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/setup-with-docker" questions={quizDocker} />
+
+<ProgressTracker client:visible id="intro-and-documents/setup-with-docker" />

@@ -1,0 +1,163 @@
+---
+title: Sharding
+description: How MongoDB splits one collection across many shards by a shard key, the role of mongos and the config servers, and how to choose a shard key you will not regret.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A replica set keeps your data alive, but every member still holds the *entire* dataset. That works right up until one machine can no longer fit all your data, or one primary can no longer handle all your writes. Adding more memory and faster disks — scaling *up* — has a ceiling and gets expensive fast. **Sharding** scales *out* instead: it splits one logical collection across many machines, so the data and the write load divide among them. Each machine holds only its slice, and you add capacity by adding machines.
+
+## The pieces of a sharded cluster
+
+Sharding introduces three roles beyond the shards themselves. A **shard** is a replica set holding one portion of the data. The **config servers** are their own replica set that stores the cluster's metadata — the map of which data lives on which shard. And **mongos** is a lightweight router your application connects to instead of any single shard; it consults that map and forwards each request to the right shard or shards.
+
+export const shardTopology = `flowchart TB
+  App["Application"] --> M["mongos router"]
+  M --> CFG["Config servers — store the chunk map"]
+  M --> Sh1["Shard 1 (replica set)"]
+  M --> Sh2["Shard 2 (replica set)"]
+  M --> Sh3["Shard 3 (replica set)"]
+  CFG -. "tells mongos where each chunk lives" .- M`
+
+<Mermaid code={shardTopology} title="The application talks only to mongos, which uses the config servers' map to route requests to the right shard" />
+
+Your application never addresses a shard directly. It connects to `mongos`, which looks indistinguishable from a normal MongoDB server. Behind that single endpoint, `mongos` reads the metadata held by the config servers and decides where each query and each write belongs.
+
+## The shard key, chunks, and the balancer
+
+The whole scheme hinges on one decision: the **shard key**, a field (or set of fields) MongoDB uses to decide which shard a document belongs to. MongoDB divides the key's range into contiguous blocks called **chunks**, and assigns each chunk to a shard. As data grows, a chunk that gets too large is split in two, and a background process called the **balancer** quietly migrates chunks between shards to keep them roughly even.
+
+export const chunkFlow = `flowchart LR
+  K["Shard key value"] --> C["Which chunk owns this value"]
+  C --> S["Which shard owns that chunk"]
+  S --> Done["Document lands on that shard"]
+  Bal["Balancer"] -. "migrates chunks to keep shards even" .- S`
+
+<Mermaid code={chunkFlow} title="A document's shard key decides its chunk, and the chunk decides its shard; the balancer evens out chunk counts over time" />
+
+There are two ways to map keys to chunks. **Ranged** sharding keeps nearby key values together — useful when you query by ranges, but risky if writes cluster at one end of the range, because they all pile onto one shard. **Hashed** sharding runs the key through a hash first, scattering even sequential values evenly across shards — great for write distribution, but it destroys locality, so a range query has to fan out to every shard. You enable sharding on a collection and pick the strategy in one call:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    sh.enableSharding("library")
+
+    // Ranged shard key on memberId
+    sh.shardCollection("library.loans", { memberId: 1 })
+
+    // Or hashed, to spread writes evenly
+    sh.shardCollection("library.events", { deviceId: "hashed" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const admin = client.db("admin");
+    await admin.command({ enableSharding: "library" });
+    await admin.command({
+      shardCollection: "library.loans",
+      key: { memberId: 1 },
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    admin = client.admin
+    admin.command("enableSharding", "library")
+    admin.command(
+        "shardCollection", "library.loans", key={"memberId": 1}
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    admin := client.Database("admin")
+    if err := admin.RunCommand(ctx, bson.D{
+        {Key: "shardCollection", Value: "library.loans"},
+        {Key: "key", Value: bson.D{{Key: "memberId", Value: 1}}},
+    }).Err(); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let admin = client.database("admin");
+    admin
+        .run_command(doc! {
+            "shardCollection": "library.loans",
+            "key": { "memberId": 1 },
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## Choosing a good shard key
+
+A bad shard key cannot be quietly fixed later, so this choice deserves care up front. Three properties make a key good. **High cardinality** means the key has many distinct values, so the data can split into many chunks — a field with only a handful of values caps how far you can spread. **Even distribution** means values are spread across documents, so no single shard becomes a bottleneck. And **low hotspotting** means writes do not all target the same growing range; a steadily increasing key such as a timestamp or an auto-incrementing id is the classic trap, because every new write lands on the same "highest" chunk and hammers one shard. Hashing such a key, or combining it with a higher-cardinality field, breaks up that hotspot.
+
+**In Atlas:** the cluster view exposes sharding as a configuration option, and a *Shard Key Advisor* and *Shard Key Analyzer* help you evaluate a candidate key's distribution before you commit to it — well worth using, given how hard the key is to change afterward.
+
+## Tips and gotchas
+
+- Choose the shard key carefully; **changing it is hard** and historically required rebuilding the collection. Reshardable collections exist in modern versions, but it is still an operation to avoid, so get the key right the first time.
+- Do not shard too early. A single replica set serves a great deal of traffic. Shard when you have evidence one machine cannot keep up, not on a hunch.
+- A query that includes the shard key is **targeted** — `mongos` sends it to exactly one shard. A query without it is **scatter-gather** — it fans out to every shard. Design your common queries to carry the shard key.
+- Hashed keys distribute writes beautifully but ruin range queries; ranged keys preserve locality but risk hotspots. Pick the trade-off that matches how you actually read and write.
+
+<Callout title="The shard key is the decision that matters">
+Sharding spreads one collection across many shards, and a router uses the config servers' map to send each request to the right one. Everything depends on the shard key: pick one with high cardinality and even distribution, and avoid monotonically increasing keys that hotspot a single shard.
+</Callout>
+
+export const quizShard = [
+  {
+    q: 'What does the application connect to in a sharded cluster?',
+    options: [
+      'A randomly chosen shard',
+      'The mongos router',
+      'The config servers directly',
+      'The balancer',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What do the config servers store?',
+    options: [
+      'A full copy of every document',
+      'The cluster metadata mapping which chunks live on which shards',
+      'The oplog for each shard',
+      'Cached query results',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which property is a problem for a shard key?',
+    options: [
+      'High cardinality',
+      'Even distribution of values',
+      'A monotonically increasing value that sends every new write to one shard',
+      'Being used in common queries',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What is the trade-off of a hashed shard key versus a ranged one?',
+    options: [
+      'Hashed keys distribute writes evenly but make range queries fan out to all shards',
+      'Hashed keys are always slower for every operation',
+      'Ranged keys cannot be used as shard keys',
+      'There is no difference between them',
+    ],
+    answer: 0,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/sharding" questions={quizShard} />
+
+<ProgressTracker client:visible id="operations-and-scaling/sharding" />

@@ -1,0 +1,283 @@
+---
+title: Finding documents
+description: Read documents back with find and findOne, build equality and multi-field filters, and project the fields you want.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Reading is where a database earns its keep, and MongoDB gives you two doors into the same room. `findOne` is for when you expect a single document — "who is the member named Grace?" — and hands you that one document or nothing at all. `find` is for when you might get several — "which members joined in 2023?" — and hands you a cursor you can iterate over. Both take the same kind of **filter**, a document that describes which records you want.
+
+Throughout this lesson assume the `members` collection already holds the people we inserted earlier. We will ask it questions of increasing precision.
+
+## findOne versus find
+
+The difference is shape, not syntax. `findOne` returns at most one document directly. `find` returns a cursor — a lazy handle the driver iterates to pull documents in batches — so you usually turn it into an array (or loop over it) to see the results.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.findOne({ name: "Grace" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const member = await db.collection("members").findOne({ name: "Grace" });
+    console.log(member);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    member = db.members.find_one({"name": "Grace"})
+    print(member)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var member bson.M
+    err := coll.FindOne(ctx, bson.M{"name": "Grace"}).Decode(&member)
+    if err != nil {
+        return err
+    }
+    fmt.Println(member)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let member = coll.find_one(doc! { "name": "Grace" }).await?;
+    println!("{:?}", member);
+    ```
+  </TabItem>
+</Tabs>
+
+The single matching document comes back in full, including the `_id`:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
+  "name": "Grace",
+  "joined": 2024,
+  "fines": 0
+}
+```
+
+An empty filter matches everything, which is how you read a whole collection. With `find` you get a cursor over all of it:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({})
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const all = await db.collection("members").find({}).toArray();
+    console.log(all);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    all_members = list(db.members.find({}))
+    print(all_members)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{})
+    if err != nil {
+        return err
+    }
+    var all []bson.M
+    if err := cur.All(ctx, &all); err != nil {
+        return err
+    }
+    fmt.Println(all)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use futures::stream::TryStreamExt;
+
+    let mut cursor = coll.find(doc! {}).await?;
+    while let Some(member) = cursor.try_next().await? {
+        println!("{:?}", member);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Equality filters
+
+A filter that names a field and a value means "this field equals this value." Stack several fields in one filter and MongoDB treats them as an **implicit AND** — a document must match every condition to be returned. Here we ask for members who joined in 2023 *and* have no outstanding fines:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ joined: 2023, fines: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const matches = await db
+      .collection("members")
+      .find({ joined: 2023, fines: 0 })
+      .toArray();
+    console.log(matches);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    matches = list(db.members.find({"joined": 2023, "fines": 0}))
+    print(matches)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"joined": 2023, "fines": 0})
+    if err != nil {
+        return err
+    }
+    var matches []bson.M
+    if err := cur.All(ctx, &matches); err != nil {
+        return err
+    }
+    fmt.Println(matches)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use futures::stream::TryStreamExt;
+
+    let mut cursor = coll.find(doc! { "joined": 2023, "fines": 0 }).await?;
+    let matches: Vec<_> = cursor.try_collect().await?;
+    println!("{:?}", matches);
+    ```
+  </TabItem>
+</Tabs>
+
+The result is a list of the documents that satisfied both conditions:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "joined": 2023,
+    "fines": 0
+  }
+]
+```
+
+## A first taste of projection
+
+By default a read returns every field of every matching document. A **projection** lets you ask for just the fields you care about, which trims the data sent over the wire. You pass a second document where `1` means "include this field." Here we want only names, and we explicitly turn the `_id` off by setting it to `0`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ joined: 2023 }, { name: 1, _id: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const names = await db
+      .collection("members")
+      .find({ joined: 2023 }, { projection: { name: 1, _id: 0 } })
+      .toArray();
+    console.log(names);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    names = list(db.members.find({"joined": 2023}, {"name": 1, "_id": 0}))
+    print(names)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetProjection(bson.M{"name": 1, "_id": 0})
+    cur, err := coll.Find(ctx, bson.M{"joined": 2023}, opts)
+    if err != nil {
+        return err
+    }
+    var names []bson.M
+    if err := cur.All(ctx, &names); err != nil {
+        return err
+    }
+    fmt.Println(names)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use futures::stream::TryStreamExt;
+    use mongodb::options::FindOptions;
+
+    let opts = FindOptions::builder()
+        .projection(doc! { "name": 1, "_id": 0 })
+        .build();
+    let mut cursor = coll.find(doc! { "joined": 2023 }).with_options(opts).await?;
+    let names: Vec<_> = cursor.try_collect().await?;
+    println!("{:?}", names);
+    ```
+  </TabItem>
+</Tabs>
+
+Now each result carries only the requested field:
+
+```json
+[{ "name": "Margaret" }]
+```
+
+**In Compass:** type a filter into the **Filter** bar at the top of the Documents tab and press **Find**; open the **Options** panel to fill in a projection without writing the call by hand.
+
+## Tips and gotchas
+
+- `find` returns a **cursor**, not a list. Nothing is fetched until you iterate it (or call a helper like `toArray`). A `findOne` is effectively a cursor that stops after the first document.
+- The `_id` field is **included by default** in every projection. If you do not want it, you have to switch it off explicitly with `_id: 0`.
+- Don't mix `1` and `0` in the same projection except for `_id`. Either list the fields you want, or list the fields you want to drop — not both.
+- A filter that matches nothing returns an empty cursor (or, for `findOne`, a null result). That is a normal answer, not an error.
+
+<Callout title="Filters are just documents">
+A query filter is a document that describes the documents you want. List several fields and MongoDB requires all of them to match — that implicit AND is the workhorse behind most everyday reads.
+</Callout>
+
+export const quizFind = [
+  {
+    q: 'What does find return, compared with findOne?',
+    options: [
+      'A single document; findOne returns a list',
+      'A cursor over all matches; findOne returns at most one document',
+      'Exactly the same thing in both cases',
+      'An error if more than one document matches',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a filter with two fields, how are the conditions combined?',
+    options: [
+      'With an implicit OR — any condition may match',
+      'With an implicit AND — every condition must match',
+      'Only the first field is used',
+      'Only the last field is used',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you keep the _id out of a projection?',
+    options: [
+      'It is excluded by default',
+      'You cannot exclude _id',
+      'Set _id to 0 explicitly',
+      'List every other field and _id drops automatically',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="crud/find-and-query-filters" questions={quizFind} />
+
+<ProgressTracker client:visible id="crud/find-and-query-filters" />

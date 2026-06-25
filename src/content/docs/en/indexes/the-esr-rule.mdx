@@ -1,0 +1,185 @@
+---
+title: The ESR rule
+description: Order compound index fields as Equality, Sort, Range to get the most out of a single index, with a worked example showing why the order wins.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The previous lesson left a question hanging: when you build a compound index for a query, what order should the fields go in? The answer is a short, memorable rule called **ESR** — **Equality, Sort, Range**. List the fields your query uses for an exact match first, then the field you sort on, then any field you query as a range. Follow that order and one index can satisfy the filter, the sort, and the range scan in a single pass, with no extra in-memory sort and no wasted reads.
+
+Let us work it through with a concrete query against our library `members`.
+
+## The query we are optimizing
+
+Suppose we want every member in a given city, who has more than two fines, sorted by their join year. The query touches three fields in three different ways:
+
+- `city` — an **equality** match: `city` equals one exact value.
+- `joined` — the **sort** field: results come back ordered by join year.
+- `fines` — a **range**: `fines` greater than two, a span of values rather than one.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ city: "Berlin", fines: { $gt: 2 } })
+      .sort({ joined: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members")
+      .find({ city: "Berlin", fines: { $gt: 2 } })
+      .sort({ joined: 1 })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    list(
+        db.members
+        .find({"city": "Berlin", "fines": {"$gt": 2}})
+        .sort("joined", 1)
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetSort(bson.D{{Key: "joined", Value: 1}})
+    cur, err := coll.Find(
+        ctx,
+        bson.M{"city": "Berlin", "fines": bson.M{"$gt": 2}},
+        opts,
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let cur = coll
+        .find(doc! { "city": "Berlin", "fines": { "$gt": 2 } })
+        .sort(doc! { "joined": 1 })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## Applying ESR
+
+ESR says: equality field first, sort field second, range field last. That gives the index `{ city: 1, joined: 1, fines: 1 }`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ city: 1, joined: 1, fines: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ city: 1, joined: 1, fines: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("city", 1), ("joined", 1), ("fines", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys: bson.D{
+                {Key: "city", Value: 1},
+                {Key: "joined", Value: 1},
+                {Key: "fines", Value: 1},
+            },
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "city": 1, "joined": 1, "fines": 1 })
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Here is why the order works:
+
+export const esrDiagram = `flowchart TB
+  E["Equality: city equals Berlin"] --> EX["Index seeks to one narrow city block"]
+  EX --> S["Sort: joined ascending"]
+  S --> SX["Inside that block, docs are already ordered by joined — no extra sort"]
+  SX --> R["Range: fines greater than 2"]
+  R --> RX["Walk the matching join order, keeping only fines above 2"]
+  RX --> Out["Results: filtered, sorted, no in-memory sort step"]`
+
+<Mermaid code={esrDiagram} title="Equality narrows to one block, Sort is satisfied by the index order, Range is the final walk" />
+
+The equality on `city` pins the search to one contiguous slice of the index. Within that slice the documents are already laid out in `joined` order, so MongoDB returns them sorted without a separate sort step. The range on `fines` comes last because a range leaves the following index fields unsorted — if `fines` came before `joined`, the join years inside the range would be scattered, and MongoDB would have to sort them in memory after reading.
+
+## Why other orders lose
+
+Compare with the tempting but wrong order `{ city: 1, fines: 1, joined: 1 }`, which puts the range before the sort. The equality on `city` still works. But `fines: { $gt: 2 }` is a range, and once the index walks a range, every field after it is no longer in a single sorted run. So `joined` is not usable for the sort, and MongoDB falls back to a blocking in-memory sort of the whole result set. The query still returns the correct answer — it is just slower and uses more memory. That hidden sort is exactly what ESR exists to avoid.
+
+A useful way to remember it: a range "spends" all the ordering of the fields that follow it, so you put it last, after you have already gotten your equality narrowing and your sort for free.
+
+**In Compass:** build the candidate index in the **Indexes** tab, then run the query in the **Explain Plan** tab. When ESR is satisfied you will see the sort handled by the index; when it is not, the plan shows an explicit sort stage consuming the results.
+
+## Tips and gotchas
+
+- ESR is a default, not a law. It is the right starting point for the common "filter, sort, range" query shape, but always confirm with `explain` on your real data.
+- Equality fields can be more than one, and they all go up front. The same goes for several range fields at the very end. The single sort field sits in the middle.
+- The payoff of getting ESR right is eliminating the in-memory sort. A plan with an explicit sort stage on a large result set is the signal that your field order is fighting the query.
+
+<Callout title="Equality, Sort, Range">
+Order compound index fields by how the query uses them: exact matches first, the sort field next, range comparisons last. That single ordering lets one index narrow, order, and scan without a separate sort.
+</Callout>
+
+export const quizEsr = [
+  {
+    q: 'What does ESR stand for, in field order?',
+    options: ['Equality, Sort, Range', 'Equality, Search, Result', 'Exact, Sort, Reverse', 'Equality, Sort, Reduce'],
+    answer: 0,
+  },
+  {
+    q: 'Why does the range field go last in an ESR index?',
+    options: [
+      'Range fields cannot be indexed at all',
+      'A range leaves the following index fields unsorted, which would break a later sort',
+      'Range fields are always the least selective',
+      'MongoDB requires range fields to come last syntactically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'You put the range field before the sort field. What does the query plan show?',
+    options: [
+      'The query is rejected',
+      'An explicit in-memory sort stage, because the index order no longer satisfies the sort',
+      'A covered query with no document fetch',
+      'The same plan as the correct ESR order',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/the-esr-rule" questions={quizEsr} />
+
+<ProgressTracker client:visible id="indexes/the-esr-rule" />

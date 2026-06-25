@@ -1,0 +1,166 @@
+---
+title: Security and Atlas
+description: The production security basics — authentication and roles, TLS, network restrictions, and encryption at rest — and how MongoDB Atlas provides them as a managed service.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A fresh `mongod` started with default settings has no authentication and listens for connections. On your laptop, bound to localhost, that is harmless. On a server with a public IP, it is a breach waiting to happen — and over the years, unsecured MongoDB instances have leaked enormous amounts of data exactly this way. Production security is not one feature but a short stack of defenses, each closing a different door: who can connect, how the connection is protected, where connections are even allowed from, and what happens to the bytes on disk.
+
+## The layers of protection
+
+Think of a request as passing through a series of gates before it ever touches your data. The network decides whether the connection is allowed at all. TLS protects the bytes in flight. Authentication checks who you are, and authorization checks what you are allowed to do:
+
+export const securityFlow = `flowchart LR
+  Client["Application"] --> Net["Network gate — firewall, bind IP, VPC"]
+  Net --> TLS["TLS — encrypts the connection"]
+  TLS --> Auth["Authentication — who are you"]
+  Auth --> RBAC["Authorization — what may you do"]
+  RBAC --> Data["Data — encrypted at rest on disk"]`
+
+<Mermaid code={securityFlow} title="Each gate closes a different door: network, then transport encryption, then identity, then permissions, then encryption at rest" />
+
+No single layer is sufficient. Authentication without network limits still invites brute-force attempts; a locked-down network without auth trusts everyone inside it. Defense in depth means turning on all of them.
+
+## Authentication and roles (RBAC)
+
+The first move is to require **authentication** so that no one can connect anonymously. MongoDB then governs what each user may do through **role-based access control** — RBAC. You create users and grant them roles, and a role is a bundle of permissions. The principle is *least privilege*: an application that only reads reports gets a read-only role, not an administrator's keys. You enable auth in the config file and then create users.
+
+```yaml
+# mongod.conf — require authentication
+security:
+  authorization: enabled
+```
+
+```js
+// Create an app user limited to read and write on one database
+db.getSiblingDB("admin").createUser({
+  user: "library_app",
+  pwd: passwordPrompt(),
+  roles: [{ role: "readWrite", db: "library" }]
+})
+```
+
+With auth enabled, every connection must present credentials. Drivers send them in the connection string or as separate options:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```bash
+    mongosh "mongodb://library_app@host:27017/library?authSource=admin&tls=true"
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const uri =
+      "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    const client = new MongoClient(uri);
+    await client.connect();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    client = MongoClient(uri)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    uri := "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    client, err := mongo.Connect(options.Client().ApplyURI(uri))
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    let client = Client::with_uri_str(uri).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## TLS, network rules, and encryption at rest
+
+Three more layers complete the picture. **TLS** encrypts traffic between client and server so credentials and data cannot be read off the wire; you point `mongod` at a certificate and require it.
+
+```yaml
+# mongod.conf — require TLS and restrict where it listens
+net:
+  bindIp: 10.0.1.5,localhost
+  tls:
+    mode: requireTLS
+    certificateKeyFile: /etc/ssl/mongodb.pem
+```
+
+That same snippet shows the **network** gate. The `bindIp` setting controls which interfaces `mongod` accepts connections on — bind it to private addresses, never `0.0.0.0` on a public host. In the cloud you wrap the server in a VPC or private subnet and use a firewall or security group so only your application servers can reach port `27017` at all. Finally, **encryption at rest** scrambles the data files on disk, so a stolen disk or backup volume is useless without the key; in self-managed deployments this is a storage-engine or filesystem-level feature you enable, and in managed services it is on by default.
+
+## MongoDB Atlas: the easy path
+
+Doing all of this by hand — provisioning a replica set, generating certificates, configuring firewalls, rotating keys, scheduling backups — is real work and easy to get subtly wrong. **MongoDB Atlas** is MongoDB's managed cloud service, and it exists largely so you do not have to. An Atlas cluster ships secure by default: authentication is required, TLS is always on, encryption at rest is enabled, and the database is *not* reachable until you explicitly add an entry to its **IP access list**. On top of that it gives you automated **backups** with point-in-time restore, and **monitoring** dashboards with the Performance Advisor from the previous lesson built in.
+
+**In Compass / Atlas:** you connect Compass to an Atlas cluster with a connection string copied from the Atlas UI, which already includes TLS and your database user. In Atlas itself, Database Access manages users and roles, Network Access manages the IP allow-list, and the Backup tab manages snapshots — the same four layers, presented as forms instead of config files.
+
+## Tips and gotchas
+
+- **Never expose port 27017 to the internet without authentication.** This is the cardinal rule; it is how the well-known data leaks happened. Bind to private interfaces and require auth before anything else.
+- Apply **least privilege**. Give each application user only the roles it needs on only the databases it uses. Do not hand out the admin role to app code.
+- TLS protects data *in transit*; encryption at rest protects it *on disk*. They are different layers — enable both, not one.
+- Self-managing all of this is doable but error-prone. If you do not have a strong reason to run your own clusters, Atlas gives you these defenses correctly configured out of the box.
+
+<Callout title="Secure by depth, or let Atlas do it">
+Production security is four layers: lock down the network, require TLS, require authentication, and grant least-privilege roles — plus encryption at rest on disk. Never put an unauthenticated MongoDB on a public address. If you would rather not assemble all of this yourself, MongoDB Atlas ships it secure by default.
+</Callout>
+
+export const quizSecurity = [
+  {
+    q: 'What is the cardinal production security rule for MongoDB?',
+    options: [
+      'Always run on the default port',
+      'Never expose port 27017 to the internet without authentication',
+      'Disable TLS to improve performance',
+      'Give every user the admin role for convenience',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does role-based access control (RBAC) provide?',
+    options: [
+      'Encryption of the data files on disk',
+      'Control over what each authenticated user is permitted to do',
+      'Automatic failover between replicas',
+      'Compression of network traffic',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'TLS and encryption at rest protect against different things. Which is which?',
+    options: [
+      'Both protect data only while it is in memory',
+      'TLS protects data in transit on the network; encryption at rest protects data on disk',
+      'TLS protects the disk; encryption at rest protects the network',
+      'They are two names for the same feature',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does MongoDB Atlas help with security by default?',
+    options: [
+      'It disables authentication so connecting is easier',
+      'It requires auth and TLS, encrypts at rest, and keeps the cluster unreachable until you add an IP to the access list',
+      'It exposes the cluster publicly so any client can connect',
+      'It removes the need for a connection string',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/security-and-atlas" questions={quizSecurity} />
+
+<ProgressTracker client:visible id="operations-and-scaling/security-and-atlas" />

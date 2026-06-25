@@ -1,0 +1,200 @@
+---
+title: Inserting documents
+description: Add one or many documents with insertOne and insertMany, and meet the automatic _id field.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Inserting is the gentlest operation in MongoDB: you hand the database a document, it stores it, and it tells you what it stored. There is no schema to define first and no table columns to line up against — if the document is valid JSON-like data, it goes in. That freedom is exactly why a tiny bit of discipline around the `_id` field pays off, which is the one piece of bookkeeping every insert involves.
+
+We will keep building our imaginary library. Each member is a document, and in this lesson we add them to a collection called `members`.
+
+## Inserting a single document
+
+`insertOne` takes exactly one document and stores it. If you do not supply an `_id`, MongoDB generates one for you as an **ObjectId** — a 12-byte value that is unique across the collection and even encodes the creation time. That generated id is the primary key of the document.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertOne({ name: "Grace", joined: 2024, fines: 0 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").insertOne({
+      name: "Grace",
+      joined: 2024,
+      fines: 0,
+    });
+    console.log(res.insertedId);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.insert_one({"name": "Grace", "joined": 2024, "fines": 0})
+    print(res.inserted_id)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.InsertOne(ctx, bson.M{"name": "Grace", "joined": 2024, "fines": 0})
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.InsertedID)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll
+        .insert_one(doc! { "name": "Grace", "joined": 2024, "fines": 0 })
+        .await?;
+    println!("{}", res.inserted_id);
+    ```
+  </TabItem>
+</Tabs>
+
+The acknowledgement tells you the operation succeeded and hands back the id that was assigned. In the shell it looks like this:
+
+```json
+{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1d0" }
+```
+
+And the document now sitting in the collection looks like this — the `_id` is the only thing you did not type yourself:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
+  "name": "Grace",
+  "joined": 2024,
+  "fines": 0
+}
+```
+
+**In Compass:** open the `members` collection, click the green **ADD DATA** button, choose **Insert Document**, paste your JSON without an `_id`, and Compass fills the id in for you when you save.
+
+## Inserting many at once
+
+When you have a batch of documents, `insertMany` sends them in one round trip instead of one call per document. You pass an array, and you get back the ids of everything that was inserted, keyed by their position in the array.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertMany([
+      { name: "Linus", joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2025, fines: 0 },
+      { name: "Edsger", joined: 2022, fines: 5 }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").insertMany([
+      { name: "Linus", joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2025, fines: 0 },
+      { name: "Edsger", joined: 2022, fines: 5 },
+    ]);
+    console.log(res.insertedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.insert_many([
+        {"name": "Linus", "joined": 2023, "fines": 2},
+        {"name": "Margaret", "joined": 2025, "fines": 0},
+        {"name": "Edsger", "joined": 2022, "fines": 5},
+    ])
+    print(len(res.inserted_ids))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    docs := []interface{}{
+        bson.M{"name": "Linus", "joined": 2023, "fines": 2},
+        bson.M{"name": "Margaret", "joined": 2025, "fines": 0},
+        bson.M{"name": "Edsger", "joined": 2022, "fines": 5},
+    }
+    res, err := coll.InsertMany(ctx, docs)
+    if err != nil {
+        return err
+    }
+    fmt.Println(len(res.InsertedIDs))
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let docs = vec![
+        doc! { "name": "Linus", "joined": 2023, "fines": 2 },
+        doc! { "name": "Margaret", "joined": 2025, "fines": 0 },
+        doc! { "name": "Edsger", "joined": 2022, "fines": 5 },
+    ];
+    let res = coll.insert_many(docs).await?;
+    println!("{}", res.inserted_ids.len());
+    ```
+  </TabItem>
+</Tabs>
+
+The acknowledgement maps each array index to the id that was generated for it:
+
+```json
+{
+  "acknowledged": true,
+  "insertedIds": {
+    "0": "65f0b3d4e4b0a1c2e4b0a1d1",
+    "1": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "2": "65f0b3d4e4b0a1c2e4b0a1d3"
+  }
+}
+```
+
+## Tips and gotchas
+
+- You may supply your own `_id` (a string, number, or any value) instead of letting MongoDB generate an ObjectId — but it must be unique. Inserting a document whose `_id` already exists fails with a **duplicate key** error.
+- `insertMany` is **ordered** by default: it stops at the first failing document, so documents after a duplicate-id error never get inserted. Pass an unordered option to keep going past failures and insert every document that does not collide.
+- Because there is no schema, two documents in the same collection can have completely different fields. Inserting is forgiving; that is a feature, not a bug — just stay consistent on purpose.
+
+<Callout title="Let MongoDB own the id">
+Unless you have a real-world identifier that is guaranteed unique (like an ISBN), let MongoDB generate the ObjectId. It is unique, sortable by creation time, and one less thing for you to get wrong.
+</Callout>
+
+export const quizInsert = [
+  {
+    q: 'If you insert a document without an _id field, what happens?',
+    options: [
+      'The insert is rejected',
+      'MongoDB generates a unique ObjectId for it',
+      'The field stays empty until you set it',
+      'The document is stored without any primary key',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'By default, what does an ordered insertMany do when one document has a duplicate _id?',
+    options: [
+      'It skips that document and inserts the rest',
+      'It stops at the failure, leaving later documents uninserted',
+      'It rolls back every document in the batch',
+      'It overwrites the existing document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the acknowledgement of insertMany contain?',
+    options: [
+      'Only a true/false success flag',
+      'The full text of every inserted document',
+      'The generated ids keyed by their position in the input array',
+      'A cursor over the new documents',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="crud/insert" questions={quizInsert} />
+
+<ProgressTracker client:visible id="crud/insert" />

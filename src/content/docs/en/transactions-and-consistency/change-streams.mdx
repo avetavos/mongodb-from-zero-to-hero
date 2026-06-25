@@ -1,0 +1,196 @@
+---
+title: Change streams
+description: Subscribe to a live feed of inserts, updates, and deletes with watch(), built on the oplog, to drive event-driven applications, and resume reliably with resume tokens.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+So far we have changed data and read it back ourselves. But many applications need to **react** to changes that other parts of the system make — send an email when a member is added, refresh a cache when a record changes, push an update to a dashboard the moment a fine is paid. Polling the collection over and over to spot changes is wasteful and slow. A **change stream** solves this directly: you open a stream with `watch()` and the database hands you each insert, update, and delete as it happens, in order, as a live feed.
+
+Change streams are built on the **oplog**, the same internal log a replica set uses to copy writes from the primary to its secondaries. Because the oplog already records every change in order, a change stream is just a well-behaved reader of that log, which is why a change stream — like a transaction — needs a **replica set** to run.
+
+## Opening a stream on a collection
+
+Here we watch the `members` collection and react to every change. Each event the stream yields is a document describing what happened: its `operationType` (such as `insert` or `update`), the document key, and for updates a description of which fields changed. The loop below simply prints each event as it arrives and keeps listening:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const stream = db.members.watch();
+    while (stream.hasNext()) {
+      const event = stream.next();
+      print(event.operationType, JSON.stringify(event.documentKey));
+    }
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const stream = db.collection("members").watch();
+    for await (const event of stream) {
+      console.log(event.operationType, event.documentKey);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with db.members.watch() as stream:
+        for event in stream:
+            print(event["operationType"], event["documentKey"])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    stream, err := coll.Watch(ctx, mongo.Pipeline{})
+    if err != nil {
+        return err
+    }
+    defer stream.Close(ctx)
+
+    for stream.Next(ctx) {
+        var event bson.M
+        if err := stream.Decode(&event); err != nil {
+            return err
+        }
+        fmt.Println(event["operationType"], event["documentKey"])
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut stream = coll.watch().await?;
+    while let Some(event) = stream.next().await.transpose()? {
+        println!("{:?} {:?}", event.operation_type, event.document_key);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+When someone inserts a new member elsewhere, an event like this appears on the stream. The `_id` field is the **resume token** for this event — keep reading to see why it matters:
+
+```json
+{
+  "_id": { "_data": "8265F0B3D4000000012B0229" },
+  "operationType": "insert",
+  "documentKey": { "_id": "65f0b3d4e4b0a1c2e4b0a1f0" },
+  "fullDocument": { "_id": "65f0b3d4e4b0a1c2e4b0a1f0", "name": "Katherine", "fines": 0 }
+}
+```
+
+## How the feed flows
+
+A write goes to the primary, gets recorded in the oplog, and from there the change stream picks it up and delivers it to every consumer that is watching. One write can fan out to many independent listeners, each processing it for its own purpose:
+
+export const streamFlow = `flowchart LR
+  W["A write on the primary"] --> O["Oplog records the change in order"]
+  O --> CS["Change stream reads the oplog"]
+  CS --> C1["Consumer: send a welcome email"]
+  CS --> C2["Consumer: refresh a cache"]
+  CS --> C3["Consumer: update a dashboard"]`
+
+<Mermaid code={streamFlow} title="A write lands in the oplog, the change stream reads it, and fans the event out to every consumer that is watching" />
+
+## Resuming where you left off
+
+Networks drop and processes restart, and an event-driven system cannot afford to miss the changes that happened while it was away. Every event carries a **resume token** in its `_id`. If you store the token of the last event you successfully handled, you can reopen the stream from exactly that point and receive every change since, with none skipped and none repeated. Here we resume after a known token:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const stream = db.members.watch([], { resumeAfter: savedToken });
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const stream = db.collection("members").watch([], { resumeAfter: savedToken });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    stream = db.members.watch(resume_after=saved_token)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.ChangeStream().SetResumeAfter(savedToken)
+    stream, err := coll.Watch(ctx, mongo.Pipeline{}, opts)
+    if err != nil {
+        return err
+    }
+    defer stream.Close(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let stream = coll
+        .watch()
+        .resume_after(saved_token)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In Compass:** there is no dedicated change-stream view, but you can run the `watch()` loop in the embedded **mongosh** tab and then make an edit in the Documents tab in another window to see the event appear live.
+
+## Tips and gotchas
+
+- **A change stream needs a replica set**, for the same reason a transaction does: it reads from the oplog, which only exists on a replica set.
+- **Filter at the source with a pipeline.** You can pass an aggregation pipeline to `watch()` — for example a `$match` on `operationType` or on a field — so the server only sends you the events you care about, rather than filtering them in your application.
+- **Persist the resume token.** Storing the last handled token durably is what makes a consumer crash-safe. Without it, a restart either misses events or has to reprocess from the beginning.
+- **Tokens expire with the oplog.** If a consumer is offline so long that its resume point has fallen off the end of the oplog, the stream cannot resume from there, and you must reconcile some other way.
+
+<Callout title="Watch, do not poll">
+When your application needs to react to data changes, open a change stream instead of polling the collection on a timer. You get changes in order, the moment they happen, and a resume token to pick up exactly where you left off after any interruption.
+</Callout>
+
+export const quizStreams = [
+  {
+    q: 'What internal structure are change streams built on?',
+    options: [
+      'The index B-tree',
+      'The oplog that records every write in order',
+      'A separate change collection you create',
+      'The query plan cache',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a resume token used for?',
+    options: [
+      'Authenticating to the database',
+      'Reopening a stream from exactly where you last left off',
+      'Setting the write concern of the stream',
+      'Limiting how many events are returned',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you receive only the events you care about?',
+    options: [
+      'Filter them in your application after receiving all of them',
+      'Pass an aggregation pipeline such as a $match to watch()',
+      'Open one stream per document',
+      'Set a read concern of linearizable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What deployment does a change stream require?',
+    options: [
+      'A standalone server',
+      'A replica set',
+      'A sharded cluster only',
+      'No special deployment',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/change-streams" questions={quizStreams} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/change-streams" />

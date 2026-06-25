@@ -1,0 +1,258 @@
+---
+title: Explain and query plans
+description: Read explain output to confirm an index was used, compare COLLSCAN with IXSCAN, weigh documents examined against documents returned, and spot a covered query.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+You can build the perfect index and still not know it worked. The only way to be sure is to ask MongoDB how it actually ran the query, and the tool for that is `explain`. Given a query, `explain` reports the **plan** the server chose — which index it used, or whether it fell back to a full scan — and, in its richest mode, the real numbers from running it. Reading that output is the single most practical skill in this whole module, because it turns "I think this is fast" into "I can see it is fast."
+
+## Asking for execution stats
+
+`explain("executionStats")` runs the query and returns both the chosen plan and measured counts. Attach it to any query against our library `members`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ city: "Berlin" })
+      .explain("executionStats")
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members")
+      .find({ city: "Berlin" })
+      .explain("executionStats");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.find({"city": "Berlin"}).explain()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var result bson.M
+    cmd := bson.D{
+        {Key: "explain", Value: bson.D{
+            {Key: "find", Value: "members"},
+            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
+        }},
+        {Key: "verbosity", Value: "executionStats"},
+    }
+    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let explain = db
+        .run_command(doc! {
+            "explain": { "find": "members", "filter": { "city": "Berlin" } },
+            "verbosity": "executionStats",
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## Reading a COLLSCAN
+
+If no index covers the filter, the winning plan's stage is `COLLSCAN`. The telling numbers are `totalDocsExamined` — how many documents the server had to read — against `nReturned` — how many it actually handed back. A scan reads everything to find a few:
+
+```json
+{
+  "queryPlanner": {
+    "winningPlan": { "stage": "COLLSCAN", "direction": "forward" }
+  },
+  "executionStats": {
+    "nReturned": 3,
+    "totalDocsExamined": 10000,
+    "executionTimeMillis": 12
+  }
+}
+```
+
+Examining ten thousand documents to return three is the textbook symptom of a missing index. The ratio of `totalDocsExamined` to `nReturned` is your efficiency gauge: the closer to one to one, the better.
+
+## Reading an IXSCAN
+
+Create an index on `city`, run the same `explain`, and the winning plan changes. The top stage is now `FETCH` — fetching full documents — feeding from an `IXSCAN` that walked only the relevant slice of the index. Crucially, `totalKeysExamined` and `totalDocsExamined` drop to match `nReturned`:
+
+```json
+{
+  "queryPlanner": {
+    "winningPlan": {
+      "stage": "FETCH",
+      "inputStage": {
+        "stage": "IXSCAN",
+        "indexName": "city_1",
+        "direction": "forward"
+      }
+    }
+  },
+  "executionStats": {
+    "nReturned": 3,
+    "totalKeysExamined": 3,
+    "totalDocsExamined": 3,
+    "executionTimeMillis": 0
+  }
+}
+```
+
+The server examined exactly three index keys and fetched exactly three documents to return three results. That is the win the index bought you, made visible.
+
+## How the planner chooses
+
+When several indexes could serve a query, MongoDB does not guess. It generates a candidate plan for each viable index, runs them briefly in parallel, picks the one that does the least work, and caches that choice so future identical queries skip the contest:
+
+export const plannerDiagram = `flowchart LR
+  Q["Incoming query"] --> P["Query planner"]
+  P --> C1["Candidate plan: index A"]
+  P --> C2["Candidate plan: index B"]
+  P --> C3["Candidate plan: collection scan"]
+  C1 --> T["Trial run — measure work"]
+  C2 --> T
+  C3 --> T
+  T --> W["Winning plan"]
+  W --> Cache["Plan cached for matching queries"]`
+
+<Mermaid code={plannerDiagram} title="The planner trials each candidate, picks the cheapest, and caches the winner for matching queries" />
+
+This is why `explain` reports a `winningPlan` and sometimes a list of `rejectedPlans`: you are seeing the outcome of that contest.
+
+## Covered queries
+
+There is one tier better than a fast `IXSCAN` plus `FETCH`: a query the index can answer **without fetching any documents at all**. This happens when every field the query needs — both the filter fields and the fields you ask back in the projection — lives in the index. The server reads the answer straight from the index keys and skips the documents entirely. Such a query is **covered**, and its plan has no `FETCH` stage.
+
+Build an index on `{ city: 1, joined: 1 }`, then ask only for `joined` while suppressing `_id` (because `_id` is not in this index):
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ city: "Berlin" }, { joined: 1, _id: 0 })
+      .explain("executionStats")
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members")
+      .find({ city: "Berlin" }, { projection: { joined: 1, _id: 0 } })
+      .explain("executionStats");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.find(
+        {"city": "Berlin"},
+        {"joined": 1, "_id": 0},
+    ).explain()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cmd := bson.D{
+        {Key: "explain", Value: bson.D{
+            {Key: "find", Value: "members"},
+            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
+            {Key: "projection", Value: bson.D{{Key: "joined", Value: 1}, {Key: "_id", Value: 0}}},
+        }},
+        {Key: "verbosity", Value: "executionStats"},
+    }
+    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let explain = db
+        .run_command(doc! {
+            "explain": {
+                "find": "members",
+                "filter": { "city": "Berlin" },
+                "projection": { "joined": 1, "_id": 0 },
+            },
+            "verbosity": "executionStats",
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The plan goes straight from `IXSCAN` to the results with no `FETCH` in between, and `totalDocsExamined` is `0` — the giveaway that no document was ever read:
+
+```json
+{
+  "queryPlanner": {
+    "winningPlan": {
+      "stage": "PROJECTION_COVERED",
+      "inputStage": { "stage": "IXSCAN", "indexName": "city_1_joined_1" }
+    }
+  },
+  "executionStats": {
+    "nReturned": 3,
+    "totalKeysExamined": 3,
+    "totalDocsExamined": 0
+  }
+}
+```
+
+**In Compass:** the **Explain Plan** tab renders this as a visual tree of stages with the same counts, so you can confirm an `IXSCAN`, spot a stray `COLLSCAN`, and see `Documents Examined` versus `Documents Returned` without reading raw output.
+
+## Tips and gotchas
+
+- The headline ratio is `totalDocsExamined` against `nReturned`. When it is close to one to one your index is doing its job; when it balloons, something is scanning.
+- `executionStats` actually runs the query to measure it, so on a write or an expensive read be deliberate about when you call it.
+- A covered query needs `_id` handled. Since `_id` is returned by default and is rarely in your custom index, you usually suppress it in the projection to keep the query covered.
+- A `FETCH` stage is not a failure — it just means the index found the documents but the projection needed fields the index did not hold. Covered queries are an optimization, not a requirement.
+
+<Callout title="Trust the plan, not your hunch">
+Run explain("executionStats") and compare totalDocsExamined with nReturned. A COLLSCAN or a large gap between the two is the proof you need a better index — and a totalDocsExamined of zero is the proof your query is covered.
+</Callout>
+
+export const quizExplain = [
+  {
+    q: 'In explain output, what does a COLLSCAN stage indicate?',
+    options: [
+      'The query used the most efficient index available',
+      'The query read the whole collection because no useful index served it',
+      'The query was covered by the index',
+      'The query failed to run',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which comparison best signals an inefficient query?',
+    options: [
+      'nReturned much smaller than totalDocsExamined',
+      'totalKeysExamined equal to nReturned',
+      'executionTimeMillis equal to zero',
+      'A winningPlan that names an index',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'What makes a query "covered"?',
+    options: [
+      'It uses any index at all',
+      'Every field it needs, including projected fields, is present in the index, so no document is fetched',
+      'It returns fewer than ten documents',
+      'It runs inside a transaction',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/explain-and-query-plans" questions={quizExplain} />
+
+<ProgressTracker client:visible id="indexes/explain-and-query-plans" />

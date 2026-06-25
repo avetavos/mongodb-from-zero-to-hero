@@ -1,0 +1,341 @@
+---
+title: Projection, sort, and pagination
+description: Choose which fields come back with projection, order results with sort, page through them with limit and skip, iterate a cursor, and learn why large skips get slow.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A filter decides *which* documents come back. Three more controls decide what those documents look like on the way to your app: **projection** trims the fields, **sort** fixes the order, and **limit** with **skip** carves the result into pages. Together they keep you from dragging whole documents and whole collections across the network when you wanted a name and a page of ten. This lesson covers all four, and ends with the one pagination trick that quietly gets slow.
+
+We are back to the simple library `members`, each with a `name`, `joined` year, and `fines`.
+
+## Projection: choosing fields
+
+A projection is a second document passed to `find` that lists which fields to keep. Set a field to `1` to include it; everything you do not list is dropped — except `_id`, which is returned unless you explicitly exclude it with `0`. Here we want names and join years only, with no `_id`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find(
+      { fines: 0 },
+      { name: 1, joined: 1, _id: 0 }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: 0 })
+      .project({ name: 1, joined: 1, _id: 0 })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find(
+        {"fines": 0},
+        {"name": 1, "joined": 1, "_id": 0},
+    ))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetProjection(bson.M{"name": 1, "joined": 1, "_id": 0})
+    cur, err := coll.Find(ctx, bson.M{"fines": 0}, opts)
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "fines": 0 })
+        .projection(doc! { "name": 1, "joined": 1, "_id": 0 })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Only the requested fields arrive, and `_id` is gone:
+
+```json
+[
+  { "name": "Margaret", "joined": 2023 },
+  { "name": "Ada", "joined": 2024 }
+]
+```
+
+You may include fields or exclude them, but not mix the two in one projection — the only exception is excluding `_id` alongside an include list, as above.
+
+## Sorting results
+
+`sort` orders the result by one or more fields: `1` is ascending, `-1` is descending. Ties are broken by later keys you list. Here we list everyone from most fines to fewest:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find().sort({ fines: -1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find()
+      .sort({ fines: -1 })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find().sort("fines", -1))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetSort(bson.D{{Key: "fines", Value: -1}})
+    cur, err := coll.Find(ctx, bson.M{}, opts)
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {})
+        .sort(doc! { "fines": -1 })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The highest balances come first:
+
+```json
+[
+  { "name": "Linus", "joined": 2023, "fines": 5 },
+  { "name": "Grace", "joined": 2021, "fines": 3 },
+  { "name": "Margaret", "joined": 2023, "fines": 0 }
+]
+```
+
+## Pagination: limit and skip
+
+`limit` caps how many documents you receive; `skip` discards that many from the front first. Combined with a stable `sort`, they produce pages. For a second page of two, sorted by name, you skip the first two and take two:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find()
+      .sort({ name: 1 })
+      .skip(2)
+      .limit(2)
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find()
+      .sort({ name: 1 })
+      .skip(2)
+      .limit(2)
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(
+        db.members.find().sort("name", 1).skip(2).limit(2)
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().
+        SetSort(bson.D{{Key: "name", Value: 1}}).
+        SetSkip(2).
+        SetLimit(2)
+    cur, err := coll.Find(ctx, bson.M{}, opts)
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {})
+        .sort(doc! { "name": 1 })
+        .skip(2)
+        .limit(2)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+You get the third and fourth members in name order — page two:
+
+```json
+[
+  { "name": "Grace", "joined": 2021, "fines": 3 },
+  { "name": "Linus", "joined": 2023, "fines": 5 }
+]
+```
+
+## How the pieces combine
+
+The server applies these stages in a fixed order, regardless of the order you chained the methods: it filters first, then sorts the matches, then skips, then limits. Knowing the order explains why a sort is needed for stable pages and why a big skip is wasteful.
+
+export const pipelineDiagram = `flowchart LR
+  C["Collection"] --> F["find filter"]
+  F --> S["sort"]
+  S --> SK["skip n"]
+  SK --> L["limit k"]
+  L --> R["Cursor of k documents"]`
+
+<Mermaid code={pipelineDiagram} title="A read flows through find, then sort, then skip, then limit — in that order — before the cursor reaches you" />
+
+## Iterating a cursor
+
+`find` returns a **cursor**, not a list. The driver pulls documents in batches as you iterate, so you can stream a large result without loading it all into memory at once. Calling `toArray` (or its equivalent) simply drains the cursor for you:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const cursor = db.members.find().sort({ name: 1 })
+    while (cursor.hasNext()) {
+      printjson(cursor.next())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const cursor = db.collection("members").find().sort({ name: 1 });
+    for await (const doc of cursor) {
+      console.log(doc.name);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cursor = db.members.find().sort("name", 1)
+    for doc in cursor:
+        print(doc["name"])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{})
+    if err != nil {
+        return err
+    }
+    defer cur.Close(ctx)
+    for cur.Next(ctx) {
+        var doc bson.M
+        if err := cur.Decode(&doc); err != nil {
+            return err
+        }
+        fmt.Println(doc["name"])
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll.find(doc! {}).sort(doc! { "name": 1 }).await?;
+    while let Some(doc) = cursor.try_next().await? {
+        println!("{:?}", doc.get_str("name"));
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Why a large skip is slow
+
+`skip(n)` does not jump to the nth document — the server must still *walk past* the first `n` matches before it can return anything. On page two that is trivial, but on page 5,000 the database churns through hundreds of thousands of documents only to throw them away. The fix is **range-based pagination**: instead of skipping, remember the last value you saw and ask for documents *after* it. To continue past the last member named "Linus", you would filter forward rather than skip:
+
+```js
+db.members.find({ name: { $gt: "Linus" } })
+  .sort({ name: 1 })
+  .limit(2)
+```
+
+This always reads only the page you want, no matter how deep you are. We will return to range-based pagination and the indexes that make it fast in a later module — for now, just know that `skip` is fine for shallow pages and a problem for deep ones.
+
+**In Compass:** the Documents tab has dedicated controls for all of this — a **Project** box for the field list, a **Sort** box for the order, and **skip/limit** inputs beside the filter bar, so you can build the whole query without writing the method chain by hand.
+
+## Tips and gotchas
+
+- **Always sort before you page.** Without an explicit `sort`, the order of results is not guaranteed, so `skip`/`limit` can return overlapping or missing documents between pages. A stable sort on a unique-enough field is what makes pagination correct.
+- **`_id` is included unless you exclude it.** Add `_id: 0` to a projection when you do not want it; this is the one case where you may mix exclusion with an include list.
+- **Do not mix include and exclude** otherwise. A projection is either a list of fields to keep or a list to drop, not both.
+- **Large `skip` costs grow with the page number.** For deep pages, switch to range-based pagination on an indexed field, which reads only the documents you actually return.
+
+<Callout title="Filter, sort, skip, limit — in that order">
+The server always applies a read in the same sequence: pick the matches, order them, drop the skipped prefix, then cap the count. Internalizing that order tells you why pages need a sort and why a deep skip pays for every document it walks past — the seed of range-based pagination.
+</Callout>
+
+export const quizPagination = [
+  {
+    q: 'In a projection, what does { name: 1, _id: 0 } return?',
+    options: [
+      'Every field except name',
+      'Only the name field, with _id suppressed',
+      'name plus _id',
+      'An error, because you cannot exclude _id',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does sort({ fines: -1 }) do?',
+    options: [
+      'Returns only documents with negative fines',
+      'Orders results by fines, highest first (descending)',
+      'Orders results by fines, lowest first (ascending)',
+      'Limits the result to one document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why should you always sort before using skip and limit?',
+    options: [
+      'sort is required syntactically',
+      'Without a stable order, pages can overlap or miss documents',
+      'It makes skip free',
+      'It changes which fields are returned',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does a large skip(n) get slow?',
+    options: [
+      'It loads the whole collection into memory',
+      'The server must walk past the first n matches before returning any',
+      'skip disables the sort',
+      'It always scans every collection in the database',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="querying/projection-sort-pagination" questions={quizPagination} />
+
+<ProgressTracker client:visible id="querying/projection-sort-pagination" />

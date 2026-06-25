@@ -1,0 +1,166 @@
+---
+title: The aggregation pipeline
+description: How documents flow through an ordered series of stages, each transforming the stream, and how that differs from a plain find.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A `find` call answers one kind of question: "give me back the documents that match this filter." That is plenty for reading records, but it cannot *summarise* them. It will not tell you the average rating per genre, the number of orders each customer placed, or the three top-selling books last month. For questions that fold many documents into a smaller, reshaped answer, MongoDB gives you the **aggregation pipeline**.
+
+The pipeline is the single most powerful idea in MongoDB after the document itself. Picture a conveyor belt: your documents enter at one end, pass through a line of **stages**, and a transformed stream comes out the other end. Each stage takes the documents handed to it, does one well-defined job, and passes its output to the next stage. The order is yours to choose, and the order matters — a stage only ever sees what the stage before it produced.
+
+We will work with a small, invented dataset throughout this module: a `sales` collection of book orders at an imaginary shop. Keeping the data tiny lets the *shape* of each transformation stay in the spotlight.
+
+## A pipeline is a list of stages
+
+You hand aggregation an **array** of stage objects. Each stage is named with a `$`-prefixed key — `$match`, `$group`, `$sort`, and so on. Here is the canonical shape: filter the stream, fold it into groups, then order the result.
+
+export const pipelineFlow = `flowchart LR
+  In["sales documents"] --> M["$match: filter the stream"]
+  M --> G["$group: fold into groups"]
+  G --> S["$sort: order the groups"]
+  S --> Out["result documents"]`
+
+<Mermaid code={pipelineFlow} title="Documents flow left to right; each stage transforms the stream and feeds the next" />
+
+The same array of stages is what you pass in every language. Notice that the call is `aggregate`, and the argument is the pipeline:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $match: { genre: "fiction" } },
+      { $group: { _id: "$title", copies: { $sum: "$quantity" } } },
+      { $sort: { copies: -1 } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const cursor = db.collection("sales").aggregate([
+      { $match: { genre: "fiction" } },
+      { $group: { _id: "$title", copies: { $sum: "$quantity" } } },
+      { $sort: { copies: -1 } },
+    ]);
+    const rows = await cursor.toArray();
+    console.log(rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$match": {"genre": "fiction"}},
+        {"$group": {"_id": "$title", "copies": {"$sum": "$quantity"}}},
+        {"$sort": {"copies": -1}},
+    ]))
+    print(rows)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$match", bson.D{{"genre", "fiction"}}}},
+        {{"$group", bson.D{{"_id", "$title"}, {"copies", bson.D{{"$sum", "$quantity"}}}}}},
+        {{"$sort", bson.D{{"copies", -1}}}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cursor.All(ctx, &rows); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$match": { "genre": "fiction" } },
+        doc! { "$group": { "_id": "$title", "copies": { "$sum": "$quantity" } } },
+        doc! { "$sort": { "copies": -1 } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    while let Some(doc) = cursor.try_next().await? {
+        println!("{:?}", doc);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Given a few fiction orders, the pipeline returns one document per title with the copies summed and the busiest title first:
+
+```json
+[
+  { "_id": "Dune", "copies": 7 },
+  { "_id": "Neuromancer", "copies": 4 },
+  { "_id": "Foundation", "copies": 2 }
+]
+```
+
+**In Compass:** open a collection and click the **Aggregations** tab. The pipeline builder lets you add one stage at a time from a dropdown, edit its body, and preview the documents flowing out of each stage in a live sample — it is the best way to *watch* the conveyor belt work.
+
+## How this differs from find
+
+A `find` filters and projects, but it always returns a subset of your *original* documents. Aggregation can do that too, but it can also invent entirely new documents: counts, averages, joined records, flattened arrays. Anything `find` can do, an aggregation can do with `$match` and `$project`; the reverse is not true.
+
+- `find` reads documents out; aggregation **reshapes a stream** of them.
+- `find` returns documents that already exist; aggregation can **synthesise** new ones.
+- A pipeline is **ordered and composable** — you stack stages like Lego, and you can keep adding more.
+
+## What this module covers
+
+The lessons ahead introduce the stages you will reach for most, one idea at a time:
+
+1. **Pipeline basics** — `$match` to filter early and `$project` to reshape, and why stage order changes both correctness and speed.
+2. **Group and accumulators** — `$group` with `$sum`, `$avg`, `$min`, `$max`, `$push`, and friends, plus grand totals.
+3. **Lookup joins** — `$lookup` to pull related documents from another collection.
+4. **Unwind arrays** — `$unwind` to turn one array-bearing document into many.
+5. **Facets and buckets** — `$facet` for several answers in one pass, and `$bucket` for histogram-style grouping.
+
+<Callout title="Mental model">
+An aggregation pipeline is an array of stages. Documents enter, each stage transforms the stream and passes it on, and the last stage's output is your result. Think of it as a conveyor belt, not a single query.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does a single aggregation stage receive as its input?',
+    options: [
+      'The original collection, every time',
+      'The output documents produced by the stage before it',
+      'A random sample of the collection',
+      'Only the documents that match the final stage',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which capability does aggregation have that a plain find does not?',
+    options: [
+      'Filtering documents by a field value',
+      'Returning a subset of fields',
+      'Summarising many documents into new computed documents',
+      'Sorting the results',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'How do you express a pipeline when you call aggregate?',
+    options: [
+      'As a single document with one operator',
+      'As an ordered array of stage objects',
+      'As a comma-separated string of stage names',
+      'As a nested filter object',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="aggregation/index" />

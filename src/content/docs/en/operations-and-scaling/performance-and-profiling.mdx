@@ -1,0 +1,230 @@
+---
+title: Performance and profiling
+description: Find slow queries with the database profiler, re-read explain, keep the working set in RAM, and apply the common fixes that make queries fast again.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+When a database feels slow, the temptation is to guess: add a server, add memory, add an index somewhere and hope. The professional move is the opposite — *measure first*. MongoDB gives you two instruments for that. The **database profiler** records the operations that actually ran and how long each took, so you can see which queries are the problem. And `explain` tells you *why* a single query is slow by showing the plan the server chose. Together they turn performance work from guesswork into a short investigation.
+
+## Where the time goes
+
+Most slow queries come down to one of two causes: the query reads far more documents than it returns, or the data it needs is not in memory and has to be fetched from disk. The first picture is the clearest. The same query, with and without a supporting index, does a wildly different amount of work:
+
+export const latencyFlow = `flowchart TB
+  subgraph Slow["No index — COLLSCAN"]
+    Q1["Find members joined in 2023"] --> R1["Read all 1,000,000 docs"]
+    R1 --> F1["Discard the non-matches"]
+    F1 --> O1["Return 12 docs — slow"]
+  end
+  subgraph Fast["With an index — IXSCAN"]
+    Q2["Find members joined in 2023"] --> R2["Seek the index to 2023"]
+    R2 --> F2["Read only the 12 matching docs"]
+    F2 --> O2["Return 12 docs — fast"]
+  end`
+
+<Mermaid code={latencyFlow} title="Without an index a query reads everything and throws most away; with one it reads only what it returns" />
+
+The second cause is subtler: the **working set**. That is the slice of your data and indexes that queries actually touch day to day. When the working set fits in RAM, reads are served from memory and the database flies. When it spills past RAM, every miss becomes a disk read, and latency climbs even though the queries themselves did not change. Keeping the working set in memory — by adding RAM, or by reading less data per query — is one of the biggest levers you have.
+
+## Enabling the profiler
+
+The profiler writes one document per slow operation into a special `system.profile` collection in each database. You set it per database. Level `1` records only operations slower than a threshold you choose in milliseconds; level `2` records everything (useful in development, far too noisy in production); level `0` turns it off.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // Record every operation slower than 100 ms
+    db.setProfilingLevel(1, { slowms: 100 })
+
+    // Check the current setting
+    db.getProfilingStatus()
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.command({ profile: 1, slowms: 100 });
+    const status = await db.command({ profile: -1 });
+    console.log(status);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.command("profile", 1, slowms=100)
+    status = db.command("profile", -1)
+    print(status)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    if err := db.RunCommand(ctx, bson.D{
+        {Key: "profile", Value: 1},
+        {Key: "slowms", Value: 100},
+    }).Err(); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    db.run_command(doc! { "profile": 1, "slowms": 100 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## Reading system.profile
+
+Once the profiler is on, you query `system.profile` like any other collection. Sort by time descending and look at the slowest recent operations. The fields to watch are `millis` (how long it took), `docsExamined` versus `nreturned` (how many documents it read versus returned), and `planSummary` (whether it used an index or a collection scan):
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.system.profile
+      .find({}, { op: 1, ns: 1, millis: 1, planSummary: 1, docsExamined: 1, nreturned: 1 })
+      .sort({ ts: -1 })
+      .limit(5)
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const slow = await db
+      .collection("system.profile")
+      .find({})
+      .project({ op: 1, ns: 1, millis: 1, planSummary: 1 })
+      .sort({ ts: -1 })
+      .limit(5)
+      .toArray();
+    console.log(slow);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    slow = (
+        db["system.profile"]
+        .find({}, {"op": 1, "ns": 1, "millis": 1, "planSummary": 1})
+        .sort("ts", -1)
+        .limit(5)
+    )
+    for entry in slow:
+        print(entry)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().
+        SetSort(bson.D{{Key: "ts", Value: -1}}).
+        SetLimit(5)
+    cur, err := db.Collection("system.profile").Find(ctx, bson.M{}, opts)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let opts = FindOptions::builder()
+        .sort(doc! { "ts": -1 })
+        .limit(5)
+        .build();
+    let mut cursor = db
+        .collection::<Document>("system.profile")
+        .find(doc! {})
+        .with_options(opts)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A single profile entry tells the whole story at a glance. This one read a million documents to return twelve, with a plan summary of `COLLSCAN` — a textbook missing index:
+
+```json
+{
+  "op": "query",
+  "ns": "library.members",
+  "millis": 2143,
+  "planSummary": "COLLSCAN",
+  "docsExamined": 1000000,
+  "nreturned": 12
+}
+```
+
+When `docsExamined` dwarfs `nreturned`, you have found the problem. The next step is `explain` on that exact query to confirm the plan, then a fix:
+
+```js
+db.members.find({ joined: 2023 }).explain("executionStats")
+```
+
+## The common fixes
+
+Most slow queries are cured by one of a small handful of moves:
+
+- **Add an index** on the fields the query filters or sorts by, so the server seeks instead of scans. This is the single highest-impact fix and the reason the profiler exists.
+- **Project less.** Ask only for the fields you need rather than whole documents, which cuts the bytes moved and can let a query be served entirely from an index.
+- **Avoid unbounded results.** Always `limit` queries that could match a large number of documents; an accidental full-collection sweep is slow no matter how good the index is.
+- **Right-size connections.** Drivers maintain a **connection pool** and reuse connections rather than opening one per request. Reusing a shared client — not creating a new one per call — keeps that pool healthy and avoids exhausting the server's connection limit.
+
+**In Compass / Atlas:** Compass has a *Performance Insights* and *Explain Plan* view that runs `explain` for you and flags collection scans visually. Atlas goes further with a *Performance Advisor* that watches your real traffic and suggests indexes to create, and a *Profiler* tab that surfaces the slowest operations without you touching `system.profile` by hand.
+
+## Tips and gotchas
+
+- Profile at level `1` with a sensible `slowms` in production, not level `2` — recording every operation adds overhead and floods the collection.
+- `system.profile` is a **capped** collection: it has a fixed size and old entries roll off. Read it soon after reproducing a slow query, or the evidence ages out.
+- The profiler tells you *which* query is slow; `explain` tells you *why*. Use them in that order — find the culprit, then diagnose it.
+- A high `docsExamined` to `nreturned` ratio is the clearest single signal of a missing or wrong index. Aim to read close to what you return.
+
+<Callout title="Measure, then fix">
+Turn on the profiler to find the queries that are actually slow, read system.profile for a high docsExamined-to-nreturned ratio, confirm with explain, and fix it — usually by adding the right index, projecting less, and bounding the result. Never guess at performance.
+</Callout>
+
+export const quizPerf = [
+  {
+    q: 'What does the database profiler do?',
+    options: [
+      'It automatically creates indexes for slow queries',
+      'It records operations and their durations into the system.profile collection',
+      'It replicates slow queries to a secondary',
+      'It blocks any query slower than slowms',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a profile entry, docsExamined is far larger than nreturned. What does that signal?',
+    options: [
+      'The query is using an ideal index',
+      'The query is reading far more documents than it returns — likely a missing index',
+      'The profiler is misconfigured',
+      'The result set is too small to matter',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the "working set"?',
+    options: [
+      'The list of indexes on a collection',
+      'The portion of data and indexes that queries actively touch, which you want to fit in RAM',
+      'A backup of the most recent writes',
+      'The set of connections in the driver pool',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why should a driver reuse one client and its connection pool?',
+    options: [
+      'It guarantees strong consistency',
+      'Reusing pooled connections avoids opening one per request and exhausting the server limit',
+      'It enables sharding automatically',
+      'It disables the profiler',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/performance-and-profiling" questions={quizPerf} />
+
+<ProgressTracker client:visible id="operations-and-scaling/performance-and-profiling" />

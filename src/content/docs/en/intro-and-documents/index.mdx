@@ -1,0 +1,88 @@
+---
+title: Intro & Documents
+description: What this course covers, MongoDB as a document database in one paragraph, and a map of the eight modules ahead.
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Welcome to **MongoDB — From Zero to Hero**. This course takes you from never having touched a database to comfortably modelling data, querying it, indexing it for speed, aggregating it into reports, and running it in production. We will work in concrete examples the whole way: a small, made-up world of library members and the books they borrow, kept deliberately tiny so the ideas stay in the spotlight. Every operation is shown five ways — in the **mongosh** shell and in the **Node.js**, **Python**, **Go**, and **Rust** drivers — so the lessons transfer to whatever stack you actually work in.
+
+MongoDB is a **document database**: instead of storing your data as rows in rigid tables, it stores **documents** — JSON-like objects with fields, nested objects, and arrays — grouped into **collections**. A document is allowed to look however your data naturally looks, so the shape of the data in the database tends to match the shape of the objects in your code, with no translation layer in between.
+
+## The journey ahead
+
+The course is eight modules. Each one builds on the last, so working through them in order is the smoothest path, though every module also stands on its own if you want to jump to a specific topic.
+
+export const journeyDiagram = `flowchart TD
+  M1["1. Intro & Documents"] --> M2["2. CRUD"]
+  M2 --> M3["3. Querying"]
+  M3 --> M4["4. Indexes"]
+  M4 --> M5["5. Aggregation"]
+  M5 --> M6["6. Data Modeling"]
+  M6 --> M7["7. Transactions & Consistency"]
+  M7 --> M8["8. Operations & Scaling"]`
+
+<Mermaid code={journeyDiagram} title="The eight modules of the course, in the order they build on each other" />
+
+## What each module covers
+
+- **Intro & Documents** — the module you are in now. What a document database is, how to run MongoDB locally with Docker, the shell and Compass, and what a BSON document really is.
+- **CRUD** — the four everyday verbs: creating, reading, updating, and deleting documents.
+- **Querying** — filtering with operators, sorting, limiting, projecting fields, and paging through results.
+- **Indexes** — making queries fast, understanding what an index costs, and reading a query plan.
+- **Aggregation** — the pipeline that groups, reshapes, and summarises data into reports.
+- **Data Modeling** — deciding when to embed related data and when to keep it in separate collections.
+- **Transactions & Consistency** — multi-document atomicity, read and write concerns, and the guarantees you can rely on.
+- **Operations & Scaling** — backups, replica sets for resilience, and sharding for growth.
+
+## How this module is laid out
+
+This first module gives you everything you need before the real work begins:
+
+1. **What is MongoDB** — document database versus relational, and when each one fits.
+2. **Setup with Docker** — running MongoDB locally from the official image in a couple of commands.
+3. **The shell and Compass** — talking to the database from the terminal and the GUI, and connecting from each driver.
+4. **Documents and BSON** — the binary format under your JSON, and the types a document can hold.
+5. **Document vs relational** — a side-by-side translation of relational vocabulary into MongoDB terms.
+
+## Tips and gotchas
+
+- You do not need to memorise anything here. The goal of this module is fluency with the vocabulary — document, collection, BSON, `_id` — so the later modules read smoothly.
+- Everything runs locally. We use Docker so there is nothing to install permanently and nothing to clean up by hand later.
+- If you already know SQL, the final lesson of this module is the fastest way to map what you know onto MongoDB.
+
+<Callout title="One world, used everywhere">
+Throughout the course we keep returning to the same imaginary library: members, the fines they owe, and the books they borrow. Reusing one tiny dataset means you spend your attention on the database, not on re-learning a new example every lesson.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the basic unit of data MongoDB stores?',
+    options: [
+      'A row in a fixed table',
+      'A document — a JSON-like object inside a collection',
+      'A key-value pair with no structure',
+      'A single column value',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How many modules make up this course?',
+    options: ['Four', 'Six', 'Eight', 'Twelve'],
+    answer: 2,
+  },
+  {
+    q: 'Which module teaches making queries fast?',
+    options: ['Querying', 'Indexes', 'Aggregation', 'Operations & Scaling'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="intro-and-documents/index" />

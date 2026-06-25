@@ -1,0 +1,231 @@
+---
+title: Deleting documents
+description: Remove documents with deleteOne and deleteMany, read deletedCount, and weigh the soft-delete alternative.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Deleting is the operation with the least syntax and the highest stakes. There are no operators to learn — you hand MongoDB a filter, and it removes the documents that match. The whole skill is in the filter: a delete is only as precise as the conditions you give it, and an over-broad filter erases data you meant to keep. The good news is that the methods mirror everything you already know: `deleteOne` removes the first match, `deleteMany` removes every match.
+
+We continue with the `members` collection. Each example shows what the filter selects and what the acknowledgement reports.
+
+## Deleting a single document
+
+`deleteOne` removes the **first** document that matches the filter and stops, even if others would have matched too. That singular-method safety rail is exactly why you reach for it when you intend to remove one specific record. Here we remove the member named Edsger:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.deleteOne({ name: "Edsger" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").deleteOne({ name: "Edsger" });
+    console.log(res.deletedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.delete_one({"name": "Edsger"})
+    print(res.deleted_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.DeleteOne(ctx, bson.M{"name": "Edsger"})
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.DeletedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll.delete_one(doc! { "name": "Edsger" }).await?;
+    println!("{}", res.deleted_count);
+    ```
+  </TabItem>
+</Tabs>
+
+The acknowledgement reports how many documents were removed:
+
+```json
+{ "acknowledged": true, "deletedCount": 1 }
+```
+
+If the filter matches nothing, that is not an error — `deletedCount` is simply `0`:
+
+```json
+{ "acknowledged": true, "deletedCount": 0 }
+```
+
+**In Compass:** hover over a document in the Documents tab and click the trash-can icon, then confirm; Compass deletes that single document.
+
+## Deleting many at once
+
+`deleteMany` removes **every** document matching the filter in one operation. Here we purge everyone who joined before 2024 — note how the filter does the precision work:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.deleteMany({ joined: { $lt: 2024 } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db
+      .collection("members")
+      .deleteMany({ joined: { $lt: 2024 } });
+    console.log(res.deletedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.delete_many({"joined": {"$lt": 2024}})
+    print(res.deleted_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.DeleteMany(ctx, bson.M{"joined": bson.M{"$lt": 2024}})
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.DeletedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll.delete_many(doc! { "joined": { "$lt": 2024 } }).await?;
+    println!("{}", res.deleted_count);
+    ```
+  </TabItem>
+</Tabs>
+
+The count reflects every document that the filter swept up:
+
+```json
+{ "acknowledged": true, "deletedCount": 2 }
+```
+
+## The soft-delete alternative
+
+Sometimes a hard delete is the wrong choice: you may need an audit trail, the ability to undo, or to keep historical reports accurate. The common pattern is a **soft delete** — instead of removing the document, you mark it with a flag (and often a timestamp) using an update, then exclude flagged documents from your normal reads.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Linus" },
+      { $set: { deleted: true, deletedAt: new Date() } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Linus" },
+      { $set: { deleted: true, deletedAt: new Date() } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from datetime import datetime, timezone
+
+    db.members.update_one(
+        {"name": "Linus"},
+        {"$set": {"deleted": True, "deletedAt": datetime.now(timezone.utc)}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Linus"},
+        bson.M{"$set": bson.M{"deleted": true, "deletedAt": time.Now()}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use bson::DateTime;
+
+    coll.update_one(
+        doc! { "name": "Linus" },
+        doc! { "$set": { "deleted": true, "deletedAt": DateTime::now() } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The document is still there, just flagged — your reads filter it out, and you can restore it later by unsetting the flag:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Linus",
+  "joined": 2023,
+  "deleted": true,
+  "deletedAt": "2026-06-25T10:15:00.000Z"
+}
+```
+
+## Tips and gotchas
+
+- `deleteMany` with an empty filter — matching every document — **empties the entire collection**. It is the single most dangerous CRUD call; type the filter first and the method second so you never run it bare by accident.
+- A delete is permanent. Unlike an update, there is no "before" copy left behind unless you arranged one. When in doubt, run the same filter through `find` first to see exactly what you are about to remove.
+- `deleteOne` is your safety rail for "remove one specific record." Even if your filter is sloppier than you thought, it can only take one document.
+- Soft delete trades simplicity for safety: every normal query must remember to exclude the flagged documents, but you gain undo and an audit trail.
+
+<Callout title="Look before you delete">
+Run your delete filter through find first. If the documents it returns are exactly the ones you mean to lose, swap find for deleteMany. If not, fix the filter — there is no undo on a hard delete.
+</Callout>
+
+export const quizDelete = [
+  {
+    q: 'What does deleteMany with an empty filter do?',
+    options: [
+      'Nothing, because an empty filter matches nothing',
+      'Removes a single arbitrary document',
+      'Removes every document in the collection',
+      'Raises an error to protect you',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'A deleteOne filter matches no documents. What is reported?',
+    options: [
+      'An error is thrown',
+      'deletedCount is 0 and no error occurs',
+      'The first document is removed anyway',
+      'deletedCount is null',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the core idea of a soft delete?',
+    options: [
+      'Deleting only fields, never whole documents',
+      'Flagging the document as deleted with an update and excluding it from reads',
+      'Deleting documents more slowly to reduce load',
+      'Moving documents to a different database',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="crud/delete" questions={quizDelete} />
+
+<ProgressTracker client:visible id="crud/delete" />

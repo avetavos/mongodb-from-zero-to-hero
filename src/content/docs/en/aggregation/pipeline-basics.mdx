@@ -1,0 +1,227 @@
+---
+title: Pipeline basics — $match and $project
+description: Filter the stream early with $match so indexes can help, reshape and compute fields with $project, and learn why stage order matters.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Two stages carry most aggregation work before anything fancy happens: `$match` throws away documents you do not need, and `$project` reshapes the ones you keep. Learn these two well and you already have a query language that goes beyond `find`. The subtle, important lesson hiding in them is that **where you put a stage changes how fast and how correct your pipeline is.**
+
+We continue with the `sales` collection. A single order looks like this:
+
+```json
+{
+  "_id": "a1",
+  "title": "Dune",
+  "genre": "fiction",
+  "quantity": 3,
+  "price": 12,
+  "buyer": "Ada"
+}
+```
+
+## $match filters the stream — put it first
+
+`$match` keeps only the documents whose fields satisfy its condition. Its syntax is exactly the query syntax you already know from `find`, so `$gt`, `$in`, `$and`, and the rest all work. The reason to place it **first** is not style: when `$match` is the very first stage, the aggregation engine can use a collection's **indexes** to skip non-matching documents entirely, instead of streaming the whole collection through later stages.
+
+export const matchProject = `flowchart LR
+  In["all sales"] --> M["$match: price >= 10 (uses index)"]
+  M --> P["$project: keep title, compute revenue"]
+  P --> Out["slim, reshaped documents"]`
+
+<Mermaid code={matchProject} title="Filter first so an index can prune the stream, then reshape what survives" />
+
+Here we keep only orders of at least ten dollars apiece:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $match: { price: { $gte: 10 } } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $match: { price: { $gte: 10 } } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$match": {"price": {"$gte": 10}}},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$match": { "price": { "$gte": 10 } } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Only the orders priced ten or more survive into the next stage:
+
+```json
+[
+  { "_id": "a1", "title": "Dune", "genre": "fiction", "quantity": 3, "price": 12, "buyer": "Ada" },
+  { "_id": "a4", "title": "Foundation", "genre": "fiction", "quantity": 1, "price": 15, "buyer": "Linus" }
+]
+```
+
+## $project reshapes and computes
+
+`$project` decides which fields leave the stage and lets you build **new** fields from expressions. Set a field to `1` to keep it, `0` to drop it, or to an expression to compute it. Field references inside expressions use a `$` prefix, so `"$price"` means "the value of the price field." Here we keep the title and compute a `revenue` field as price times quantity:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $match: { price: { $gte: 10 } } },
+      { $project: {
+          _id: 0,
+          title: 1,
+          revenue: { $multiply: ["$price", "$quantity"] }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $match: { price: { $gte: 10 } } },
+      { $project: {
+          _id: 0,
+          title: 1,
+          revenue: { $multiply: ["$price", "$quantity"] },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$match": {"price": {"$gte": 10}}},
+        {"$project": {
+            "_id": 0,
+            "title": 1,
+            "revenue": {"$multiply": ["$price", "$quantity"]},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
+        {{"$project", bson.D{
+            {"_id", 0},
+            {"title", 1},
+            {"revenue", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$match": { "price": { "$gte": 10 } } },
+        doc! { "$project": {
+            "_id": 0,
+            "title": 1,
+            "revenue": { "$multiply": ["$price", "$quantity"] }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Each surviving document is now slim and carries a computed field:
+
+```json
+[
+  { "title": "Dune", "revenue": 36 },
+  { "title": "Foundation", "revenue": 15 }
+]
+```
+
+**In Compass:** add a `$match` stage, then an `$project` stage in the **Aggregations** tab. The live preview under each stage shows the document count shrinking after `$match` and the fields changing after `$project`, which makes the effect of stage order obvious at a glance.
+
+## Why stage order matters
+
+Put `$match` *after* a heavy stage and you pay to process documents you were going to discard anyway. Put it *first* and the engine prunes the stream — sometimes with an index — before any other work happens. The rule of thumb: **filter as early as you can, reshape as late as you can.** A `$project` that drops large fields can also help a later stage by shrinking each document, but the biggest win almost always comes from an early `$match`.
+
+## Tips and gotchas
+
+- An early `$match` can use indexes; a `$match` that comes after `$group` or `$project` usually cannot, because the documents at that point are freshly computed, not stored.
+- In `$project`, mixing inclusion (`1`) and exclusion (`0`) in the same stage is only allowed for `_id`. List the fields you want, or drop the ones you do not — not both.
+- Field paths inside expressions need the `$` prefix: `"$price"` is the field's value, while `"price"` is the literal string.
+- Prefer `$project` (or its cousin `$set`) to compute once and reuse the result downstream, rather than repeating the same expression in several stages.
+
+<Callout title="Filter early, reshape late">
+The first instinct for any pipeline should be: can I $match sooner? An early filter is the cheapest performance win in aggregation, because it can lean on an index and shrinks everything that follows.
+</Callout>
+
+export const quizBasics = [
+  {
+    q: 'Why is it best to place $match as the first stage of a pipeline?',
+    options: [
+      'It is the only stage allowed to run first',
+      'So the engine can use indexes and prune the stream before later work',
+      'Because $match cannot appear anywhere else',
+      'It automatically sorts the results',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a $project stage, what does "$price" refer to?',
+    options: [
+      'The literal text price',
+      'The value stored in the price field of each document',
+      'A new field named price set to zero',
+      'The price of the whole collection',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which $project pattern is NOT allowed in a single stage?',
+    options: [
+      'Including several fields with 1',
+      'Excluding several fields with 0',
+      'Mixing 1 and 0 for non-_id fields',
+      'Computing a field with an expression',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="aggregation/pipeline-basics" questions={quizBasics} />
+
+<ProgressTracker client:visible id="aggregation/pipeline-basics" />
