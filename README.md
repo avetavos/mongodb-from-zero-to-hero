@@ -1,8 +1,10 @@
-# Microservices Design Patterns — From Zero to Hero
+# MongoDB — From Zero to Hero
 
-A bilingual (EN/TH), standalone, beginner→advanced course on the **microservices pattern language**. When microservices help (and when they hurt), how to decompose a system, keep data consistent across services that each own their database, communicate reliably, observe a distributed system, and run it in production. Each pattern is presented as **Context → Problem → Solution** with an architecture/sequence/state diagram, an example, and the benefits and drawbacks it brings. Diagrams are **Mermaid**, and there's a **read-mode** toggle.
+A bilingual (EN/TH), standalone, beginner→advanced course on **MongoDB**. From the document model and CRUD through querying, indexing, the aggregation pipeline, data modeling, transactions, and production scaling. Every operation is shown across **mongosh, Node.js, Python, Go, and Rust**, with **MongoDB Compass** GUI tours, a **Docker** setup, result documents shown as JSON, and **Mermaid** architecture diagrams. There's a **read-mode** toggle.
 
-All content is original: original explanations of the public, well-known microservices patterns, original code/config examples, and original diagrams.
+All content is original: original explanations of MongoDB (a public technology), original code/query examples and result documents, and original diagrams.
+
+> **Note:** MongoDB is a server, so it can't run inside the browser — the examples are **illustrative** (real `mongosh`/driver code with the documents they return), not executed in-page. The Docker setup lesson shows how to run MongoDB locally and connect.
 
 ## Tech Stack
 
@@ -10,8 +12,9 @@ All content is original: original explanations of the public, well-known microse
 | ----- | ---------- |
 | Site framework | [Astro 6](https://astro.build) + [Starlight 0.40](https://starlight.astro.build) |
 | UI islands | [Preact](https://preactjs.com) (via `@astrojs/preact`) |
-| Examples | Starlight built-in `<Tabs syncKey="lang">` + `<TabItem>` — for logic patterns (Saga, Circuit Breaker, Idempotent Consumer, …) a fenced block per language (TypeScript, Python, Go, Rust); for infrastructure patterns (API Gateway, Service Mesh, deployment, chassis) a single fenced YAML/Dockerfile/config block. Expressive-code copy buttons. |
-| Diagrams | Client-side, theme-aware **Mermaid** (`<Mermaid>` + `public/enhance.js`) — flowchart, sequenceDiagram, stateDiagram-v2 |
+| Examples | Starlight built-in `<Tabs syncKey="lang">` + `<TabItem>` — five tabs per operation: **mongosh**, **Node.js** (`mongodb` driver), **Python** (PyMongo), **Go** (mongo-go-driver), **Rust** (`mongodb` crate). Reads show result documents as fenced JSON. Expressive-code copy buttons. |
+| GUI / setup | **MongoDB Compass** covered in prose ("In Compass:" notes + a tour); **Docker** setup lesson (`docker run` + `docker-compose.yml`). |
+| Diagrams | Client-side, theme-aware **Mermaid** (`<Mermaid>` + `public/enhance.js`) — pipelines, replica sets, sharding, the ESR rule, query plans |
 | Reading | **Read-mode** toggle (hides sidebar/TOC, widens content) via `public/enhance.js` |
 | Unit tests | [Vitest](https://vitest.dev) + `@testing-library/preact` |
 | i18n | Starlight built-in, `defaultLocale: 'en'`, locales: `en` + `th` |
@@ -31,14 +34,14 @@ npm test           # Run Vitest unit tests
 ```
 src/content/docs/
   en/                              # English — served at /en/...
-    intro-and-principles/          # monolith vs microservices, benefits/drawbacks, when to use, the pattern language
-    decomposition/                 # by business capability, by subdomain (DDD), self-contained service, service per team
-    data-management/               # Database per Service, Saga, API Composition, CQRS, Event Sourcing
-    transactional-messaging/       # Transactional Outbox, log tailing, polling publisher, idempotent consumer
-    communication/                 # RPI (REST/gRPC), messaging, API Gateway, BFF, service discovery
-    reliability/                   # Circuit Breaker, retry + timeout, bulkhead, rate limiting
-    observability/                 # Health Check API, log aggregation, distributed tracing, metrics, audit logging
-    deployment-and-cross-cutting/  # Service per Container, serverless, service mesh, microservice chassis, externalized config
+    intro-and-documents/           # document model, Docker setup, mongosh + Compass, BSON, vs relational
+    crud/                          # insert, find, update operators, delete, upsert & bulkWrite
+    querying/                      # comparison/logical operators, arrays, nested docs, projection/sort/pagination
+    indexes/                       # single & compound, the ESR rule, explain() & plans, index types
+    aggregation/                   # $match/$project, $group, $lookup, $unwind, $facet/$bucket
+    data-modeling/                 # embedding vs referencing, relationships, schema patterns, validation, anti-patterns
+    transactions-and-consistency/  # single-doc atomicity, multi-doc transactions, read/write concerns, change streams
+    operations-and-scaling/        # replica sets, sharding, performance & profiling, security & Atlas
     index.mdx                      # EN landing (splash)
   th/                              # Thai — served at /th/...
     (same module directories)
@@ -51,16 +54,16 @@ src/content/docs/
 - **`Callout.astro`** `{ title }`, **`Quiz.tsx`** `{ id, questions }` (0-based `answer`, field `q`), **`ProgressTracker.tsx`** `{ id }`.
 - Multi-language code uses Starlight's **`{ Tabs, TabItem }`** from `@astrojs/starlight/components` — no custom component.
 
-Per-pattern lesson order (Alexandrian pattern format): frontmatter → imports → **Context** → **Problem** → **Solution** → `<Mermaid>` → **Example** (`<Tabs>` for logic, fenced config for infra) → **Resulting context** (benefits/drawbacks) → **Related patterns** → `<Callout>` → `<Quiz>` → `<ProgressTracker>` (last). IDs follow `<module>/<slug>`.
+Per-lesson order (tutorial): frontmatter → imports → concept intro → sections (prose + a 5-tab `<Tabs>` example + a fenced ```json result + an optional "In Compass:" note) → Tips/gotchas → `<Callout>` → `<Quiz>` → `<ProgressTracker>` (last). IDs follow `<module>/<slug>`.
 
 > **⚠️ Authoring notes:**
-> - **Diagrams are Mermaid** (`flowchart` / `sequenceDiagram` / `stateDiagram-v2`), hoisted in `export const`. **No ASCII diagrams** (no box-drawing characters — use plain `-->` arrows in any text illustration).
-> - **Code/config lives in fenced blocks** (literal — no `${`/backtick escaping). Logic patterns → 4-language `<Tabs syncKey="lang">` (TypeScript, Python, Go, Rust); infra patterns → a single fenced YAML/Dockerfile/text block.
-> - **Never a bare `{...}`/`${...}` in prose** — keep code/JSON in fenced blocks / Tabs; Mermaid source in `export const`. Each lesson **ends on its `<ProgressTracker .../>`** — no stray trailing tags.
-> - **Internal links include the base path** and the matching locale (`/microservices-design-from-zero-to-hero/en/...` on EN, `/th/...` on TH).
+> - **Five driver tabs, in order:** mongosh (` ```js `), Node.js (` ```js `), Python (` ```python `), Go (` ```go `), Rust (` ```rust ` — `mongodb` crate, `bson::doc!`, `.await?`). After a read, show the result as ` ```json `.
+> - **Code/documents live in fenced blocks** (literal — no `${`/backtick escaping). **Never a bare `{...}` in prose** — Mongo query objects/documents go in fenced ` ```js `/` ```json ` or `<Tabs>`, never inline in a sentence.
+> - **Diagrams are Mermaid**, hoisted in `export const`. **No ASCII diagrams** (no box-drawing chars). **Never a `;` inside a Mermaid sequence message** (statement separator → the diagram silently fails to render); prefer `flowchart`.
+> - Each lesson **ends on its `<ProgressTracker .../>`** — no stray trailing tags. **Internal links include the base path** and matching locale (`/mongodb-from-zero-to-hero/en/...` on EN, `/th/...` on TH).
 
 ## Deployment
 
-Fully static → `dist/`. Base path in `astro.config.mjs`: `site: 'https://avetavos.github.io'`, `base: '/microservices-design-from-zero-to-hero'`.
+Fully static → `dist/`. Base path in `astro.config.mjs`: `site: 'https://avetavos.github.io'`, `base: '/mongodb-from-zero-to-hero'`.
 
 Deployed to GitHub Pages via **branch-source** (`gh-pages`): build `dist/`, add `.nojekyll`, push to `gh-pages`, set **Settings → Pages → Source: Deploy from a branch → `gh-pages` / `/`**, then **request a Pages build** (`gh api -X POST repos/<owner>/<repo>/pages/builds`) — flipping the source alone does not trigger one. If you change `base`, update the base-prefixed links in `src/content/docs/{en,th}/index.mdx`.
