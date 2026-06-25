@@ -1,0 +1,166 @@
+---
+title: Security และ Atlas
+description: พื้นฐาน security ใน production — authentication และ roles, TLS, การจำกัดเครือข่าย และ encryption at rest — และวิธีที่ MongoDB Atlas มอบสิ่งเหล่านี้ในรูปแบบ managed service
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+`mongod` ใหม่ที่เริ่มด้วยการตั้งค่าเริ่มต้นไม่มี authentication และคอยฟังการเชื่อมต่อ บนเครื่องแล็ปท็อปของคุณที่ผูกกับ localhost นั่นไม่มีอันตราย แต่บนเซิร์ฟเวอร์ที่มี public IP มันคือการรั่วไหลที่รอจะเกิดขึ้น — และตลอดหลายปีที่ผ่านมา MongoDB instances ที่ไม่ปลอดภัยได้ทำให้ข้อมูลปริมาณมหาศาลรั่วไหลด้วยวิธีนี้เป๊ะ ๆ Security ใน production ไม่ใช่ฟีเจอร์เดียว แต่เป็นชั้นการป้องกันสั้น ๆ ที่ซ้อนกัน แต่ละชั้นปิดประตูคนละบาน: ใครเชื่อมต่อได้, การเชื่อมต่อได้รับการปกป้องอย่างไร, การเชื่อมต่อได้รับอนุญาตให้มาจากที่ไหนบ้าง และเกิดอะไรขึ้นกับ bytes บนดิสก์
+
+## ชั้นของการป้องกัน
+
+ลองคิดว่า request เป็นสิ่งที่ผ่านชุดของประตูก่อนที่มันจะแตะต้องข้อมูลของคุณ เครือข่ายตัดสินว่าการเชื่อมต่อได้รับอนุญาตเลยหรือไม่ TLS ปกป้อง bytes ระหว่างทาง Authentication ตรวจสอบว่าคุณเป็นใคร และ authorization ตรวจสอบว่าคุณได้รับอนุญาตให้ทำอะไรได้บ้าง:
+
+export const securityFlow = `flowchart LR
+  Client["Application"] --> Net["Network gate — firewall, bind IP, VPC"]
+  Net --> TLS["TLS — encrypts the connection"]
+  TLS --> Auth["Authentication — who are you"]
+  Auth --> RBAC["Authorization — what may you do"]
+  RBAC --> Data["Data — encrypted at rest on disk"]`
+
+<Mermaid code={securityFlow} title="แต่ละประตูปิดคนละบาน: เครือข่าย แล้วการเข้ารหัสระหว่างขนส่ง แล้วตัวตน แล้วสิทธิ์ แล้ว encryption at rest" />
+
+ไม่มีชั้นเดียวที่เพียงพอ Authentication โดยไม่มีการจำกัดเครือข่ายก็ยังเชื้อเชิญความพยายามแบบ brute-force; เครือข่ายที่ล็อกแน่นแต่ไม่มี auth ก็เชื่อใจทุกคนที่อยู่ข้างใน Defense in depth หมายถึงการเปิดทุกชั้น
+
+## Authentication และ roles (RBAC)
+
+ก้าวแรกคือการกำหนดให้ต้องมี **authentication** เพื่อไม่ให้ใครเชื่อมต่อแบบไม่ระบุตัวตนได้ จากนั้น MongoDB ควบคุมว่าผู้ใช้แต่ละคนทำอะไรได้ผ่าน **role-based access control** — RBAC คุณสร้างผู้ใช้และมอบ roles ให้พวกเขา และ role คือชุดของ permissions หลักการคือ *least privilege*: แอปพลิเคชันที่อ่าน reports เพียงอย่างเดียวได้ role แบบอ่านอย่างเดียว ไม่ใช่กุญแจของผู้ดูแลระบบ คุณเปิด auth ในไฟล์ config แล้วจึงสร้างผู้ใช้
+
+```yaml
+# mongod.conf — require authentication
+security:
+  authorization: enabled
+```
+
+```js
+// Create an app user limited to read and write on one database
+db.getSiblingDB("admin").createUser({
+  user: "library_app",
+  pwd: passwordPrompt(),
+  roles: [{ role: "readWrite", db: "library" }]
+})
+```
+
+เมื่อเปิด auth แล้ว ทุกการเชื่อมต่อต้องแสดง credentials driver ส่งพวกมันใน connection string หรือเป็น options แยกต่างหาก:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```bash
+    mongosh "mongodb://library_app@host:27017/library?authSource=admin&tls=true"
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const uri =
+      "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    const client = new MongoClient(uri);
+    await client.connect();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    client = MongoClient(uri)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    uri := "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    client, err := mongo.Connect(options.Client().ApplyURI(uri))
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    let client = Client::with_uri_str(uri).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## TLS, network rules และ encryption at rest
+
+อีกสามชั้นทำให้ภาพสมบูรณ์ **TLS** เข้ารหัส traffic ระหว่าง client และเซิร์ฟเวอร์ เพื่อให้ credentials และข้อมูลไม่ถูกอ่านออกจากสายส่งได้; คุณชี้ `mongod` ไปที่ใบรับรองและกำหนดให้ต้องใช้มัน
+
+```yaml
+# mongod.conf — require TLS and restrict where it listens
+net:
+  bindIp: 10.0.1.5,localhost
+  tls:
+    mode: requireTLS
+    certificateKeyFile: /etc/ssl/mongodb.pem
+```
+
+snippet เดียวกันนั้นแสดงประตู **network** การตั้งค่า `bindIp` ควบคุมว่า `mongod` รับการเชื่อมต่อบน interface ไหน — ผูกมันกับ address ส่วนตัว ไม่ใช่ `0.0.0.0` บน host สาธารณะ ในระบบคลาวด์คุณห่อเซิร์ฟเวอร์ไว้ใน VPC หรือ private subnet และใช้ firewall หรือ security group เพื่อให้มีเพียงเซิร์ฟเวอร์แอปพลิเคชันของคุณเท่านั้นที่เข้าถึงพอร์ต `27017` ได้เลย สุดท้าย **encryption at rest** สลับไฟล์ข้อมูลบนดิสก์ เพื่อให้ดิสก์หรือ backup volume ที่ถูกขโมยไปไร้ประโยชน์หากไม่มีกุญแจ; ใน deployment ที่จัดการเองนี่เป็นฟีเจอร์ระดับ storage-engine หรือ filesystem ที่คุณเปิดใช้ และใน managed services มันเปิดอยู่โดยค่าเริ่มต้น
+
+## MongoDB Atlas: เส้นทางที่ง่าย
+
+การทำทั้งหมดนี้ด้วยมือ — การ provision replica set, สร้างใบรับรอง, ตั้งค่า firewall, หมุนเวียนกุญแจ, จัดตาราง backup — เป็นงานจริงและทำผิดเล็ก ๆ น้อย ๆ ได้ง่าย **MongoDB Atlas** คือ managed cloud service ของ MongoDB และมันมีอยู่ส่วนใหญ่ก็เพื่อให้คุณไม่ต้องทำ Atlas cluster มาแบบปลอดภัยโดยค่าเริ่มต้น: ต้องมี authentication, TLS เปิดอยู่เสมอ, encryption at rest เปิดใช้งาน และฐานข้อมูล *ไม่* สามารถเข้าถึงได้จนกว่าคุณจะเพิ่ม entry ลงใน **IP access list** ของมันอย่างชัดเจน นอกเหนือจากนั้นมันยังให้ **backups** อัตโนมัติพร้อม point-in-time restore และแดชบอร์ด **monitoring** ที่มี Performance Advisor จากบทเรียนที่แล้วฝังอยู่ในตัว
+
+**ใน Compass / Atlas:** คุณเชื่อมต่อ Compass กับ Atlas cluster ด้วย connection string ที่คัดลอกมาจาก Atlas UI ซึ่งรวม TLS และผู้ใช้ฐานข้อมูลของคุณไว้แล้ว ใน Atlas เอง Database Access จัดการผู้ใช้และ roles, Network Access จัดการ IP allow-list และแท็บ Backup จัดการ snapshots — สี่ชั้นเดียวกัน นำเสนอเป็นฟอร์มแทนที่จะเป็นไฟล์ config
+
+## เคล็ดลับและข้อควรระวัง
+
+- **อย่าเปิดพอร์ต 27017 สู่อินเทอร์เน็ตโดยไม่มี authentication เด็ดขาด** นี่คือกฎเหล็ก; มันคือวิธีที่การรั่วไหลของข้อมูลที่โด่งดังเกิดขึ้น ผูกกับ interface ส่วนตัวและกำหนดให้ต้องมี auth ก่อนสิ่งอื่นใด
+- ใช้ **least privilege** ให้ผู้ใช้แอปพลิเคชันแต่ละคนได้เฉพาะ roles ที่จำเป็นบนเฉพาะฐานข้อมูลที่ใช้ อย่ามอบ role admin ให้กับโค้ดของแอป
+- TLS ปกป้องข้อมูล *ระหว่างขนส่ง*; encryption at rest ปกป้องมัน *บนดิสก์* พวกมันเป็นคนละชั้น — เปิดทั้งสอง ไม่ใช่อย่างเดียว
+- การจัดการทั้งหมดนี้เองทำได้แต่มีโอกาสผิดพลาด หากคุณไม่มีเหตุผลที่หนักแน่นพอที่จะรัน cluster ของตัวเอง Atlas ให้การป้องกันเหล่านี้ที่ตั้งค่าถูกต้องมาให้พร้อมใช้
+
+<Callout title="ปลอดภัยด้วยความลึก หรือให้ Atlas จัดการให้">
+Security ใน production คือสี่ชั้น: ล็อกเครือข่าย, กำหนดให้ต้องมี TLS, กำหนดให้ต้องมี authentication และมอบ roles แบบ least-privilege — บวกกับ encryption at rest บนดิสก์ อย่าวาง MongoDB ที่ไม่มี authentication ไว้บน address สาธารณะเด็ดขาด หากคุณไม่อยากประกอบทั้งหมดนี้ด้วยตัวเอง MongoDB Atlas ส่งมอบมันแบบปลอดภัยโดยค่าเริ่มต้น
+</Callout>
+
+export const quizSecurity = [
+  {
+    q: 'กฎเหล็กด้าน security ใน production สำหรับ MongoDB คืออะไร?',
+    options: [
+      'รันบนพอร์ตเริ่มต้นเสมอ',
+      'อย่าเปิดพอร์ต 27017 สู่อินเทอร์เน็ตโดยไม่มี authentication เด็ดขาด',
+      'ปิด TLS เพื่อปรับปรุง performance',
+      'มอบ role admin ให้ผู้ใช้ทุกคนเพื่อความสะดวก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'role-based access control (RBAC) ให้อะไร?',
+    options: [
+      'การเข้ารหัสไฟล์ข้อมูลบนดิสก์',
+      'การควบคุมว่าผู้ใช้ที่ผ่าน authentication แต่ละคนได้รับอนุญาตให้ทำอะไร',
+      'การ failover อัตโนมัติระหว่าง replicas',
+      'การบีบอัด traffic ของเครือข่าย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'TLS และ encryption at rest ปกป้องสิ่งที่แตกต่างกัน อันไหนคืออันไหน?',
+    options: [
+      'ทั้งคู่ปกป้องข้อมูลเฉพาะตอนที่มันอยู่ในหน่วยความจำ',
+      'TLS ปกป้องข้อมูลระหว่างขนส่งบนเครือข่าย; encryption at rest ปกป้องข้อมูลบนดิสก์',
+      'TLS ปกป้องดิสก์; encryption at rest ปกป้องเครือข่าย',
+      'พวกมันเป็นสองชื่อของฟีเจอร์เดียวกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'MongoDB Atlas ช่วยเรื่อง security โดยค่าเริ่มต้นอย่างไร?',
+    options: [
+      'มันปิด authentication เพื่อให้เชื่อมต่อง่ายขึ้น',
+      'มันกำหนดให้ต้องมี auth และ TLS, เข้ารหัส at rest และทำให้ cluster เข้าถึงไม่ได้จนกว่าคุณจะเพิ่ม IP ลงใน access list',
+      'มันเปิด cluster สู่สาธารณะเพื่อให้ client ใด ๆ เชื่อมต่อได้',
+      'มันขจัดความจำเป็นในการใช้ connection string',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/security-and-atlas" questions={quizSecurity} />
+
+<ProgressTracker client:visible id="operations-and-scaling/security-and-atlas" />

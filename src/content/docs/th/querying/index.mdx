@@ -1,0 +1,84 @@
+---
+title: การ Query ใน MongoDB
+description: ภาพรวมของการอ่าน document อย่างแม่นยำ — filter, operator, projection, การ sort, การแบ่งหน้า และวิธีเข้าถึง array กับ field ที่ซ้อนกัน
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การใส่ข้อมูลเข้าไปนั้นง่าย ทักษะที่แยกคนที่แค่ *เก็บ* document ออกจากคนที่ใช้ฐานข้อมูลได้จริงคือการอ่านข้อมูลกลับมาอย่างแม่นยำ การ query คือศิลปะของการอธิบายอย่างเจาะจงและไม่เกินจำเป็นว่าคุณสนใจ document ชุดย่อยกลุ่มไหน — แล้วจัดรูปสิ่งที่ส่งกลับมาให้คุณได้รับเฉพาะ field ที่ต้องการ ในลำดับที่ต้องการ แบ่งเป็นหน้าเล็กพอที่จะจัดการได้ โมดูลนี้พูดถึงครึ่งหลังของฐานข้อมูลทั้งหมด นั่นคือการอ่าน
+
+เราจะทำงานกับ collection จำลองเล็ก ๆ ของสมาชิกห้องสมุด `members` และหนังสือที่พวกเขายืม เพราะข้อมูลขนาดเล็กช่วยให้ query เป็นจุดสนใจ เมื่อจบบทคุณจะสามารถ filter ด้วยการเปรียบเทียบและการรวม logic เจาะลึกเข้าไปใน array และ sub-document ที่ฝังอยู่ พร้อมทั้งตัด sort และแบ่งหน้าผลลัพธ์ได้โดยไม่ต้องลาก collection ทั้งก้อนข้ามสายไป
+
+export const queryOverviewDiagram = `flowchart LR
+  Q["Your query"] --> F["Filter: which documents"]
+  Q --> P["Projection: which fields"]
+  Q --> O["Order: sort"]
+  Q --> Pg["Page: limit and skip"]
+  F --> R["Result cursor"]
+  P --> R
+  O --> R
+  Pg --> R
+  R --> App["Your app"]`
+
+<Mermaid code={queryOverviewDiagram} title="คำขออ่านคือการตัดสินใจสี่เรื่องที่เป็นอิสระต่อกัน — document ไหน, field ไหน, ลำดับอย่างไร, จำนวนเท่าไร — ที่รวมกันเป็น cursor เดียว" />
+
+## query คือคำอธิบาย ไม่ใช่ลูปค้นหา
+
+เมื่อคุณ query MongoDB คุณไม่เคยเขียนลูป คุณส่ง **filter document** ให้เซิร์ฟเวอร์ที่ *อธิบาย* document ที่คุณต้องการ แล้วเซิร์ฟเวอร์จะหาให้ filter อย่างด้านล่างอ่านได้ว่า "สมาชิกทุกคนที่เข้าร่วมในปี 2023 และตอนนี้ไม่ค้างค่าปรับเลย"
+
+```js
+db.members.find({ joined: 2023, fines: 0 })
+```
+
+filter ที่เรียบง่ายที่สุดจับคู่ชื่อ field กับค่าหนึ่งค่า และหลายคู่ใน filter เดียวกันคือ AND โดยปริยาย จากจุดนั้นการ query เติบโตได้สี่ทิศทาง และโมดูลนี้จะพาไปทีละทิศทาง
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+- **Comparison และ logical operator** มากกว่าการจับคู่แบบตรงเป๊ะ: มากกว่า, น้อยกว่า, การเป็นสมาชิกในเซ็ต, การไม่มี field และวิธีรวมเงื่อนไขด้วย AND/OR/NOT แบบชัดเจน เหล่านี้คือเครื่องมือใช้งานประจำวัน
+- **การ query array** field หนึ่งสามารถเก็บ list ได้ คุณจะได้เรียนการจับคู่ element เดียว การบังคับหลายเงื่อนไขบน element *เดียวกัน* ด้วย `$elemMatch` การบังคับให้มีหลายค่าครบทุกค่าด้วย `$all` และการ filter ตามความยาวของ array
+- **การ query nested document** document ซ้อนกันได้ dot notation ช่วยให้คุณเข้าถึง field ที่ฝังลึกอยู่ใน object และมีความแตกต่างสำคัญระหว่างการจับคู่ทั้ง sub-document แบบตรงเป๊ะกับการจับคู่เพียง field เดียวของมัน
+- **Projection, การ sort และการแบ่งหน้า** เมื่อคุณได้ document ที่ถูกต้องแล้ว คุณตัดสินใจว่าจะส่ง field ไหนกลับมา จะมาในลำดับใด และจะแบ่งผลลัพธ์ก้อนใหญ่ออกเป็นหน้าที่จัดการได้อย่างไร — และทำไมลูกเล่นการแบ่งหน้ายอดนิยมตัวหนึ่งถึงช้าลงเมื่อข้อมูลใหญ่ขึ้น
+
+ทุกบทเรียนแสดง query เดียวกันห้าแบบ — ใน `mongosh` แล้วตามด้วย driver ของ Node.js, Python, Go และ Rust — เคียงข้างกับ JSON document ที่มันจะส่งกลับมา เพื่อให้คุณอ่านรูปร่างของคำตอบได้ ไม่ใช่แค่ตัวคำสั่ง
+
+<Callout title="การอ่านคือครึ่งของฐานข้อมูลที่คุณจะใช้มากที่สุด">
+โค้ดแอปพลิเคชันส่วนใหญ่อ่านมากกว่าเขียนหลายเท่า เวลาที่ใช้เรียนรู้การเขียน filter ที่แม่นยำและ projection ที่กระชับจะคืนทุนทุกครั้งที่โหลดหน้า — query ที่ดีส่งกลับมาเฉพาะ document และ field ที่คุณต้องการ และไม่มีอะไรที่คุณต้องทิ้งไปฝั่ง client
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ใน MongoDB query filter คืออะไร?',
+    options: [
+      'ลูปที่คุณเขียนเพื่อสแกนทุก document',
+      'document ที่อธิบายว่าคุณต้องการ document ไหน',
+      'รายชื่อ field ที่จะส่งกลับมา',
+      'ลำดับการ sort ที่ใช้กับผลลัพธ์',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'filter ที่มีคู่ field/value สองคู่ เช่น joined และ fines หมายความว่าอย่างไร?',
+    options: [
+      'จับคู่ document ที่เงื่อนไขใดเงื่อนไขหนึ่งเป็นจริง',
+      'จับคู่ document ที่ทั้งสองเงื่อนไขเป็นจริง (AND โดยปริยาย)',
+      'จับคู่ document ที่ไม่มีเงื่อนไขใดเป็นจริง',
+      'ไม่ถูกต้อง อนุญาตเพียงคู่เดียวเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อใดไม่ใช่หนึ่งในสี่การตัดสินใจที่คำขออ่านรวมเข้าด้วยกัน?',
+    options: ['document ไหน (filter)', 'field ไหน (projection)', 'document ถูกเก็บบนดิสก์อย่างไร', 'ในลำดับใดและจำนวนเท่าไร (sort, limit, skip)'],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="querying/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="querying/index" />

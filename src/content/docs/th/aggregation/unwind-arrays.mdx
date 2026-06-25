@@ -1,0 +1,296 @@
+---
+title: $unwind — การแบน array
+description: เปลี่ยนหนึ่งเอกสารที่มี array ให้เป็นหนึ่งเอกสารต่อสมาชิกด้วย $unwind จับคู่กับ $group เพื่อสรุป และเก็บ array ว่างไว้ด้วย preserveNullAndEmptyArrays
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+array มีอยู่ทุกที่ในเอกสาร MongoDB — แท็กบนโพสต์ รายการในออเดอร์ บทเรียนในคอร์ส การจะ *สรุป* ข้ามสมาชิกของ array เหล่านั้น มักต้องดูทีละตัว `$unwind` ทำสิ่งนั้นพอดี: มันรับเอกสารที่มีฟิลด์ array แล้วปล่อยออกมา **หนึ่งเอกสารต่อหนึ่งสมาชิก** โดยคัดลอกส่วนที่เหลือของเอกสารไปยังแต่ละอัน เอกสารที่มี array สามสมาชิกจะกลายเป็นสามเอกสาร
+
+สำหรับบทเรียนนี้ เอกสาร `sales` แต่ละอันบันทึกออเดอร์ที่มีหลายรายการสินค้าใน array `items`:
+
+```json
+{
+  "_id": "o1",
+  "buyer": "Ada",
+  "items": [
+    { "title": "Dune", "qty": 2 },
+    { "title": "Foundation", "qty": 1 }
+  ]
+}
+```
+
+## หนึ่งเอกสารต่อหนึ่งสมาชิก array
+
+ให้เส้นทางไปยังฟิลด์ array แก่ `$unwind` (พร้อมตัวนำหน้า `$`) แล้วมันจะแผ่เอกสารออก เอกสารที่ปล่อยออกมาทุกอันเหมือนกันทุกประการ ยกเว้นฟิลด์ array ถูกแทนที่ด้วยสมาชิกตัวใดตัวหนึ่งของมัน
+
+export const unwindFlow = `flowchart LR
+  In["one order with items array of two"] --> U["$unwind items"]
+  U --> D1["order, items = Dune"]
+  U --> D2["order, items = Foundation"]`
+
+<Mermaid code={unwindFlow} title="หนึ่งเอกสารที่มี array สองสมาชิกกลายเป็นสองเอกสาร หนึ่งเอกสารต่อหนึ่งสมาชิก" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $unwind: "$items" }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $unwind: "$items" },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$unwind": "$items"},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$unwind", "$items"}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$unwind": "$items" },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ออเดอร์เดียวกลายเป็นหนึ่งเอกสารต่อหนึ่งรายการสินค้า โดย `items` ตอนนี้เป็นออบเจกต์ธรรมดาแทนที่จะเป็น array:
+
+```json
+[
+  { "_id": "o1", "buyer": "Ada", "items": { "title": "Dune", "qty": 2 } },
+  { "_id": "o1", "buyer": "Ada", "items": { "title": "Foundation", "qty": 1 } }
+]
+```
+
+**ใน Compass:** เพิ่ม stage `$unwind` ในแท็บ **Aggregations** แล้วชี้มันไปที่ฟิลด์ array การดูตัวอย่างแสดงจำนวนเอกสาร *เพิ่มขึ้น* — สัญญาณว่าคุณได้แบน array แล้ว — ซึ่งตรงข้ามกับสิ่งที่ `$match` และ `$group` ทำ
+
+## การจับคู่คลาสสิก: $unwind แล้วตามด้วย $group
+
+`$unwind` ไม่ค่อยเป็นคำพูดสุดท้าย งานปกติของมันคือแบน array เพื่อให้ `$group` ในภายหลังสรุปข้ามสมาชิกได้ ที่นี่เราแบน items ของทุกออเดอร์ แล้วรวมจำนวนที่ขายต่อชื่อเรื่องข้ามทุกออเดอร์:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $unwind: "$items" },
+      { $group: {
+          _id: "$items.title",
+          sold: { $sum: "$items.qty" }
+      } },
+      { $sort: { sold: -1 } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $unwind: "$items" },
+      { $group: {
+          _id: "$items.title",
+          sold: { $sum: "$items.qty" },
+      } },
+      { $sort: { sold: -1 } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$unwind": "$items"},
+        {"$group": {
+            "_id": "$items.title",
+            "sold": {"$sum": "$items.qty"},
+        }},
+        {"$sort": {"sold": -1}},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$unwind", "$items"}},
+        {{"$group", bson.D{
+            {"_id", "$items.title"},
+            {"sold", bson.D{{"$sum", "$items.qty"}}},
+        }}},
+        {{"$sort", bson.D{{"sold", -1}}}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$unwind": "$items" },
+        doc! { "$group": {
+            "_id": "$items.title",
+            "sold": { "$sum": "$items.qty" }
+        } },
+        doc! { "$sort": { "sold": -1 } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ตอนนี้แต่ละชื่อเรื่องมีจำนวนรวมของมัน รวมข้ามรายการสินค้าของทุกออเดอร์:
+
+```json
+[
+  { "_id": "Dune", "sold": 5 },
+  { "_id": "Foundation", "sold": 3 }
+]
+```
+
+## การเก็บ array ที่ว่างและที่หายไป
+
+โดยค่าเริ่มต้น `$unwind` **ทิ้ง** เอกสารที่ฟิลด์ array ว่าง หายไป หรือเป็น `null` — ไม่มีสมาชิกให้ปล่อยออก ดังนั้นเอกสารจึงหายไป เมื่อคุณต้องการให้เอกสารเหล่านั้นรอด (โดยไม่มีฟิลด์นั้น) ให้ส่งรูปแบบยาวพร้อม `preserveNullAndEmptyArrays`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $unwind: {
+          path: "$items",
+          preserveNullAndEmptyArrays: true
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $unwind: {
+          path: "$items",
+          preserveNullAndEmptyArrays: true,
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$unwind": {
+            "path": "$items",
+            "preserveNullAndEmptyArrays": True,
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$unwind", bson.D{
+            {"path", "$items"},
+            {"preserveNullAndEmptyArrays", true},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$unwind": {
+            "path": "$items",
+            "preserveNullAndEmptyArrays": true
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ออเดอร์ที่ไม่มี items ยังคงปรากฏหนึ่งครั้ง เพียงแต่ไม่มีฟิลด์ `items`:
+
+```json
+[
+  { "_id": "o2", "buyer": "Grace" }
+]
+```
+
+## ทิปและกับดัก
+
+- `$unwind` **ทวีคูณ** เอกสาร ออเดอร์ที่มีห้ารายการกลายเป็นห้าเอกสาร — การแบนสามารถทำให้สตรีมโตขึ้นมากก่อนที่ `$group` ในภายหลังจะทำให้มันหดลงอีกครั้ง
+- หากไม่มี `preserveNullAndEmptyArrays` เอกสารที่มี array ว่างหรือหายไปจะถูกทิ้งเงียบ ๆ ถ้าจำนวนนับของคุณขาดไปหลัง unwind นี่คือผู้ต้องสงสัยตามปกติ
+- หลังจาก unwind ให้อ้างถึงฟิลด์ของสมาชิกผ่านเส้นทางเดิม: เมื่อ `items` เป็นออบเจกต์เดี่ยว `"$items.qty"` จะอ่านจำนวนของสมาชิกนั้น
+- ถ้าฟิลด์ไม่ได้เป็น array จริง ๆ `$unwind` จะปฏิบัติต่อค่าสเกลาร์เดี่ยวเสมือนเป็น array หนึ่งสมาชิก และปล่อยเอกสารออกมาหนึ่งครั้ง — ดังนั้นมันให้อภัยกับค่าที่ไม่ใช่ array
+
+<Callout title="unwind แผ่ออก แล้ว group พับกลับ">
+$unwind เปลี่ยนหนึ่งเอกสารที่มี array N สมาชิกให้เป็น N เอกสาร โดยลำพังมันแค่ทำให้สตรีมพองตัว พลังที่แท้จริงของมันปรากฏเมื่อ $group ตามมาเพื่อสรุปข้ามสมาชิกที่ถูกแบนทั้งหมดเหล่านั้น ตั้ง preserveNullAndEmptyArrays เมื่อเอกสารที่มี array ว่างต้องรอด
+</Callout>
+
+export const quizUnwind = [
+  {
+    q: 'เอกสารมี array items ที่มี 3 สมาชิก $unwind บน items ผลิตอะไร?',
+    options: [
+      'หนึ่งเอกสารโดย array ไม่เปลี่ยนแปลง',
+      'สามเอกสาร แต่ละอันพาหนึ่งสมาชิกใน items',
+      'หนึ่งเอกสารโดยลบ items ออก',
+      'ข้อผิดพลาด เพราะ items เป็น array',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'stage ใดที่มักตามหลัง $unwind บ่อยที่สุดเพื่อสรุปสมาชิกที่ถูกแบน?',
+    options: ['$project', '$group', '$lookup', '$match'],
+    answer: 1,
+  },
+  {
+    q: 'โดยค่าเริ่มต้น เอกสารที่ array ที่ถูก unwind ว่างหรือหายไปจะเกิดอะไรขึ้น?',
+    options: [
+      'มันถูกเก็บไว้โดยตั้งฟิลด์เป็น null',
+      'มันถูกทิ้งออกจากผลลัพธ์',
+      'มันทำให้ aggregation ล้มเหลว',
+      'มันถูกปล่อยออกมาหนึ่งครั้งพร้อม array ว่าง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณเก็บเอกสารที่มี array ว่างหรือหายไปไว้ในผลลัพธ์อย่างไร?',
+    options: [
+      'เพิ่ม $match ก่อน $unwind',
+      'ใช้รูปแบบยาวโดยตั้ง preserveNullAndEmptyArrays เป็น true',
+      'ตั้ง array เป็น null ก่อน',
+      'ทำไม่ได้',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/unwind-arrays" questions={quizUnwind} />
+
+<ProgressTracker client:visible id="aggregation/unwind-arrays" />

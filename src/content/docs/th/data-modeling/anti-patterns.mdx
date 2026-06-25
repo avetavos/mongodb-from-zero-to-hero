@@ -1,0 +1,118 @@
+---
+title: Anti-patterns
+description: ความผิดพลาดในการ modeling ที่พบบ่อยใน MongoDB — array ขนาดมหึมาที่ไม่มีขอบเขต, document เดียวที่อ้วนเกิน, การ over-referencing, การจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กโดยไม่ใช้ collation และกับดัก one-giant-collection — และวิธีแก้แต่ละข้อ
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+schema ของ MongoDB ที่แย่ส่วนใหญ่ไม่ได้แย่เพราะมีใครเพิกเฉยต่อกฎ — มันแย่เพราะการตัดสินใจที่ดูสมเหตุสมผลกลับเสื่อมสภาพไปตามกาลเวลา array ที่ embed ไว้ซึ่งไม่มีปัญหาตอนมีสิบ element กลายเป็นภาระตอนมีหมื่น element สัญชาตญาณ "เก็บทุกอย่างไว้ด้วยกัน" ที่ทำให้เวอร์ชันแรกเรียบง่ายกลับฝังฐานข้อมูลในเวอร์ชันสอง บทเรียนสุดท้ายนี้รวบรวม **anti-patterns** ที่เกิดซ้ำบ่อยที่สุด: แต่ละอันหน้าตาเป็นอย่างไร ทำไมมันเจ็บ และวิธีแก้ที่เป็นรูปธรรม การจดจำมันได้ในการ design review เป็นหนึ่งในทักษะการ modeling ที่มีค่าที่สุดที่คุณสร้างได้
+
+## array ขนาดมหึมาที่ไม่มีขอบเขต
+
+anti-pattern ที่พบบ่อยที่สุดคือการ embed array ที่โตโดยไม่มีขอบเขต — ทุก comment บน post ยอดนิยม ทุก event ในประวัติของผู้ใช้ การ append แต่ละครั้งทำให้ document ใหญ่ขึ้นและโหลดช้าลง และ array เดินหน้าเข้าหาเพดาน 16 MB **วิธีแก้:** ย้ายลูกไปยัง collection ของมันเองแล้ว reference parent จากลูกแต่ละตัว หรือใช้ Bucket pattern เพื่อจำกัดการเติบโตต่อช่วงเวลา post *ไม่ควร* embed ทุก comment:
+
+```json
+{ "_id": "post_310", "title": "Why documents win", "commentCount": 8421 }
+```
+
+comment อยู่แยกกัน แต่ละอันชี้กลับ ดังนั้น post จึงยังคงเล็กและ comment สามารถแบ่งหน้าได้:
+
+```json
+{ "_id": "cmt_9", "postId": "post_310", "user": "Grace", "text": "Great read." }
+```
+
+## document เดียวที่อ้วนเกิน
+
+ที่เกี่ยวข้องกันอย่างใกล้ชิดคือแรงกระตุ้นที่จะยัด *ทุกอย่าง* เกี่ยวกับ entity หนึ่งเข้าไปใน document เดียว — ผู้ใช้พร้อม activity log ฉบับเต็ม ทุกคำสั่งซื้อ ทุก preference ทุก session ทั้งหมด nest อยู่ภายใน document กลายเป็นมหึมา และการอ่านเพียงเพื่อเอา email address ก็ลากเมกะไบต์ออกจากดิสก์ **วิธีแก้:** เก็บ field ที่ร้อนและถูกอ่านบ่อยไว้ใน document หลัก แล้วย้ายข้อมูลย่อยที่เย็นหรือใหญ่ไปยัง collection ที่ถูก reference Read locality ช่วยได้เฉพาะเมื่อข้อมูลถูกอ่านด้วยกันจริง ๆ การ embed ข้อมูลเย็นไม่ได้ซื้ออะไรให้คุณและทำให้คุณเสียในทุกการอ่าน
+
+## Over-referencing
+
+ความผิดพลาดตรงข้ามคือการแยกข้อมูลอย่างก้าวร้าวเกินไปจนการ render หน้าจอเดียวต้องใช้การค้นหานับสิบครั้ง เป็นการสร้างปัญหา relational join ที่ MongoDB ตั้งใจจะบรรเทาขึ้นมาใหม่ ถ้าการแสดงคำสั่งซื้อหมายถึงการดึงคำสั่งซื้อ แล้วลูกค้า แล้วสินค้าแต่ละตัว แล้ว category ของสินค้าแต่ละตัว คุณก็ over-reference ไปแล้ว **วิธีแก้:** embed ข้อมูลที่ถูกอ่านด้วยกันจริง ๆ และมีขอบเขต หรือใช้ Extended Reference pattern เพื่อคัดลอก field หนึ่งหรือสองอันที่คุณแสดงเสมอ เพื่อให้การอ่านที่ใช้ทั่วไปเลิกแตกออกไปเป็น join ฝั่งแอปพลิเคชัน
+
+## การจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กโดยไม่ใช้ collation
+
+อันละเอียดอ่อน: ต้องการการค้นหาแบบไม่สนตัวพิมพ์ใหญ่เล็ก (จับคู่ `"Ada"`, `"ada"` และ `"ADA"`) แล้วหันไปใช้ regular expression อย่าง `/^ada$/i` มันทำงานได้ แต่มันไม่สามารถใช้ index ปกติได้อย่างมีประสิทธิภาพ จึงค่อย ๆ เสื่อมลงเป็น scan อย่างเงียบ ๆ **วิธีแก้:** กำหนด **collation** ด้วย strength แบบไม่สนตัวพิมพ์ใหญ่เล็กบน collection หรือ index แล้ว query แบบ equality ธรรมดาก็จะจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็ก *และ* ใช้ index Collation คือวิธีที่ได้รับการสนับสนุนและ index ได้สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็ก — ส่วน flag ของ regex ไม่ใช่
+
+## ทุกอย่างอยู่ใน collection เดียว
+
+สุดท้าย สัญชาตญาณที่จะทิ้ง entity ที่ไม่เกี่ยวข้องกัน — ผู้ใช้ คำสั่งซื้อ สินค้า log — เข้าไปใน collection เดียวที่แยกแยะด้วย field `type` เท่านั้น index บวมขึ้นด้วย document ที่มันไม่สนใจ validation ไม่สามารถอธิบายรูปร่างที่สอดคล้องกันได้ และทุก query ต้อง filter ด้วย `type` ก่อน **วิธีแก้:** ให้แต่ละ entity ที่แตกต่างกันมี collection ของมันเอง collection มีราคาถูก เลย์เอาต์แบบ one-entity-per-collection ที่สะอาดทำให้ index กระชับ validator มีความหมาย และ query เรียบง่าย
+
+## anti-pattern และวิธีแก้ของมัน
+
+แต่ละความผิดพลาดมีทางแก้ตรง ๆ ที่คุณได้พบไปแล้วในโมดูลนี้:
+
+export const antiPatternDiagram = `flowchart LR
+  A1["Massive unbounded array"] --> F1["Reference children or use the Bucket pattern"]
+  A2["Bloated single document"] --> F2["Keep hot fields, reference cold and large data"]
+  A3["Over-referencing everywhere"] --> F3["Embed co-accessed data or extend the reference"]
+  A4["Case-insensitive via regex"] --> F4["Use a case-insensitive collation"]
+  A5["Everything in one collection"] --> F5["One entity per collection"]`
+
+<Mermaid code={antiPatternDiagram} title="แต่ละ anti-pattern ในการ modeling จับคู่กับวิธีแก้ที่เป็นรูปธรรมซึ่งดึงมาจากบทเรียนก่อนหน้า" />
+
+สังเกตว่าทุกวิธีแก้เป็นเพียงการประยุกต์ใช้บทเรียนก่อนหน้าอย่างมีวินัย: model สำหรับการเข้าถึง จำกัดขอบเขต array ที่ embed reference สิ่งที่แชร์และใหญ่ embed สิ่งที่ถูกอ่านด้วยกัน และปล่อยให้ cardinality และ access pattern — ไม่ใช่ความเคยชิน — ตัดสินแต่ละความสัมพันธ์
+
+## เคล็ดลับและข้อควรระวัง
+
+- anti-pattern แทบไม่ดูผิดในวันแรก มันเผยตัวเองตอนสเกล ดังนั้นจง review schema โดยคำนึงถึงการเติบโต ไม่ใช่แค่ขนาดข้อมูลปัจจุบัน
+- "unbounded array" และ "bloated document" คือสองหน้าของโรคเดียวกัน: การ embed ข้อมูลที่ควรจะถูก reference วิธีรักษาคืออันเดียวกัน
+- Over-referencing คือการแก้เกินขนาด — แยกทุกอย่างเพราะการ embed เคยทำให้เจ็บมาแล้วครั้งหนึ่ง คำตอบคือการใช้วิจารณญาณต่อแต่ละความสัมพันธ์ ไม่ใช่กฎเหมารวม
+- MongoDB Atlas เผยหลายอันเหล่านี้ออกมาเป็นคำแนะนำ **Schema Anti-Pattern** ในเครื่องมือด้าน performance ของมัน ถ้าคุณรันบน Atlas ปล่อยให้มันชี้ array ที่ไม่มีขอบเขตและ document ที่อ้วนเกินให้คุณ
+- collection มีราคาไม่แพง เมื่อสงสัยเรื่องการผสมชนิด entity ให้แยกมัน — เลย์เอาต์แบบ per-entity ที่สะอาดมักเสื่อมสภาพได้ดีกว่าเสมอ
+
+<Callout title="schema ที่แย่ส่วนใหญ่เคยสมเหตุสมผลมาก่อน">
+anti-pattern ไม่ใช่ความผิดพลาดที่แปลกประหลาด มันคือการตัดสินใจธรรมดาที่ไม่รอดจากการเติบโต แนวป้องกันคือนิสัยจากทั้งโมดูลนี้: จำกัดขอบเขต array reference สิ่งที่แชร์และใหญ่ embed สิ่งที่ถูกอ่านด้วยกัน ให้แต่ละ entity มี collection ของมันเอง และใช้ collation — ไม่ใช่ regex — สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็ก
+</Callout>
+
+export const quizAntiPatterns = [
+  {
+    q: 'document embed array ที่โตโดยไม่มีขอบเขต วิธีแก้ที่แนะนำคืออะไร?',
+    options: [
+      'เพิ่มข้อจำกัด document 16 MB',
+      'reference ลูกไว้ใน collection ของมันเอง หรือใช้ Bucket pattern',
+      'ลบ element เก่าแบบสุ่ม',
+      'แปลง array เป็น string',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'over-referencing สร้างปัญหาใดขึ้นมาใหม่?',
+    options: [
+      'ปัญหา relational join — หน้าจอเดียวต้องการการค้นหาหลายครั้ง',
+      'ข้อจำกัด document 16 MB',
+      'การสูญเสียความซ้ำซ้อนทั้งหมด',
+      'schema validation error',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'วิธีที่ได้รับการสนับสนุนและเป็นมิตรกับ index สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กใน MongoDB คืออะไร?',
+    options: [
+      'regular expression แบบไม่สนตัวพิมพ์ใหญ่เล็ก',
+      'collation ด้วย strength แบบไม่สนตัวพิมพ์ใหญ่เล็ก',
+      'เก็บทุกค่าเป็นตัวพิมพ์เล็กเท่านั้น',
+      'ปิดการใช้งาน index บน field',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการเก็บ entity ที่ไม่เกี่ยวข้องกันไว้ใน collection เดียวพร้อม field type จึงเป็น anti-pattern?',
+    options: [
+      'MongoDB ห้ามมีมากกว่าหนึ่ง type ต่อ document',
+      'index บวม validator ไม่สามารถอธิบายรูปร่างที่สอดคล้องกันได้ และทุก query ต้อง filter ด้วย type',
+      'มันเกิน document size limit โดยอัตโนมัติ',
+      'collection แพงเกินไปที่จะสร้าง',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/anti-patterns" questions={quizAntiPatterns} />
+
+<ProgressTracker client:visible id="data-modeling/anti-patterns" />

@@ -1,0 +1,155 @@
+---
+title: ติดตั้งด้วย Docker
+description: รัน MongoDB บนเครื่องจาก Docker image ทางการด้วยคำสั่ง docker run เดียวหรือไฟล์ docker-compose แล้วตรวจสอบและเชื่อมต่อ
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+วิธีที่เร็วที่สุดในการได้ MongoDB จริง ๆ มาเล่นคือ **Docker** image `mongo` ทางการให้เซิร์ฟเวอร์ที่สะอาดและแยกตัวแก่คุณในคำสั่งเดียว โดยไม่มีอะไรติดตั้งถาวรบนเครื่องของคุณและไม่มีอะไรต้องถอนการติดตั้งทีหลัง บทเรียนนี้พาคุณจาก "Docker กำลังทำงานอยู่" ไปสู่ "ฉันคุยกับ MongoDB ได้" — เริ่มด้วยคำสั่งบรรทัดเดียว แล้วตามด้วย `docker-compose.yml` เล็ก ๆ ที่คุณเก็บไว้ในโปรเจกต์ได้
+
+คุณต้องการแค่ Docker Desktop (หรือ Docker engine) ที่ติดตั้งและทำงานอยู่ ทุกอย่างที่เหลือมาจาก image
+
+## docker run บรรทัดเดียว
+
+คำสั่งนี้ดึง image ทางการ เริ่ม container ชื่อ `mongo-dev` เปิดเผยพอร์ต MongoDB เริ่มต้น `27017` ออกมายังเครื่องของคุณ เก็บข้อมูลใน named volume เพื่อให้มันอยู่รอดเมื่อ restart และตั้ง username และ password ของ root:
+
+```bash
+docker run -d \
+  --name mongo-dev \
+  -p 27017:27017 \
+  -v mongo-data:/data/db \
+  -e MONGO_INITDB_ROOT_USERNAME=root \
+  -e MONGO_INITDB_ROOT_PASSWORD=secret \
+  mongo:7
+```
+
+มีบางอย่างในคำสั่งนั้นที่ควรทำความเข้าใจ:
+
+- **`-d`** รัน container ในเบื้องหลัง (detached) เพื่อไม่ให้มันยึด terminal ของคุณ
+- **`-p 27017:27017`** map พอร์ต `27017` ของ container เข้ากับพอร์ตเดียวกันบน host ของคุณ ซึ่งเป็นที่ที่ MongoDB รับฟังโดยค่าเริ่มต้น
+- **`-v mongo-data:/data/db`** mount **named volume** ที่ `/data/db` ซึ่งเป็นไดเรกทอรีที่ MongoDB เขียนไฟล์ลงไป volume อยู่นอก container ดังนั้นการลบและสร้าง container ใหม่จึงไม่ทำให้ข้อมูลของคุณหาย
+- **`-e MONGO_INITDB_ROOT_USERNAME` / `-e MONGO_INITDB_ROOT_PASSWORD`** สร้าง user ระดับ administrator ในครั้งแรกที่ container เริ่มต้นไดเรกทอรีข้อมูลที่ว่างเปล่า
+
+## ไฟล์ docker-compose
+
+สำหรับอะไรก็ตามที่เกินกว่าการทดสอบเร็ว ๆ, `docker-compose.yml` ดีกว่า: การตั้งค่าอยู่ในไฟล์ที่คุณ commit ได้ และคำสั่งเดียวก็ยกทุกอย่างขึ้นมา เวอร์ชันนี้รัน MongoDB และเพิ่ม **mongo-express** ซึ่งเป็น web UI น้ำหนักเบาสำหรับเขี่ยดูข้อมูลของคุณในเบราว์เซอร์:
+
+```yaml
+services:
+  mongo:
+    image: mongo:7
+    container_name: mongo-dev
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: secret
+    volumes:
+      - mongo-data:/data/db
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: secret
+      ME_CONFIG_MONGODB_URL: "mongodb://root:secret@mongo:27017/"
+    depends_on:
+      - mongo
+
+volumes:
+  mongo-data:
+```
+
+ยก stack ทั้งหมดขึ้นมาจากไดเรกทอรีที่เก็บไฟล์นั้น:
+
+```bash
+docker compose up -d
+```
+
+เมื่อมันทำงานอยู่คุณสามารถเปิด mongo-express ที่ `http://localhost:8081` เพื่อเรียกดู database และ collection ในเบราว์เซอร์ service `mongo-express` เป็น optional — ลบมันออกได้ถ้าคุณต้องการแค่ database
+
+## ชิ้นส่วนต่าง ๆ ประกอบกันอย่างไร
+
+container รัน MongoDB และรับฟังบนพอร์ต `27017` พอร์ตที่คุณเปิดเผยส่งต่อ `localhost:27017` เข้าไปในนั้น, named volume เก็บข้อมูลให้ปลอดภัยอยู่นอก container, และอะไรก็ตามที่พูดโปรโตคอล MongoDB — mongosh, Compass, หรือแอปพลิเคชันของคุณ — เชื่อมต่อผ่านพอร์ตนั้น
+
+export const dockerDiagram = `flowchart LR
+  App["Your app / mongosh / Compass"] -->|"mongodb://localhost:27017"| Port["Host port 27017"]
+  Port --> Container["mongo container"]
+  Container -->|"writes to /data/db"| Volume["named volume: mongo-data"]`
+
+<Mermaid code={dockerDiagram} title="client ของคุณเชื่อมต่อผ่านพอร์ตที่เปิดเผยไปยัง container ซึ่งคงข้อมูลไว้ใน named volume" />
+
+## ตรวจสอบว่ามันทำงานอยู่
+
+ตรวจว่า container ขึ้นมาแล้วด้วย `docker ps`:
+
+```bash
+docker ps
+```
+
+คุณควรเห็น row สำหรับ image `mongo` ที่มีสถานะ `Up` และการ map พอร์ต `0.0.0.0:27017->27017/tcp` ทีนี้เชื่อมต่อด้วย shell client `mongosh` มาในตัว image อยู่แล้ว ดังนั้นคุณรันมันได้โดยไม่ต้องติดตั้งอะไร:
+
+```bash
+docker exec -it mongo-dev mongosh "mongodb://root:secret@localhost:27017"
+```
+
+ถ้าคุณมี `mongosh` ติดตั้งบน host แทน ให้ชี้มันไปที่พอร์ตที่เปิดเผยโดยตรง:
+
+```bash
+mongosh "mongodb://localhost:27017"
+```
+
+การเชื่อมต่อที่สำเร็จจะพาคุณไปที่ prompt `test>` จากที่นั่นการพิมพ์ `db.runCommand({ ping: 1 })` แล้วได้ `{ ok: 1 }` กลับมา ยืนยันว่าเซิร์ฟเวอร์ยังมีชีวิตและกำลังตอบสนอง
+
+## เคล็ดลับและข้อควรระวัง
+
+- **ความคงอยู่ของข้อมูลอยู่ใน volume ไม่ใช่ใน container** ตราบใดที่คุณเก็บ volume `mongo-data` ไว้ คุณสามารถหยุด ลบ และสร้าง container ใหม่ได้โดยไม่สูญเสียอะไร การรัน `docker volume rm mongo-data` ต่างหากที่ลบข้อมูลจริง ๆ
+- **root user ถูกสร้างเฉพาะตอน init ครั้งแรก** ตัวแปร `MONGO_INITDB_ROOT_*` มีผลเมื่อไดเรกทอรีข้อมูลว่างเปล่า ถ้าคุณเปลี่ยนมันทีหลังกับ volume ที่มีอยู่แล้ว มันจะถูกเพิกเฉย — user เดิมยังคงอยู่
+- **พอร์ต `27017` เป็นค่าเริ่มต้นของ MongoDB** ถ้ามีอย่างอื่นใช้มันอยู่แล้ว ให้เปลี่ยนฝั่ง host ของการ map เช่น `-p 27018:27017` และเชื่อมต่อไปที่ `27018`
+- **ปักหมุดเวอร์ชันหลัก** อย่าง `mongo:7` แทนที่จะเป็น `mongo:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณตกใจด้วยเวอร์ชันเซิร์ฟเวอร์ที่ต่างออกไป
+
+<Callout title="คำสั่งเดียว MongoDB จริง ๆ">
+Docker เปลี่ยน "ติดตั้งและตั้งค่า database" ให้เป็น "รัน image" เก็บข้อมูลของคุณใน named volume ปักหมุด version tag แล้วคุณจะได้ MongoDB ที่ทิ้งได้แต่ก็คงทน ซึ่งคุณล้างและสร้างใหม่ได้ตามใจ
+</Callout>
+
+export const quizDocker = [
+  {
+    q: 'Why mount a named volume at /data/db when running the mongo container?',
+    options: [
+      'มันทำให้ MongoDB เริ่มต้นเร็วขึ้น',
+      'มันคงข้อมูลไว้นอก container เพื่อให้การสร้าง container ใหม่ไม่ทำให้ข้อมูลหาย',
+      'มันจำเป็นต่อการที่ container จะเริ่มทำงานเลย',
+      'มันปิดการใช้งาน authentication',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which port does MongoDB listen on by default?',
+    options: ['8081', '5432', '27017', '3306'],
+    answer: 2,
+  },
+  {
+    q: 'When do the MONGO_INITDB_ROOT_USERNAME and PASSWORD variables take effect?',
+    options: [
+      'ทุกครั้งที่ container restart',
+      'เฉพาะครั้งแรก เมื่อไดเรกทอรีข้อมูลว่างเปล่า',
+      'เฉพาะเมื่อ mongo-express ทำงานอยู่ด้วย',
+      'ไม่เลย — มันถูก image เพิกเฉย',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/setup-with-docker" questions={quizDocker} />
+
+<ProgressTracker client:visible id="intro-and-documents/setup-with-docker" />

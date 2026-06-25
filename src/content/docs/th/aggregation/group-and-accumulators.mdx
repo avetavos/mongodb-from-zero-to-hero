@@ -1,0 +1,323 @@
+---
+title: $group และ accumulator
+description: ยุบเอกสารเข้ากลุ่มตามคีย์ และสรุปแต่ละกลุ่มด้วย accumulator อย่าง $sum, $avg, $min, $max, $push และ $addToSet บวกกับยอดรวมทั้งหมดด้วย _id null
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+`$group` คือจุดที่ aggregation สมชื่อของมัน มันยุบเอกสารจำนวนมากให้เหลือหนึ่งเอกสาร **ต่อค่าที่แตกต่างกันแต่ละค่า** ของคีย์ที่คุณเลือก และสำหรับแต่ละกลุ่มมันคำนวณสรุปด้วย **accumulator** นี่คือ stage ที่ตอบคำถาม "กี่อันต่อ genre" "ราคาเฉลี่ยต่อผู้ซื้อ" "ออเดอร์ที่ใหญ่ที่สุดต่อชื่อเรื่อง" ถ้าคุณเคยเขียน `GROUP BY` ใน SQL สัญชาตญาณก็เหมือนกัน เพียงแต่การสะกดต่างกัน
+
+เรายังคงใช้คอลเลกชัน `sales` จากบทเรียนก่อนหน้าต่อ
+
+## การจัดกลุ่มตามคีย์
+
+`_id` ของ stage `$group` คือคีย์การจัดกลุ่ม — ฟิลด์ (หรือค่าที่คำนวณ) ที่ใช้แบ่งเอกสารเป็นถัง ทุกฟิลด์อื่นใน stage คือ **accumulator**: expression ที่ยุบเอกสารทั้งหมดในกลุ่มให้เป็นค่าเดียว ที่นี่เรารวมจำนวนที่ขายต่อ genre และนับออเดอร์ด้วย:
+
+export const groupFlow = `flowchart LR
+  In["sales documents"] --> G["$group _id genre"]
+  G --> A["accumulators: $sum quantity, $sum 1"]
+  A --> Out["one document per genre"]`
+
+<Mermaid code={groupFlow} title="เอกสารจำนวนมากยุบลงเป็นหนึ่งเอกสารผลลัพธ์สำหรับคีย์กลุ่มที่แตกต่างกันแต่ละค่า" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $group: {
+          _id: "$genre",
+          totalCopies: { $sum: "$quantity" },
+          orders: { $sum: 1 }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $group: {
+          _id: "$genre",
+          totalCopies: { $sum: "$quantity" },
+          orders: { $sum: 1 },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$group": {
+            "_id": "$genre",
+            "totalCopies": {"$sum": "$quantity"},
+            "orders": {"$sum": 1},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$group", bson.D{
+            {"_id", "$genre"},
+            {"totalCopies", bson.D{{"$sum", "$quantity"}}},
+            {"orders", bson.D{{"$sum", 1}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$group": {
+            "_id": "$genre",
+            "totalCopies": { "$sum": "$quantity" },
+            "orders": { "$sum": 1 }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+หนึ่งเอกสารกลับมาต่อหนึ่ง genre แต่ละอันมีค่าสรุปของมัน:
+
+```json
+[
+  { "_id": "fiction", "totalCopies": 11, "orders": 4 },
+  { "_id": "science", "totalCopies": 5, "orders": 2 }
+]
+```
+
+## accumulator ที่ใช้บ่อย
+
+accumulator จำนวนหยิบมือเดียวครอบคลุมความต้องการส่วนใหญ่ ทุกตัวรับ expression ที่ประเมินกับแต่ละเอกสารในกลุ่ม:
+
+- `$sum` — บวก expression ตัวเลข หรือใช้นับด้วย `$sum: 1`
+- `$avg` — ค่าเฉลี่ยของ expression ตัวเลข
+- `$min` / `$max` — ค่าน้อยที่สุดและมากที่สุดที่พบ
+- `$push` — เก็บทุกค่าเข้า array รวมค่าซ้ำด้วย
+- `$addToSet` — เก็บค่าที่ **แตกต่างกัน** เข้า array
+
+stage `$count` เฉพาะทางก็มีอยู่สำหรับกรณีพิเศษ "แค่นับเอกสาร" ที่นี่เราทำโปรไฟล์แต่ละ genre ให้สมบูรณ์ขึ้น — ราคาเฉลี่ย ช่วงราคา และเซตของผู้ซื้อ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $group: {
+          _id: "$genre",
+          avgPrice: { $avg: "$price" },
+          cheapest: { $min: "$price" },
+          priciest: { $max: "$price" },
+          buyers: { $addToSet: "$buyer" }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $group: {
+          _id: "$genre",
+          avgPrice: { $avg: "$price" },
+          cheapest: { $min: "$price" },
+          priciest: { $max: "$price" },
+          buyers: { $addToSet: "$buyer" },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$group": {
+            "_id": "$genre",
+            "avgPrice": {"$avg": "$price"},
+            "cheapest": {"$min": "$price"},
+            "priciest": {"$max": "$price"},
+            "buyers": {"$addToSet": "$buyer"},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$group", bson.D{
+            {"_id", "$genre"},
+            {"avgPrice", bson.D{{"$avg", "$price"}}},
+            {"cheapest", bson.D{{"$min", "$price"}}},
+            {"priciest", bson.D{{"$max", "$price"}}},
+            {"buyers", bson.D{{"$addToSet", "$buyer"}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$group": {
+            "_id": "$genre",
+            "avgPrice": { "$avg": "$price" },
+            "cheapest": { "$min": "$price" },
+            "priciest": { "$max": "$price" },
+            "buyers": { "$addToSet": "$buyer" }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ตอนนี้แต่ละ genre มีโปรไฟล์ครบถ้วน และ `buyers` เก็บแต่ละชื่อไว้เพียงครั้งเดียว:
+
+```json
+[
+  { "_id": "fiction", "avgPrice": 12.5, "cheapest": 9, "priciest": 15, "buyers": ["Ada", "Linus"] },
+  { "_id": "science", "avgPrice": 20, "cheapest": 18, "priciest": 22, "buyers": ["Grace"] }
+]
+```
+
+**ใน Compass:** stage `$group` ในแท็บ **Aggregations** ให้โครงสร้าง `_id` และ accumulator เดียวกันกับคุณ การดูตัวอย่างมีประโยชน์ตรงนี้ — เปลี่ยน expression ของ `_id` แล้วเฝ้าดูจำนวนเอกสารผลลัพธ์เปลี่ยนไปเมื่อการจัดกลุ่มหยาบขึ้นหรือแยกย่อยลง
+
+## ยอดรวมทั้งหมดด้วย _id null
+
+ตั้งค่า `_id` ของกลุ่มเป็น `null` แล้วทุกเอกสารจะตกลงในกลุ่ม **เดียว** ให้ยอดรวมทั้งหมดทั่วทั้งสตรีม นี่คือวิธีที่คุณคำนวณ "รายได้รวม" หรือ "ค่าเฉลี่ยโดยรวม" โดยไม่แยกตามคีย์:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $group: {
+          _id: null,
+          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
+          totalOrders: { $sum: 1 }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $group: {
+          _id: null,
+          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
+          totalOrders: { $sum: 1 },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$group": {
+            "_id": None,
+            "totalRevenue": {"$sum": {"$multiply": ["$price", "$quantity"]}},
+            "totalOrders": {"$sum": 1},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$group", bson.D{
+            {"_id", nil},
+            {"totalRevenue", bson.D{{"$sum", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}}}},
+            {"totalOrders", bson.D{{"$sum", 1}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$group": {
+            "_id": null,
+            "totalRevenue": { "$sum": { "$multiply": ["$price", "$quantity"] } },
+            "totalOrders": { "$sum": 1 }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เอกสารสรุปเดียวแทนทั้งคอลเลกชัน:
+
+```json
+[
+  { "_id": null, "totalRevenue": 248, "totalOrders": 6 }
+]
+```
+
+## ทิปและกับดัก
+
+- หลังจาก `$group` มีแต่ฟิลด์ที่คุณสร้างขึ้นเท่านั้นที่ดำรงอยู่ ฟิลด์เอกสารต้นฉบับหายไป เว้นแต่คุณจะพามันผ่านมาด้วย accumulator อย่าง `$push` หรือ `$first`
+- `$sum: 1` คือสำนวน "นับแถวในกลุ่มนี้" ส่วน `$sum: "$quantity"` บวกค่าของฟิลด์แทน
+- `$push` เก็บค่าซ้ำและลำดับไว้ ส่วน `$addToSet` ลบค่าซ้ำและไม่รับรองลำดับ หยิบ `$addToSet` มาใช้เมื่อคุณต้องการลิสต์ที่ *แตกต่างกัน*
+- การจัดกลุ่มไม่เรียงลำดับ ถ้าคุณต้องการกลุ่มที่ใหญ่ที่สุดอยู่ก่อน ให้เพิ่ม stage `$sort` หลัง `$group`
+
+<Callout title="group ยุบ accumulator สรุป">
+ลองนึกภาพ $group เหมือนการพับสตรีมตามคีย์: หนึ่งเอกสารผลลัพธ์ต่อหนึ่งคีย์ที่แตกต่างกัน accumulator ตัดสินว่าแต่ละการพับจดจำอะไรไว้ — ผลรวม ค่าเฉลี่ย เซตของค่า ตั้ง _id เป็น null เพื่อพับทุกอย่างเป็นยอดรวมทั้งหมดอันเดียว
+</Callout>
+
+export const quizGroup = [
+  {
+    q: 'ฟิลด์ _id ของ stage $group ระบุอะไร?',
+    options: [
+      'ชื่อของคอลเลกชันผลลัพธ์',
+      'คีย์ที่ใช้จัดกลุ่มเอกสาร — หนึ่งเอกสารผลลัพธ์ต่อหนึ่งค่าที่แตกต่างกัน',
+      'ฟิลเตอร์ที่ใช้ก่อนการจัดกลุ่ม',
+      'ลำดับการเรียงของผลลัพธ์',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณนับจำนวนเอกสารในแต่ละกลุ่มอย่างไร?',
+    options: [
+      '$count: "$quantity"',
+      '$avg: 1',
+      '$sum: 1',
+      '$push: 1',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'accumulator ใดเก็บเฉพาะค่าที่แตกต่างกันเข้า array?',
+    options: ['$push', '$addToSet', '$sum', '$max'],
+    answer: 1,
+  },
+  {
+    q: 'การตั้ง _id ของ $group เป็น null มีผลอย่างไร?',
+    options: [
+      'มันถูกปฏิเสธว่าไม่ถูกต้อง',
+      'ทุกเอกสารตกลงในกลุ่มเดียว ให้ยอดรวมทั้งหมด',
+      'มันจัดกลุ่มตามฟิลด์ _id ของแต่ละเอกสาร',
+      'มันลบ _id ออกจากผลลัพธ์',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/group-and-accumulators" questions={quizGroup} />
+
+<ProgressTracker client:visible id="aggregation/group-and-accumulators" />

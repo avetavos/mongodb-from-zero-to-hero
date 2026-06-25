@@ -1,0 +1,314 @@
+---
+title: Comparison และ logical operator
+description: Filter ที่มากกว่าการจับคู่แบบตรงเป๊ะด้วย $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin รวมเงื่อนไขด้วย $and, $or, $not, $nor และทดสอบ field ด้วย $exists และ $type
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+filter แบบจับคู่ตรงเป๊ะ — field เท่ากับค่า — พาคุณไปได้แค่ระดับหนึ่ง คำถามจริง ๆ คือช่วงและเซ็ต: "ใครค้างค่าปรับมากกว่าสามรายการ?", "ใครเข้าร่วมในปี 2022 หรือ 2023?", "ระเบียนไหนไม่มี field นั้นเลย?" MongoDB ตอบคำถามเหล่านี้ด้วย **query operator** ซึ่งเป็น key พิเศษที่ขึ้นต้นด้วยเครื่องหมายดอลลาร์และอยู่ *ภายใน* ตำแหน่งค่าของ field รูปแบบเป็นแบบเดียวกันเสมอ: แทนที่จะให้ค่าธรรมดากับ field คุณให้ document เล็ก ๆ ที่ key ของมันคือ operator
+
+เรายังคงแก้ไขสมาชิกห้องสมุด `members` ของเราต่อไป แต่ละตัวอย่างแสดง filter และ document ที่มันจะส่งกลับมา
+
+## Comparison operator
+
+ตระกูล comparison เปรียบเทียบ field กับค่าหนึ่ง: `$eq` (เท่ากับ), `$ne` (ไม่เท่ากับ), `$gt` (มากกว่า), `$gte` (มากกว่าหรือเท่ากับ), `$lt` (น้อยกว่า) และ `$lte` (น้อยกว่าหรือเท่ากับ) การเขียนค่าธรรมดาก็เป็นเพียงรูปย่อของ `$eq` ตรงนี้เราขอสมาชิกทุกคนที่ค้างค่าปรับมากกว่าสองรายการ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ fines: { $gt: 2 } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: { $gt: 2 } })
+      .toArray();
+    console.log(docs);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"fines": {"$gt": 2}}))
+    print(docs)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"fines": bson.M{"$gt": 2}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "fines": { "$gt": 2 } })
+        .await?;
+    while let Some(doc) = cursor.try_next().await? {
+        println!("{:?}", doc);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะสมาชิกที่เกินเกณฑ์เท่านั้นที่ส่งกลับมา:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+]
+```
+
+คุณสามารถรวมการเปรียบเทียบสองอันบน field **เดียวกัน** ได้โดยใส่ operator ทั้งสองไว้ใน document เดียว — ตรงนี้คือสมาชิกที่เข้าร่วมในช่วงปีที่กำหนด:
+
+```js
+db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
+```
+
+## การเป็นสมาชิก: $in และ $nin
+
+`$in` จับคู่เมื่อ field เท่ากับค่า **ใดก็ได้** ในรายการ และ `$nin` จับคู่เมื่อมันเท่ากับ **ไม่มีค่าใดเลย** ในรายการ วิธีนี้สะอาดกว่าการต่อ `$or` ของความเท่ากันหลาย ๆ อันมาก ตรงนี้เราดึงสมาชิกที่เข้าร่วมในปี 2021 หรือ 2023:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ joined: { $in: [2021, 2023] } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ joined: { $in: [2021, 2023] } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"joined": {"$in": [2021, 2023]}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"joined": bson.M{"$in": bson.A{2021, 2023}}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "joined": { "$in": [2021, 2023] } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ปีที่ตรงทั้งสองจะถูกส่งกลับมาด้วยกัน:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+]
+```
+
+## การรวมเงื่อนไข: $and, $or, $not, $nor
+
+คู่ field/value หลายคู่ใน filter เดียวมีความหมายเป็น AND อยู่แล้ว ดังนั้น `$and` จึงจำเป็นเฉพาะเมื่อคุณต้องเขียน field เดียวกันซ้ำสองครั้งเท่านั้น `$or` คือตัวที่ใช้กันประจำวัน — มันรับ list ของ filter และจับคู่ถ้า **อันใดอันหนึ่ง** เป็นจริง ตรงนี้เราหาสมาชิกที่ไม่ค้างค่าปรับเลย หรือเข้าร่วมในปี 2021:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      $or: [{ fines: 0 }, { joined: 2021 }]
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      $or: [{ fines: 0 }, { joined: 2021 }]
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "$or": [{"fines": 0}, {"joined": 2021}]
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "$or": bson.A{
+            bson.M{"fines": 0},
+            bson.M{"joined": 2021},
+        },
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "$or": [
+                doc! { "fines": 0 },
+                doc! { "joined": 2021 },
+            ]
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ใครก็ตามที่ตรงกับสาขาใดสาขาหนึ่งจะปรากฏขึ้น:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d2", "name": "Margaret", "joined": 2023, "fines": 0 },
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+]
+```
+
+`$not` กลับด้านนิพจน์ operator เดียว และ `$nor` จับคู่ document ที่ **ไม่มี** สาขาใดเป็นจริงเลย — ตรงข้ามทาง logic ของ `$or` ตัวอย่างเช่น "ค้างค่าปรับเป็นจำนวนที่ไม่ใช่ศูนย์ และ ไม่ได้เข้าร่วมในปี 2021" อ่านได้อย่างเป็นธรรมชาติด้วย `$nor`:
+
+```js
+db.members.find({ $nor: [{ fines: 0 }, { joined: 2021 }] })
+```
+
+## การทดสอบ field: $exists และ $type
+
+document ใน collection เดียวกันไม่จำเป็นต้องมี field เหมือนกันทั้งหมด `$exists` ถามว่ามี field อยู่หรือไม่ไม่ว่าค่าจะเป็นอะไร และ `$type` ถามว่าค่ามี BSON type อะไร ตรงนี้เราหาสมาชิกที่ยัง *ไม่มี* field `fines` บันทึกไว้:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ fines: { $exists: false } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: { $exists: false } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"fines": {"$exists": False}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"fines": bson.M{"$exists": false}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "fines": { "$exists": false } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะ document ที่ไม่เคยมี field `fines` เลยเท่านั้นที่ส่งกลับมา:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d5", "name": "Ada", "joined": 2024 }
+]
+```
+
+หากต้องการจับคู่ตาม type แทน — เช่น ทุก document ที่ `joined` ถูกเก็บเป็นตัวเลขแทนที่จะเป็น string ที่บางคนพิมพ์ผิด — ให้ระบุชื่อ type:
+
+```js
+db.members.find({ joined: { $type: "int" } })
+```
+
+**ใน Compass:** พิมพ์ filter เหล่านี้ลงไปตรง ๆ ในแถบ filter ด้านบนของแท็บ Documents เช่น `{ fines: { $gt: 2 } }` แล้วกด **Find** Compass แปลง syntax ของ operator แบบเดียวกับที่ shell ใช้
+
+## เคล็ดลับและจุดที่พลาดง่าย
+
+- **ค่าธรรมดาคือ `$eq`** การเขียน `{ fines: 0 }` กับ `{ fines: { $eq: 0 } }` เหมือนกันทุกประการ ใช้ operator แบบชัดเจนเฉพาะเมื่อคุณต้องการการเปรียบเทียบอื่นนอกเหนือจากความเท่ากัน
+- **`$ne` และ `$nin` จับคู่ field ที่หายไปด้วย** document ที่ไม่มี field `fines` ถือว่า "ไม่เท่ากับ 5" ดังนั้นมันจึงผ่านเงื่อนไข `{ fines: { $ne: 5 } }` ถ้าคุณหมายความว่า "มี field fines และมันไม่ใช่ 5" ให้รวมกับ `$exists`
+- **operator สองตัวบน field เดียวกันอยู่ใน document เดียว** range query เช่น `{ $gte: 2022, $lte: 2023 }` เป็น value document ตัวเดียว ไม่ใช่ filter แยกสองอัน — คุณไม่สามารถใส่ key ของ field เดียวกันซ้ำที่ระดับบนสุดได้
+- **เลือก `$in` แทนกอง `$or` ของความเท่ากัน** ทั้งสองมีความหมายเหมือนกัน แต่ `$in` สั้นกว่า อ่านง่ายกว่า และช่วยให้ query planner ใช้ index ได้ตรงกว่า
+
+<Callout title="operator อยู่ในค่า, logic อยู่ที่ระดับบนสุด">
+comparison และ element operator ($gt, $in, $exists, $type) อยู่ภายในค่าของ field ส่วน logical operator ($and, $or, $not, $nor) อยู่ที่ระดับบนสุดของ filter และรับ sub-filter ทั้งก้อน การแยกความต่างนี้ให้ชัดในหัวช่วยป้องกัน query ที่ผิดรูปได้เกือบทั้งหมด
+</Callout>
+
+export const quizComparison = [
+  {
+    q: 'คุณจะหา document ที่ fines มากกว่า 2 ได้อย่างไร?',
+    options: [
+      '{ fines > 2 }',
+      '{ fines: { $gt: 2 } }',
+      '{ $gt: { fines: 2 } }',
+      '{ fines: ">2" }',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'document หนึ่งไม่มี field fines มันตรงกับ { fines: { $ne: 5 } } หรือไม่?',
+    options: [
+      'ไม่ field ที่หายไปไม่เคยตรงกับอะไรเลย',
+      'ใช่ field ที่หายไปนับว่าไม่เท่ากับ 5',
+      'เฉพาะเมื่อคุณส่ง $exists: true ด้วยเท่านั้น',
+      'มันจะเกิด error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'operator ใดจับคู่เมื่อ field เท่ากับค่าใดก็ได้ในรายการ?',
+    options: ['$or', '$all', '$in', '$exists'],
+    answer: 2,
+  },
+  {
+    q: 'logical operator อย่าง $or ควรอยู่ตรงไหนใน filter?',
+    options: [
+      'ภายในค่าของ field เหมือน comparison operator',
+      'ที่ระดับบนสุดของ filter โดยรับ list ของ sub-filter',
+      'เฉพาะภายใน projection เท่านั้น',
+      'ไม่สามารถรวมกับเงื่อนไขของ field ได้',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="querying/comparison-and-logical-operators" questions={quizComparison} />
+
+<ProgressTracker client:visible id="querying/comparison-and-logical-operators" />

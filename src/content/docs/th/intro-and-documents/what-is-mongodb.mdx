@@ -1,0 +1,128 @@
+---
+title: MongoDB คืออะไร
+description: document database เทียบกับ relational, schema ที่ยืดหยุ่น และเมื่อไร MongoDB เหมาะสมที่สุด และเมื่อไร relational database เป็นฝ่ายชนะ
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MongoDB เป็น **document database** วลีเดียวนี้บรรจุแนวคิดทั้งหมดไว้แล้ว: สิ่งที่มันเก็บคือ **document** ซึ่งเป็น object คล้าย JSON ที่ครบในตัวเอง และกลุ่มของ document ก็คือ **collection** ในขณะที่ relational database ขอให้คุณกระจายหนึ่งระเบียนเชิงตรรกะออกไปยังหลายตารางแล้วเย็บกลับมาด้วย join, MongoDB ปล่อยให้หนึ่งระเบียนเป็น document เดียวที่บรรจุทุกอย่างที่ควรอยู่ด้วยกันไว้แล้ว — รวมทั้ง object ซ้อนในและ array
+
+ผลในทางปฏิบัติคือข้อมูลใน database มักจะมีหน้าตาเหมือน object ในโปรแกรมของคุณ สมาชิกที่มีชื่อ ยอดค่าปรับ และรายการหนังสือที่ยืม คือ document เดียว ไม่ใช่ row ในตาราง `members` บวกกับ row ในตาราง `loans` ที่คุณต้อง join ทุกครั้งที่ต้องการเห็นภาพเต็ม
+
+## document แทน row
+
+ในโลก relational สมาชิกและหนังสือที่พวกเขายืมอยู่ในสองตารางที่เชื่อมกันด้วย key ใน MongoDB ข้อมูลเดียวกันนี้เป็น document เดียวที่มี array ฝังอยู่
+
+export const rowVsDocDiagram = `flowchart LR
+  subgraph RDBMS["Relational: two tables joined by a key"]
+    direction TB
+    T1["members table\n id | name | fines"]
+    T2["loans table\n id | member_id | title"]
+    T1 -->|"member_id = id"| T2
+  end
+  subgraph MONGO["MongoDB: one document"]
+    direction TB
+    D["members collection\n one document:\n name, fines, borrowed[ ... ]"]
+  end
+  RDBMS -.->|"same data, different shape"| MONGO`
+
+<Mermaid code={rowVsDocDiagram} title="ระเบียนเดียวกันในรูปของ relational row ที่ join กัน เทียบกับ MongoDB document เดียว" />
+
+นี่คือหน้าตาจริงของ document เดียวนั้น — ชื่อ ยอดคงเหลือ และหนังสือที่ยืมทั้งหมดอยู่ในที่เดียว:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Grace",
+  "fines": 0,
+  "borrowed": ["Compilers", "Algorithms"]
+}
+```
+
+## schema ที่ยืดหยุ่น
+
+collection ไม่ได้บังคับให้ทุก document มี field ชุดเดียวกัน document ของสมาชิกคนหนึ่งอาจมี `email`, อีกคนอาจไม่มี, และคนที่สามอาจเพิ่ม `phone` ที่ไม่มีใครอื่นมี MongoDB ไม่ปฏิเสธตัวที่แตกต่างนี้ สิ่งนี้เรียกว่า schema แบบ **flexible** (หรือ **dynamic**) และมันเป็นฟีเจอร์ที่คนสังเกตเห็นเป็นอันดับแรก
+
+ความยืดหยุ่นเป็นความสะดวก ไม่ใช่ข้ออ้างสำหรับความวุ่นวาย ในทางปฏิบัติคุณจงใจทำให้ document ใน collection ค่อนข้างสม่ำเสมอ และ MongoDB ยอมให้คุณเพิ่มกฎ **schema validation** เมื่อคุณต้องการให้ database บังคับรูปร่าง ประเด็นคือ schema อยู่ในมือคุณและสามารถวิวัฒน์ทีละ field โดยไม่ต้อง migration ที่เขียนทับทุกระเบียนที่มีอยู่ตั้งแต่ต้น
+
+```json
+{ "_id": "1", "name": "Ada",  "fines": 0 }
+```
+
+```json
+{ "_id": "2", "name": "Alan", "fines": 2, "email": "alan@example.org" }
+```
+
+ทั้งสองนี้เป็นสมาชิกที่ถูกต้องสมบูรณ์ใน collection เดียวกัน แม้ว่าจะมีเพียงหนึ่งที่มี `email`
+
+## เมื่อไร MongoDB เหมาะสม
+
+MongoDB มักจะเป็นทางเลือกที่สบายใจเมื่อ:
+
+- **ข้อมูลของคุณเป็นลำดับชั้นหรือหลากหลายโดยธรรมชาติ** เอกสาร, โปรไฟล์, แคตตาล็อกสินค้า, event, และเนื้อหาที่ระเบียนไม่ได้มี field ชุดเดียวกันทั้งหมด map ลงบน document ได้อย่างสะอาด
+- **คุณอ่านและเขียน object ทั้งก้อนพร้อมกัน** ถ้าแอปของคุณเกือบจะต้องการทั้งสมาชิก *และ* หนังสือที่ยืมพร้อมกันเสมอ การ embed ไว้ใน document เดียวหมายถึงการอ่านครั้งเดียวที่เร็วแทนที่จะเป็น join
+- **schema ของคุณยังเปลี่ยนแปลงอยู่** ผลิตภัณฑ์ในระยะเริ่มต้นเปลี่ยนรูปร่างตลอดเวลา schema ที่ยืดหยุ่นยอมให้คุณเพิ่ม field วันนี้โดยไม่ต้อง migration
+- **คุณต้องสเกลการเขียนแบบแนวนอน** MongoDB shard ข้ามหลายเครื่อง ซึ่งโมดูล Operations & Scaling ในภายหลังจะครอบคลุม
+
+## เมื่อไร relational database เป็นเครื่องมือที่ดีกว่า
+
+document database ไม่ใช่คำตอบที่ถูกต้องเสมอไป เลือกใช้ relational database (PostgreSQL, MySQL และพวกพ้อง) เมื่อ:
+
+- **ข้อมูลของคุณเป็น relational สูงและสม่ำเสมอ** ความสัมพันธ์ many-to-many จำนวนมากระหว่าง entity ที่สำคัญเท่า ๆ กัน คือสิ่งที่ SQL join ถูกสร้างมาเพื่อพอดี
+- **คุณต้องการ transaction หลาย row เป็นเรื่องประจำวัน** MongoDB รองรับ transaction หลาย document แต่บัญชีแยกประเภทแบบธนาคารที่เกือบทุก operation ครอบคลุมหลายระเบียน มักจะเข้ากับโมเดล relational ได้อย่างเป็นธรรมชาติมากกว่า
+- **คุณพึ่งพา ad-hoc SQL ที่ทรงพลังและระบบนิเวศรายงานที่เติบโตเต็มที่** เครื่องมือ SQL, การผสานรวม BI, และความคุ้นเคยของนักวิเคราะห์ที่สั่งสมมาหลายทศวรรษ เป็นข้อได้เปรียบจริง
+- **schema ที่เข้มงวดและบังคับตั้งแต่ต้นเป็นฟีเจอร์ที่คุณต้องการ** ไม่ใช่ข้อจำกัดที่คุณพยายามหนีออกมา
+
+สรุปอย่างตรงไปตรงมา: เลือก database ที่รูปร่างตามธรรมชาติของมันตรงกับข้อมูลและรูปแบบการเข้าถึงของคุณ MongoDB เปล่งประกายเมื่อระเบียนเป็น object ที่ครบในตัวเองที่คุณอ่านและเขียนเป็นหน่วยเดียว
+
+## เคล็ดลับและข้อควรระวัง
+
+- "flexible schema" ไม่ได้หมายความว่า "ไม่มี schema" มันหมายความว่า schema เป็นความรับผิดชอบของคุณและสามารถเปลี่ยนแปลงทีละน้อยได้ collection ที่แข็งแรงส่วนใหญ่ค่อนข้างสม่ำเสมอในทางปฏิบัติ
+- MongoDB **ไม่ใช่** key-value store และ **ไม่ใช่** JSON ที่ไม่มี schema ทิ้งไว้บนดิสก์ มัน index field, รัน query ที่ทรงพลัง, และตรวจสอบรูปร่างเมื่อคุณขอ
+- ทางเลือกนี้แทบไม่เคยเป็นแบบทั้งหมดหรือไม่เลย หลายระบบใช้ MongoDB สำหรับ workload บางอย่างและ relational database สำหรับอย่างอื่น
+
+<Callout title="นิยามในประโยคเดียว">
+MongoDB เก็บข้อมูลของคุณเป็น document — object คล้าย JSON ที่ยืดหยุ่น จัดกลุ่มอยู่ใน collection — ดังนั้น database จึงมักจะสะท้อน object ในโค้ดของคุณแทนที่จะกระจายมันออกไปในตารางที่ join กัน
+</Callout>
+
+export const quizWhat = [
+  {
+    q: 'What does MongoDB store as its basic unit of data?',
+    options: [
+      'row ในตารางที่มี column ตายตัว',
+      'document — object คล้าย JSON ที่ยืดหยุ่นใน collection',
+      'คู่ key-value เดียว',
+      'SQL view',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "flexible schema" actually mean in MongoDB?',
+    options: [
+      'ไม่มี schema เลยและอะไรก็ได้ตลอดไป',
+      'ทุก document ต้องมี field ชุดเดียวกันเป๊ะ',
+      'document ใน collection สามารถมี field ต่างกันได้ และ schema สามารถวิวัฒน์ไปตามเวลา',
+      'schema ไม่สามารถถูกบังคับได้เลย',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which workload is usually a better fit for a relational database than MongoDB?',
+    options: [
+      'ระเบียนที่ครบในตัวเองซึ่งอ่านและเขียนเป็น object ทั้งก้อน',
+      'ข้อมูลที่เป็น relational สูงและสม่ำเสมอ พร้อม join แบบ many-to-many จำนวนมาก',
+      'แคตตาล็อกที่ระเบียนมี field หลากหลายและเป็น optional',
+      'ข้อมูลที่ schema ยังเปลี่ยนแปลงอย่างรวดเร็ว',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/what-is-mongodb" questions={quizWhat} />
+
+<ProgressTracker client:visible id="intro-and-documents/what-is-mongodb" />

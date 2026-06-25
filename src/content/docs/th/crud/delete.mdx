@@ -1,0 +1,231 @@
+---
+title: การลบ document
+description: ลบ document ด้วย deleteOne และ deleteMany อ่าน deletedCount และชั่งน้ำหนักทางเลือกแบบ soft-delete
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การลบคือ operation ที่มีไวยากรณ์น้อยที่สุดแต่เดิมพันสูงที่สุด ไม่มี operator ให้เรียนรู้ — คุณยื่น filter ให้ MongoDB แล้วมันลบ document ที่ตรงกันออกไป ทักษะทั้งหมดอยู่ที่ filter นั่นคือ การลบจะแม่นยำได้เท่ากับเงื่อนไขที่คุณให้มันเท่านั้น และ filter ที่กว้างเกินไปจะลบข้อมูลที่คุณตั้งใจจะเก็บไว้ ข่าวดีคือ method เหล่านี้สะท้อนทุกสิ่งที่คุณรู้อยู่แล้ว นั่นคือ `deleteOne` ลบรายการแรกที่ตรงกัน ส่วน `deleteMany` ลบทุกรายการที่ตรงกัน
+
+เราดำเนินต่อด้วย collection `members` ทุกตัวอย่างแสดงว่า filter เลือกอะไรและ acknowledgement รายงานอะไร
+
+## การลบ document เดียว
+
+`deleteOne` ลบ document **แรก** ที่ตรงกับ filter แล้วหยุด แม้ว่าจะมีรายการอื่นตรงกันด้วยก็ตาม ราวกันตกของ method แบบเอกพจน์นั้นแหละคือเหตุผลที่คุณเอื้อมไปหามันเมื่อคุณตั้งใจจะลบระเบียนหนึ่งรายการที่เจาะจง ในที่นี้เราลบสมาชิกชื่อ Edsger:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.deleteOne({ name: "Edsger" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db.collection("members").deleteOne({ name: "Edsger" });
+    console.log(res.deletedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.delete_one({"name": "Edsger"})
+    print(res.deleted_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.DeleteOne(ctx, bson.M{"name": "Edsger"})
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.DeletedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll.delete_one(doc! { "name": "Edsger" }).await?;
+    println!("{}", res.deleted_count);
+    ```
+  </TabItem>
+</Tabs>
+
+acknowledgement รายงานว่า document ถูกลบไปกี่รายการ:
+
+```json
+{ "acknowledged": true, "deletedCount": 1 }
+```
+
+ถ้า filter ไม่ตรงกับอะไรเลย นั่นไม่ใช่ error — `deletedCount` ก็เพียงแค่เป็น `0`:
+
+```json
+{ "acknowledged": true, "deletedCount": 0 }
+```
+
+**ใน Compass:** เอาเมาส์ไปวางบน document ในแท็บ Documents แล้วคลิกไอคอนถังขยะ จากนั้นยืนยัน Compass จะลบ document รายการเดียวนั้น
+
+## การลบหลายรายการในครั้งเดียว
+
+`deleteMany` ลบ document **ทุก** รายการที่ตรงกับ filter ใน operation เดียว ในที่นี้เรากวาดล้างทุกคนที่เข้าร่วมก่อนปี 2024 — สังเกตว่า filter เป็นตัวทำงานเรื่องความแม่นยำ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.deleteMany({ joined: { $lt: 2024 } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await db
+      .collection("members")
+      .deleteMany({ joined: { $lt: 2024 } });
+    console.log(res.deletedCount);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    res = db.members.delete_many({"joined": {"$lt": 2024}})
+    print(res.deleted_count)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    res, err := coll.DeleteMany(ctx, bson.M{"joined": bson.M{"$lt": 2024}})
+    if err != nil {
+        return err
+    }
+    fmt.Println(res.DeletedCount)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let res = coll.delete_many(doc! { "joined": { "$lt": 2024 } }).await?;
+    println!("{}", res.deleted_count);
+    ```
+  </TabItem>
+</Tabs>
+
+จำนวนนับสะท้อนทุก document ที่ filter กวาดเข้ามา:
+
+```json
+{ "acknowledged": true, "deletedCount": 2 }
+```
+
+## ทางเลือกแบบ soft-delete
+
+บางครั้งการลบแบบถาวร (hard delete) เป็นตัวเลือกที่ผิด คุณอาจต้องการเส้นทางการตรวจสอบ (audit trail) ความสามารถในการ undo หรือต้องการให้รายงานเชิงประวัติแม่นยำ รูปแบบที่พบบ่อยคือ **soft delete** — แทนที่จะลบ document คุณทำเครื่องหมายมันด้วยแฟล็ก (และบ่อยครั้งด้วย timestamp) โดยใช้ update แล้วกัน document ที่ถูกทำเครื่องหมายออกจากการอ่านปกติของคุณ
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.updateOne(
+      { name: "Linus" },
+      { $set: { deleted: true, deletedAt: new Date() } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").updateOne(
+      { name: "Linus" },
+      { $set: { deleted: true, deletedAt: new Date() } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from datetime import datetime, timezone
+
+    db.members.update_one(
+        {"name": "Linus"},
+        {"$set": {"deleted": True, "deletedAt": datetime.now(timezone.utc)}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(
+        ctx,
+        bson.M{"name": "Linus"},
+        bson.M{"$set": bson.M{"deleted": true, "deletedAt": time.Now()}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use bson::DateTime;
+
+    coll.update_one(
+        doc! { "name": "Linus" },
+        doc! { "$set": { "deleted": true, "deletedAt": DateTime::now() } },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+document ยังคงอยู่ตรงนั้น เพียงแค่ถูกทำเครื่องหมายไว้ — การอ่านของคุณกรองมันออก และคุณสามารถกู้คืนมันได้ภายหลังโดยการ unset แฟล็กนั้น:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Linus",
+  "joined": 2023,
+  "deleted": true,
+  "deletedAt": "2026-06-25T10:15:00.000Z"
+}
+```
+
+## เคล็ดลับและจุดที่ต้องระวัง
+
+- `deleteMany` ด้วย filter ที่ว่างเปล่า — ตรงกับทุก document — **ล้าง collection ทั้งก้อน** มันคือการเรียก CRUD ที่อันตรายที่สุดเพียงรายการเดียว พิมพ์ filter ก่อนแล้วค่อยพิมพ์ method ทีหลัง เพื่อให้คุณไม่มีวันรันมันแบบเปล่า ๆ โดยอุบัติเหตุ
+- การลบเป็นแบบถาวร ไม่เหมือนการ update ตรงที่ไม่มีสำเนา "ก่อนหน้า" หลงเหลือไว้ เว้นแต่คุณจะจัดเตรียมไว้ เมื่อไม่แน่ใจ ให้รัน filter เดียวกันผ่าน `find` ก่อน เพื่อดูให้ชัดว่าคุณกำลังจะลบอะไร
+- `deleteOne` คือราวกันตกของคุณสำหรับ "ลบระเบียนหนึ่งรายการที่เจาะจง" แม้ filter ของคุณจะลวก ๆ กว่าที่คิด มันก็ลบได้เพียง document เดียวเท่านั้น
+- soft delete แลกความเรียบง่ายเพื่อความปลอดภัย ทุก query ปกติต้องจำที่จะกัน document ที่ถูกทำเครื่องหมายออก แต่คุณได้ undo และเส้นทางการตรวจสอบมาแทน
+
+<Callout title="ดูก่อนที่จะลบ">
+รัน filter การลบของคุณผ่าน find ก่อน ถ้า document ที่มันคืนกลับมาคือรายการที่คุณตั้งใจจะลบเป๊ะ ๆ ก็สลับ find เป็น deleteMany ถ้าไม่ใช่ ก็แก้ filter — ไม่มี undo สำหรับการลบแบบถาวร
+</Callout>
+
+export const quizDelete = [
+  {
+    q: 'deleteMany ด้วย filter ที่ว่างเปล่าทำอะไร?',
+    options: [
+      'ไม่ทำอะไรเลย เพราะ filter ที่ว่างเปล่าไม่ตรงกับอะไรเลย',
+      'ลบ document แบบสุ่มหนึ่งรายการ',
+      'ลบทุก document ใน collection',
+      'โยน error ขึ้นมาเพื่อปกป้องคุณ',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'filter ของ deleteOne ไม่ตรงกับ document ใดเลย มีอะไรถูกรายงาน?',
+    options: [
+      'มี error ถูกโยนขึ้นมา',
+      'deletedCount เป็น 0 และไม่มี error เกิดขึ้น',
+      'document แรกถูกลบไปอยู่ดี',
+      'deletedCount เป็น null',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'แก่นความคิดของ soft delete คืออะไร?',
+    options: [
+      'ลบเฉพาะ field เท่านั้น ไม่เคยลบ document ทั้งก้อน',
+      'ทำเครื่องหมาย document ว่าถูกลบด้วย update และกันมันออกจากการอ่าน',
+      'ลบ document ช้าลงเพื่อลดภาระ',
+      'ย้าย document ไปยังฐานข้อมูลอื่น',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="crud/delete" questions={quizDelete} />
+
+<ProgressTracker client:visible id="crud/delete" />

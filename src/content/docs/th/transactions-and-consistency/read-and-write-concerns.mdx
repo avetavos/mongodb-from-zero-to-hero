@@ -1,0 +1,217 @@
+---
+title: Read and write concerns
+description: ปรับ durability ด้วย write concern (w, j, wtimeout) และ visibility ด้วย read concern (local, majority, linearizable) พร้อม read preference และการแลกเปลี่ยนเรื่อง latency
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+replica set เก็บสำเนาข้อมูลของคุณไว้หลายชุด: **primary** หนึ่งตัวที่รับการเขียนทั้งหมด และ **secondary** หนึ่งตัวหรือมากกว่าที่คัดลอกการเขียนเหล่านั้นมา ความซ้ำซ้อนนี้คือสิ่งที่ทำให้ปุ่ม durability และ visibility มีความหมาย เมื่อคุณเขียน คุณตัดสินใจได้ว่าต้องมีสำเนากี่ชุดที่ยืนยันการเขียนก่อนที่คุณจะถือว่ามันเสร็จ เมื่อคุณอ่าน คุณตัดสินใจได้ว่าข้อมูลที่คุณได้กลับมาต้อง commit แล้วและสดแค่ไหน การตั้งค่าสองอย่างนี้คือ **write concern** และ **read concern** และมันช่วยให้คุณเลื่อนระหว่างเร็ว-แต่-อ่อนกับช้า-แต่-แข็งแกร่งในทุกการดำเนินการ
+
+## write concern: durable แค่ไหน ยืนยันแค่ไหน
+
+write concern มีสามส่วน ค่า `w` บอกว่าสมาชิกกี่ตัวต้องตอบรับการเขียน: `w: 1` หมายถึงเฉพาะ primary ส่วน `w: "majority"` หมายถึงสมาชิกส่วนใหญ่ของชุดได้จัดเก็บมันแล้ว — ระดับที่การเขียนรอดพ้นจากการสูญเสียสมาชิกตัวเดียวใด ๆ ค่า `j` เมื่อเป็น true กำหนดให้การเขียนต้องถูก flush ลง on-disk **journal** ก่อนจะได้รับการตอบรับ เพื่อให้มันรอดจากการ crash ไม่ใช่แค่การ restart โปรเซส และ `wtimeout` จำกัดว่า driver จะรอการตอบรับเหล่านั้นนานแค่ไหนก่อนจะยอมแพ้พร้อม error
+
+ตรงนี้เรา insert สมาชิกคนหนึ่งและเรียกร้องให้สมาชิกส่วนใหญ่ของชุดยืนยันมัน แบบ journal แล้ว ภายในห้าวินาที:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.insertOne(
+      { name: "Grace", fines: 0 },
+      { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").insertOne(
+      { name: "Grace", fines: 0 },
+      { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import WriteConcern
+
+    db.members.with_options(
+        write_concern=WriteConcern(w="majority", j=True, wtimeout=5000)
+    ).insert_one({"name": "Grace", "fines": 0})
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    wc := writeconcern.Majority()
+    coll := client.Database("library").Collection(
+        "members", options.Collection().SetWriteConcern(wc),
+    )
+    _, err := coll.InsertOne(ctx, bson.M{"name": "Grace", "fines": 0})
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let wc = WriteConcern::builder()
+        .w(Acknowledgment::Majority)
+        .journal(true)
+        .build();
+    let coll = client
+        .database("library")
+        .collection::<Document>("members")
+        .clone_with_options(CollectionOptions::builder().write_concern(wc).build());
+    coll.insert_one(doc! { "name": "Grace", "fines": 0 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+การตอบรับจะกลับมาก็ต่อเมื่อส่วนใหญ่ได้จัดเก็บการเขียนแล้วเท่านั้น:
+
+```json
+{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1e7" }
+```
+
+## read concern และ read preference: สดแค่ไหน จากที่ไหน
+
+**read concern** ควบคุมว่าการอ่านอาจคืนข้อมูลเวอร์ชันใด ด้วย `local` คุณได้สิ่งที่สมาชิกที่คุณ query มีอยู่ตอนนี้ แม้ว่าข้อมูลนั้นจะถูก roll back ได้ในภายหลัง ด้วย `majority` คุณเห็นเฉพาะข้อมูลที่สมาชิกส่วนใหญ่ของชุดได้จัดเก็บแล้ว ดังนั้นสิ่งที่คุณอ่านจะไม่ถูกยกเลิก ด้วย `linearizable` การอ่านบน primary จะสะท้อนทุกการเขียนที่ได้รับการตอบรับก่อนที่มันจะเริ่ม — ตัวเลือกที่แข็งแกร่งที่สุดและช้าที่สุด การตั้งค่าแยกต่างหากอย่าง **read preference** เลือกว่า *สมาชิกตัวไหน* เป็นผู้ตอบ: `primary` ให้ข้อมูลที่สดที่สุดเสมอ ส่วน `secondary` กระจายภาระการอ่านไปยังสำเนาต่าง ๆ โดยแลกกับการที่อาจตามหลังอยู่เล็กน้อย
+
+ตรงนี้เราอ่านด้วย majority read concern จาก primary โดยขอข้อมูลที่เรารู้ว่าไม่สามารถถูก roll back ได้:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ fines: 0 })
+      .readConcern("majority")
+      .readPref("primary")
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: 0 }, {
+        readConcern: { level: "majority" },
+        readPreference: "primary"
+      })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import ReadPreference
+    from pymongo.read_concern import ReadConcern
+
+    docs = list(
+        db.members.with_options(
+            read_concern=ReadConcern("majority"),
+            read_preference=ReadPreference.PRIMARY,
+        ).find({"fines": 0})
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    coll := client.Database("library").Collection(
+        "members",
+        options.Collection().
+            SetReadConcern(readconcern.Majority()).
+            SetReadPreference(readpref.Primary()),
+    )
+    cur, err := coll.Find(ctx, bson.M{"fines": 0})
+    if err != nil {
+        return err
+    }
+    defer cur.Close(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let coll = client
+        .database("library")
+        .collection::<Document>("members")
+        .clone_with_options(
+            CollectionOptions::builder()
+                .read_concern(ReadConcern::majority())
+                .selection_criteria(SelectionCriteria::ReadPreference(ReadPreference::Primary))
+                .build(),
+        );
+    let mut cursor = coll.find(doc! { "fines": 0 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## การแลกเปลี่ยน อธิบายให้เห็นภาพ
+
+ทุกก้าวไปสู่การรับประกันที่แข็งแกร่งกว่ามีต้นทุนเป็น latency การเขียน `w: 1` คืนค่าทันทีที่ primary มีมัน ส่วนการเขียน `w: "majority"` รอให้ข้อมูลเดินทางไปและถูกจัดเก็บโดยสมาชิกตัวอื่นก่อน ผังด้านล่างแสดงว่าเวลาที่เพิ่มขึ้นนั้นไปอยู่ที่ไหน:
+
+export const ackFlow = `flowchart TD
+  C["Client sends a write"] --> P["Primary stores it"]
+  P --> R1["Secondary one replicates"]
+  P --> R2["Secondary two replicates"]
+  R1 --> M{"Majority has stored it?"}
+  R2 --> M
+  P --> M
+  M -->|"Yes"| ACK["Acknowledge to client — write is durable"]`
+
+<Mermaid code={ackFlow} title="ด้วย majority write concern ไคลเอนต์จะรอจนกว่าสมาชิกส่วนใหญ่ได้จัดเก็บการเขียนแล้วก่อนที่มันจะได้รับการตอบรับ" />
+
+**ใน Compass:** ไดอะล็อกการตั้งค่า connection ให้คุณตั้ง read preference เริ่มต้นสำหรับทั้ง session ดังนั้นการอ่านที่คุณรันในแท็บ Documents สามารถถูกส่งไปยัง secondary ได้โดยไม่ต้องเปลี่ยนแต่ละ query
+
+## เคล็ดลับและข้อควรระวัง
+
+- `w: "majority"` คือจุดที่เหมาะที่สุดสำหรับ durability ที่รอดจาก failover ส่วน `w: 1` เร็วกว่าแต่การเขียนที่ยังไม่ได้ replicate อาจสูญหายได้ถ้า primary ล้มเหลวทันทีหลังจากตอบรับมัน
+- `wtimeout` จำกัดแค่ *การรอ* เท่านั้น ถ้ามันทำงาน การเขียนอาจยังถูกนำไปใช้บน primary แล้ว — เพียงแค่มันยังไม่ได้รับการยืนยันจากสมาชิกมากพอภายในเวลา ดังนั้นให้ถือว่า timeout เป็นความไม่แน่นอน ไม่ใช่ความล้มเหลวที่สะอาด
+- การอ่านจาก secondary ด้วย read preference `secondary` สามารถคืนข้อมูลที่เก่าไปเล็กน้อยได้ เพราะ secondary ตามหลัง primary ให้จับคู่มันกับ read concern ที่ตรงกับความสดที่แอปพลิเคชันของคุณต้องการจริง ๆ
+
+<Callout title="เลือกการรับประกันที่อ่อนที่สุดแต่ยังถูกต้อง">
+concern ที่แข็งแกร่งกว่ามีต้นทุนเป็น latency ดังนั้นอย่าคว้า linearizable read หรือ journalled majority write ไปทุกที่โดยอัตโนมัติ เลือกการตั้งค่าที่เบาที่สุดที่ยังตรงตามความถูกต้องที่ use case ของคุณเรียกร้อง และใช้ latency เฉพาะที่ที่มันซื้ออะไรให้คุณได้
+</Callout>
+
+export const quizConcerns = [
+  {
+    q: 'write concern เป็น w: "majority" รับประกันอะไร?',
+    options: [
+      'เฉพาะ primary เท่านั้นที่มีการเขียน',
+      'สมาชิกส่วนใหญ่ของชุดได้จัดเก็บการเขียน ดังนั้นมันรอดจากการที่สมาชิกหนึ่งตัวล้มเหลว',
+      'สมาชิกทุกตัวมีการเขียนก่อนตอบรับ',
+      'การเขียนข้าม journal ไปเพื่อความเร็ว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ตัวเลือก j ใน write concern กำหนดอะไร?',
+    options: [
+      'ว่าการเขียนถูกส่งไปยัง secondary ก่อน',
+      'ว่าการเขียนถูก flush ลง on-disk journal ก่อนการตอบรับ',
+      'ว่ามีการทำ join บนข้อมูล',
+      'ว่าการเขียนถูกปฏิเสธถ้ามี conflict อยู่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'read concern ตัวใดคืนเฉพาะข้อมูลที่ส่วนใหญ่ได้จัดเก็บแล้ว?',
+    options: ['local', 'majority', 'available', 'primary'],
+    answer: 1,
+  },
+  {
+    q: 'read preference ควบคุมอะไร?',
+    options: [
+      'สมาชิกกี่ตัวตอบรับการเขียน',
+      'สมาชิกตัวไหนของชุดเป็นผู้ตอบการอ่าน',
+      'ว่ามีการใช้ journal หรือไม่',
+      'ลำดับของฟิลด์ที่ส่งคืน',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/read-and-write-concerns" questions={quizConcerns} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/read-and-write-concerns" />

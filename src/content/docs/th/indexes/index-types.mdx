@@ -1,0 +1,373 @@
+---
+title: ประเภทของ index
+description: เหนือกว่า index ธรรมดา — multikey สำหรับ array, text สำหรับการค้นหา, TTL สำหรับการหมดอายุอัตโนมัติ, partial และ sparse สำหรับชุดย่อย และ unique สำหรับบังคับให้ค่ามีหนึ่งเดียวไม่ซ้ำใคร
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+index แบบจากน้อยไปมากธรรมดาครอบคลุมความต้องการส่วนใหญ่ แต่ MongoDB มาพร้อม index ประเภทเฉพาะทางหลายชนิดสำหรับกรณีที่ index ธรรมดาจัดการได้ไม่สง่างาม: ฟิลด์ที่ถือ array, การค้นหาแบบ full-text, เอกสารที่ควรหมดอายุด้วยตัวมันเอง, index ที่ครอบเพียงชิ้นหนึ่งของ collection และ index ที่บังคับความไม่ซ้ำ แต่ละชนิดเป็นการปรับเปลี่ยนเล็กน้อยจาก `createIndex` และการรู้ว่ามันมีอยู่ช่วยให้คุณรอดพ้นจากการแก้ขัดที่เก้งก้าง เราจะไล่ไปทีละชนิด โดยยังคงใช้ collection `members` ของห้องสมุดของเรา
+
+## Multikey: การทำ index ให้ array
+
+เมื่อคุณทำ index บนฟิลด์ที่ถือ array MongoDB จะทำให้มันเป็น **multikey** index โดยอัตโนมัติ — มันทำ index ทุกสมาชิกของ array แยกต่างหาก ดังนั้น query สำหรับสมาชิกตัวใดตัวหนึ่งจึง seek ตรงไปยังเอกสารที่ตรงกัน คุณไม่ได้ขอ multikey มันเกิดขึ้นเพราะค่าของฟิลด์เป็น array ทำ index บน array `borrowed` ของชื่อหนังสือ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ borrowed: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ borrowed: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("borrowed", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "borrowed", Value: 1}}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "borrowed": 1 }).build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+query อย่างการหาทุกคนที่ยืม `"Compilers"` ตอนนี้ seek แทนที่จะสแกน แม้ค่าจะอยู่ภายใน array
+
+## Text: การค้นหาคำ
+
+**text index** ตัดคำ (tokenize) ฟิลด์ string เพื่อให้คุณค้นหาคำด้วยตัวดำเนินการ `$text` แทนการจับคู่ string แบบเป๊ะ ทำ index ฟิลด์ `notes` ของสมาชิกแต่ละคนเป็น text แล้ว query มัน:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ notes: "text" })
+    db.members.find({ $text: { $search: "overdue reminder" } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ notes: "text" });
+    await db.collection("members")
+      .find({ $text: { $search: "overdue reminder" } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("notes", "text")])
+    list(db.members.find({"$text": {"$search": "overdue reminder"}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "notes", Value: "text"}}},
+    )
+    if err != nil {
+        return err
+    }
+    cur, err := coll.Find(ctx, bson.M{"$text": bson.M{"$search": "overdue reminder"}})
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "notes": "text" }).build(),
+    )
+    .await?;
+    let cur = coll.find(doc! { "$text": { "$search": "overdue reminder" } }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+การค้นหาจับคู่คำใดคำหนึ่งและจัดอันดับผลลัพธ์ตามความเกี่ยวข้อง collection หนึ่งถือ text index ได้เพียงอันเดียว แม้มันจะครอบคลุมฟิลด์ string หลายฟิลด์ก็ตาม
+
+## TTL: เอกสารที่หมดอายุ
+
+**TTL** (time to live) index ลบเอกสารอัตโนมัติเมื่อฟิลด์วันที่เก่ากว่าจำนวนวินาทีที่กำหนด มันถูกสร้างโดยการทำ index บนฟิลด์วันที่ด้วยตัวเลือก `expireAfterSeconds` ตรงนี้ ระเบียน session ของสมาชิกหมดอายุหนึ่งชั่วโมงหลังจาก timestamp `createdAt` ของมัน:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("sessions").createIndex(
+      { createdAt: 1 },
+      { expireAfterSeconds: 3600 }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.sessions.create_index([("createdAt", 1)], expireAfterSeconds=3600)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys:    bson.D{{Key: "createdAt", Value: 1}},
+            Options: options.Index().SetExpireAfterSeconds(3600),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "createdAt": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(3600))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+งานเบื้องหลังกวาดและลบเอกสารที่หมดอายุออก การกวาดทำงานราวหนึ่งครั้งต่อนาที ดังนั้นการลบจึงฉับไวแต่ไม่ทันที
+
+## Partial: การทำ index ชุดย่อย
+
+**partial** index ครอบเฉพาะเอกสารที่ตรงกับนิพจน์ตัวกรอง ซึ่งทำให้ index เล็กเมื่อคุณ query เพียงชิ้นหนึ่งของ collection ทำ index เฉพาะสมาชิกที่ค้าง fines จริง โดยแนบ `partialFilterExpression`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex(
+      { fines: 1 },
+      { partialFilterExpression: { fines: { $gt: 0 } } }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex(
+      { fines: 1 },
+      { partialFilterExpression: { fines: { $gt: 0 } } }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index(
+        [("fines", 1)],
+        partialFilterExpression={"fines": {"$gt": 0}},
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys: bson.D{{Key: "fines", Value: 1}},
+            Options: options.Index().SetPartialFilterExpression(
+                bson.M{"fines": bson.M{"$gt": 0}},
+            ),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "fines": 1 })
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(doc! { "fines": { "$gt": 0 } })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+สมาชิกที่มี fines เป็นศูนย์ไม่เคยเข้าสู่ index ดังนั้นมันจึงเพรียวบางและให้บริการ query "ใครค้างเงิน" โดยไม่ต้องทำ index ทุกคน
+
+## Unique และ sparse
+
+**unique** index ปฏิเสธทุก insert หรือ update ที่จะทำให้ค่าที่ทำ index ซ้ำกัน — เป็นวิธีที่คุณรับประกัน เช่น ว่าไม่มีสมาชิกสองคนใช้ `cardNumber` ร่วมกัน:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ cardNumber: 1 }, { unique: true })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ cardNumber: 1 }, { unique: true });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("cardNumber", 1)], unique=True)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
+            Options: options.Index().SetUnique(true),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "cardNumber": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**sparse** index ก้าวไปอีกขั้นด้วยการข้ามเอกสารที่ขาดฟิลด์ที่ทำ index ไปเลย แทนที่จะทำ index มันด้วยค่า null การจับคู่ sparse กับ unique ช่วยให้เอกสารจำนวนมากละ `cardNumber` ได้ ขณะที่ยังคงห้ามค่าซ้ำในกลุ่มที่มีมัน:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ cardNumber: 1 }, { unique: true, sparse: true })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex(
+      { cardNumber: 1 },
+      { unique: true, sparse: true }
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("cardNumber", 1)], unique=True, sparse=True)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
+            Options: options.Index().SetUnique(true).SetSparse(true),
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "cardNumber": 1 })
+            .options(
+                IndexOptions::builder().unique(true).sparse(true).build(),
+            )
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน Compass:** ไดอะล็อก **Create Index** ในแท็บ **Indexes** เปิดเผยสิ่งเหล่านี้เป็นตัวเลือก — คุณติ๊ก **Unique** ตั้งค่า **TTL** หรือให้ **Partial Filter Expression** ได้โดยไม่ต้องออกจาก GUI
+
+## เคล็ดลับและจุดพลาด
+
+- multikey index มีข้อจำกัด: compound index รวมฟิลด์ array ได้มากที่สุดหนึ่งฟิลด์ เพราะการทำ index สอง array พร้อมกันจะคูณกันออกมาเป็นรายการ index ที่ระเบิดมหาศาล
+- การลบของ TTL จับเวลาแบบโดยประมาณ การกวาดเบื้องหลังทำงานราวหนึ่งครั้งต่อนาที ดังนั้นเอกสารที่หมดอายุอาจค้างอยู่ได้นานถึงหนึ่งนาทีเลยกำหนดของมันก่อนถูกลบ
+- partial index ให้บริการ query ได้ก็ต่อเมื่อ query นั้นรับประกันว่าตกอยู่ภายในตัวกรองของ index query ที่อาจตรงกับเอกสารที่ถูกยกเว้นใช้ partial index ไม่ได้ แม้กับส่วนที่ทับซ้อนกันก็ตาม
+- unique index นับฟิลด์ที่หายไปว่าเป็นค่า `null` ดังนั้นหากไม่มี `sparse` มันยอมให้มีเพียงเอกสารเดียวที่ฟิลด์หายไป เพิ่ม `sparse` เมื่อเอกสารจำนวนมากจะขาดฟิลด์นั้น
+
+<Callout title="เลือก index ที่เข้ากับรูปทรงของข้อมูล">
+query ส่วนใหญ่ต้องการ index ธรรมดา แต่ array ต้องการ multikey, คำต้องการ text, ข้อมูลที่หมดอายุต้องการ TTL, ชุดย่อยที่ถูก query ต้องการ partial, ค่าที่มีหนึ่งเดียวไม่ซ้ำใครต้องการ unique และฟิลด์ที่เป็นทางเลือกต้องการ sparse จับคู่ประเภทให้เข้ากับงานแล้ว index จะยังคงเล็กและเร็ว
+</Callout>
+
+export const quizTypes = [
+  {
+    q: 'เมื่อใดที่ MongoDB ทำให้ index เป็น multikey?',
+    options: [
+      'เมื่อคุณส่งตัวเลือก multikey',
+      'อัตโนมัติ เมื่อฟิลด์ที่ทำ index ถือค่าที่เป็น array',
+      'เฉพาะสำหรับ text index',
+      'เมื่อ collection มี index มากกว่าหนึ่งอัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'TTL index ทำอะไร?',
+    options: [
+      'แคชผลลัพธ์ query ไว้เป็นเวลาที่กำหนด',
+      'ลบเอกสารอัตโนมัติเมื่อฟิลด์วันที่ผ่านอายุที่ตั้งค่าไว้',
+      'จำกัดว่า query รันได้นานแค่ไหน',
+      'บีบอัดเอกสารเก่าเพื่อประหยัดพื้นที่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมจึงรวม unique index กับ sparse?',
+    options: [
+      'เพื่อให้ index สร้างได้เร็วขึ้น',
+      'เพื่อให้เอกสารจำนวนมากละฟิลด์ได้ ขณะที่ยังคงห้ามค่าซ้ำในกลุ่มที่มีมัน',
+      'เพื่อทำ index ฟิลด์ array สองฟิลด์พร้อมกัน',
+      'เพื่อเปิดใช้การค้นหา full-text บนฟิลด์',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/index-types" questions={quizTypes} />
+
+<ProgressTracker client:visible id="indexes/index-types" />

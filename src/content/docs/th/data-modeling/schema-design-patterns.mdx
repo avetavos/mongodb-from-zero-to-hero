@@ -1,0 +1,133 @@
+---
+title: Schema design patterns
+description: สี่ MongoDB modeling pattern ที่นำกลับมาใช้ซ้ำได้ — Subset, Computed, Bucket และ Extended Reference — พร้อมตัวอย่างสั้น ๆ และปัญหาที่แต่ละอันแก้
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+เมื่อคุณคล่องในการเลือกระหว่าง embedding กับ referencing แล้ว คุณจะเริ่มพบปัญหาในการ modeling เดิม ๆ ซ้ำแล้วซ้ำเล่า: document ที่พาข้อมูลมามากกว่าที่หน้าจอใดหน้าจอหนึ่งต้องการ ค่าที่แพงในการคำนวณใหม่ในทุกการอ่าน array ที่อยากโตไปตลอดกาล reference ที่บังคับให้ต้องค้นหาเพียงเพื่อแสดง field เพิ่มอันเดียว ชุมชน MongoDB ตั้งชื่อให้กับวิธีแก้ที่เกิดซ้ำ ๆ เหล่านี้ว่า **schema design patterns** มันไม่ใช่ฟีเจอร์ที่คุณเปิดใช้งาน — แต่เป็นรูปร่างที่คุณตั้งใจมอบให้กับ document ของคุณ บทเรียนนี้ครอบคลุมสี่อันที่มีประโยชน์ที่สุด: Subset, Computed, Bucket และ Extended Reference
+
+## Subset pattern
+
+**ปัญหา:** document embed array ขนาดใหญ่ แต่การอ่านส่วนใหญ่ต้องการแค่ element ไม่กี่ตัวแรก การโหลดทั้งก้อนเปลืองหน่วยความจำและแบนด์วิดท์ **วิธีแก้:** เก็บ *subset* — element ไม่กี่ตัวที่คุณแสดงจริง ๆ — ไว้ใน document หลัก แล้วผลักรายการเต็มไปยัง collection แยกต่างหาก สินค้าตัวหนึ่งเก็บรีวิวล่าสุดของมันไว้ inline:
+
+```json
+{
+  "_id": "BK-204",
+  "title": "Distributed Systems",
+  "recentReviews": [
+    { "user": "Grace", "stars": 5, "text": "Indispensable." },
+    { "user": "Linus", "stars": 4, "text": "Dense but worth it." }
+  ],
+  "reviewCount": 1183
+}
+```
+
+**ใช้มันเมื่อ** working set เป็นชิ้นเล็ก ๆ ของ collection ลูกขนาดใหญ่ และคุณต้องการให้การอ่านที่ใช้ทั่วไปยังคงเร็วในขณะที่ข้อมูลฉบับเต็มยังพร้อมใช้เมื่อต้องการ
+
+## Computed pattern
+
+**ปัญหา:** ค่าหนึ่งได้มาจาก source document หลายตัว และถูกอ่านบ่อยกว่าที่ source เปลี่ยนมาก — การคำนวณมันใหม่ในทุกการอ่านนั้นสิ้นเปลือง **วิธีแก้:** คำนวณมันครั้งเดียวตอนเขียนแล้วเก็บผลลัพธ์ไว้ คำสั่งซื้อรวมยอด total ของตัวเองแทนที่จะ re-sum รายการในทุกการอ่าน:
+
+```json
+{
+  "_id": "order_5001",
+  "itemCount": 3,
+  "subtotal": 79.0,
+  "tax": 6.32,
+  "total": 85.32
+}
+```
+
+**ใช้มันเมื่อ** การอ่านมากกว่าการเขียนอย่างมหาศาลและการคำนวณไม่ใช่เรื่องเล็กน้อย คุณแลกงานเพิ่มเล็กน้อยตอนเขียน — และความรับผิดชอบในการทำให้ field ที่คำนวณนั้นถูกต้องอยู่เสมอ — กับการอ่านที่ถูกและทันที
+
+## Bucket pattern
+
+**ปัญหา:** คุณมีสตรีมของเรคคอร์ดเล็ก ๆ จำนวนมาก (sensor reading, log line, price tick) และการเก็บหนึ่ง document ต่อหนึ่ง reading สร้าง document เล็ก ๆ นับล้าน — สิ้นเปลืองทั้ง overhead และขนาด index **วิธีแก้:** *bucket* reading หลายตัวเข้าไว้ใน document เดียวที่จัดกลุ่มตามช่วงเวลา เช่น หนึ่งชั่วโมง หนึ่ง bucket เก็บการวัดหนึ่งชั่วโมง:
+
+```json
+{
+  "_id": "sensor_9:2026-03-14T09",
+  "sensorId": "sensor_9",
+  "hour": "2026-03-14T09:00:00Z",
+  "count": 60,
+  "readings": [
+    { "t": "09:00:01Z", "celsius": 21.4 },
+    { "t": "09:01:01Z", "celsius": 21.5 }
+  ]
+}
+```
+
+**ใช้มันเมื่อ** คุณรับข้อมูล time-series หรือ streaming การ bucket จำกัดการเติบโตของแต่ละ document ไว้ที่ช่วงเวลาที่รู้แน่ ดังนั้นคุณจึงได้ประโยชน์ด้านการอ่านของ embedding โดยไม่ติดกับดัก unbounded-array จากบทเรียนก่อนหน้า
+
+## Extended Reference pattern
+
+**ปัญหา:** คุณ reference อีก document หนึ่งแต่ต้องการ field ของมันหนึ่งหรือสองอันเสมอเมื่อ render parent — บังคับให้ต้องค้นหาเพียงเพื่อแสดงชื่อ **วิธีแก้:** คัดลอก field เพียงไม่กี่อันนั้นไว้ข้าง ๆ reference เป็นการ *extend* มัน คำสั่งซื้อเก็บ id ของลูกค้า *และ* field ลูกค้าไม่กี่อันที่มันแสดงเสมอ:
+
+```json
+{
+  "_id": "order_5001",
+  "customer": { "id": "cust_77", "name": "Grace Hopper", "city": "Cambridge" },
+  "status": "shipped"
+}
+```
+
+**ใช้มันเมื่อ** field ที่ถูก reference ถูกอ่านตลอดเวลาแต่เปลี่ยนแปลงไม่บ่อย คุณหลีกเลี่ยงการค้นหาในทุกการอ่าน โดยแลกกับการ refresh field ที่คัดลอกมาเมื่อมันเปลี่ยน — เป็นการแลกที่คุ้มค่าสำหรับข้อมูลที่นิ่งอย่างชื่อหรือเมือง
+
+## เลือก pattern ตามปัญหา
+
+แต่ละ pattern ตอบความเจ็บปวดเฉพาะอย่าง จับคู่อาการที่คุณมีกับ pattern ที่รักษามัน:
+
+export const patternMapDiagram = `flowchart LR
+  P1["Large array, only top few read"] --> S["Subset pattern"]
+  P2["Expensive value, read often"] --> C["Computed pattern"]
+  P3["High-volume stream of tiny records"] --> B["Bucket pattern"]
+  P4["Reference needs one or two extra fields"] --> E["Extended Reference pattern"]`
+
+<Mermaid code={patternMapDiagram} title="แต่ละ design pattern จับคู่กับปัญหาในการ modeling ที่เกิดซ้ำเฉพาะอย่าง" />
+
+pattern เหล่านี้ผสมกันได้อย่างอิสระ แอปพลิเคชัน time-series อาจ bucket reading ของมัน เก็บค่าเฉลี่ยรายชั่วโมงที่คำนวณไว้บนแต่ละ bucket และเก็บ extended reference ไปยังชื่อของ sensor — สาม pattern ใน document เดียว แต่ละอันทำหน้าที่ของตัวเอง
+
+## เคล็ดลับและข้อควรระวัง
+
+- pattern เป็นข้อแลกเปลี่ยน ไม่ใช่ของฟรี Subset และ Extended Reference ต่างก็นำสำเนาที่คุณต้องคอยทำให้เป็นปัจจุบันเข้ามา ส่วน Computed เพิ่มงานตอนเขียน และ Bucket เพิ่ม logic ในการจัดกลุ่มเล็กน้อย
+- Computed และ Extended Reference pattern ต่างก็ denormalize — มันเก็บข้อมูลที่ได้มาหรือคัดลอกมา นั่นไม่เป็นไรใน MongoDB ตราบใดที่คุณมีแผนชัดเจนในการ refresh มัน
+- Bucket pattern คือคำตอบมาตรฐานสำหรับข้อมูล time-series และมันแก้ปัญหา unbounded-array โดยตรงด้วยการจำกัดการเติบโตต่อช่วงเวลา
+- อย่าใช้ pattern แบบเก็งกำไร หยิบมันมาใช้เมื่อคุณสามารถระบุปัญหาเฉพาะที่มันแก้ใน workload ของคุณได้
+
+<Callout title="Pattern คือข้อแลกเปลี่ยนที่มีชื่อ">
+แต่ละ pattern แลกบางอย่าง — สำเนาที่ต้องดูแล งานเล็กน้อยตอนเขียน — เพื่อการอ่านที่เร็วหรือง่ายกว่า เรียนรู้ปัญหาที่แต่ละอันแก้ เพื่อที่เมื่อคุณพบอาการ คุณจะรู้วิธีรักษาอยู่แล้ว ใช้ pattern เพราะคุณมีปัญหาของมัน ไม่ใช่เพียงเพราะมันมีอยู่
+</Callout>
+
+export const quizPatterns = [
+  {
+    q: 'pattern ใดเก็บเฉพาะ element ไม่กี่อันที่ถูกอ่านบ่อยไว้ใน document หลัก และเก็บรายการเต็มไว้ที่อื่น?',
+    options: ['Computed', 'Subset', 'Bucket', 'Extended Reference'],
+    answer: 1,
+  },
+  {
+    q: 'คุณเก็บ total ของคำสั่งซื้อแทนที่จะ re-sum รายการในทุกการอ่าน นั่นคือ pattern ใด?',
+    options: ['Subset', 'Bucket', 'Computed', 'Extended Reference'],
+    answer: 2,
+  },
+  {
+    q: 'pattern ใดจัดกลุ่มเรคคอร์ด time-series เล็ก ๆ จำนวนมากเข้าไว้ใน document เดียวต่อช่วงเวลาเพื่อจำกัดการเติบโต?',
+    options: ['Bucket', 'Subset', 'Extended Reference', 'Computed'],
+    answer: 0,
+  },
+  {
+    q: 'คุณคัดลอกชื่อลูกค้าไว้ข้าง customerId เพื่อหลีกเลี่ยงการค้นหาเมื่อ render คำสั่งซื้อ นั่นคือ pattern ใด?',
+    options: ['Computed', 'Subset', 'Bucket', 'Extended Reference'],
+    answer: 3,
+  },
+]
+
+<Quiz client:visible id="data-modeling/schema-design-patterns" questions={quizPatterns} />
+
+<ProgressTracker client:visible id="data-modeling/schema-design-patterns" />

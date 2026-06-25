@@ -1,0 +1,230 @@
+---
+title: Performance และ profiling
+description: หาคิวรีที่ช้าด้วย database profiler, อ่าน explain ซ้ำ, เก็บ working set ไว้ใน RAM และใช้วิธีแก้ไขทั่วไปที่ทำให้คิวรีกลับมาเร็วอีกครั้ง
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+เมื่อฐานข้อมูลรู้สึกช้า สิ่งล่อใจคือการเดา: เพิ่มเซิร์ฟเวอร์ เพิ่มหน่วยความจำ เพิ่ม index สักที่แล้วหวังว่าจะดี วิธีของมืออาชีพคือตรงกันข้าม — *วัดก่อน* MongoDB ให้เครื่องมือสองอย่างสำหรับสิ่งนั้น **database profiler** บันทึก operations ที่รันจริงและแต่ละอันใช้เวลานานเท่าไร เพื่อให้คุณเห็นว่าคิวรีไหนคือปัญหา และ `explain` บอกคุณว่า *ทำไม* คิวรีหนึ่งจึงช้า โดยแสดง plan ที่เซิร์ฟเวอร์เลือก เมื่อใช้ร่วมกันพวกมันเปลี่ยนงาน performance จากการเดาสุ่มเป็นการสืบสวนสั้น ๆ
+
+## เวลาหายไปไหน
+
+คิวรีที่ช้าส่วนใหญ่ลงเอยที่หนึ่งในสองสาเหตุ: คิวรีอ่านเอกสารมากกว่าที่มันคืนกลับมาก หรือข้อมูลที่มันต้องการไม่ได้อยู่ในหน่วยความจำและต้องดึงมาจากดิสก์ ภาพแรกชัดเจนที่สุด คิวรีเดียวกัน เมื่อมีและไม่มี index ที่รองรับ ทำงานในปริมาณที่แตกต่างกันอย่างมหาศาล:
+
+export const latencyFlow = `flowchart TB
+  subgraph Slow["No index — COLLSCAN"]
+    Q1["Find members joined in 2023"] --> R1["Read all 1,000,000 docs"]
+    R1 --> F1["Discard the non-matches"]
+    F1 --> O1["Return 12 docs — slow"]
+  end
+  subgraph Fast["With an index — IXSCAN"]
+    Q2["Find members joined in 2023"] --> R2["Seek the index to 2023"]
+    R2 --> F2["Read only the 12 matching docs"]
+    F2 --> O2["Return 12 docs — fast"]
+  end`
+
+<Mermaid code={latencyFlow} title="หากไม่มี index คิวรีจะอ่านทุกอย่างและทิ้งส่วนใหญ่ไป; เมื่อมี index มันจะอ่านเฉพาะสิ่งที่มันคืนกลับ" />
+
+สาเหตุที่สองนั้นแยบยลกว่า: **working set** นั่นคือส่วนของข้อมูลและ index ที่คิวรีแตะต้องจริงในแต่ละวัน เมื่อ working set พอดีกับ RAM การอ่านจะได้รับการตอบจากหน่วยความจำและฐานข้อมูลบินฉิว เมื่อมันล้นเกิน RAM ทุกครั้งที่ miss จะกลายเป็นการอ่านดิสก์ และ latency ไต่ขึ้นแม้ว่าคิวรีเองจะไม่ได้เปลี่ยนแปลง การเก็บ working set ไว้ในหน่วยความจำ — ด้วยการเพิ่ม RAM หรือด้วยการอ่านข้อมูลน้อยลงต่อคิวรี — คือหนึ่งในคันโยกที่ใหญ่ที่สุดที่คุณมี
+
+## การเปิด profiler
+
+profiler เขียนเอกสารหนึ่งอันต่อ operation ที่ช้าหนึ่งครั้งลงใน collection พิเศษ `system.profile` ในแต่ละฐานข้อมูล คุณตั้งค่ามันต่อฐานข้อมูล Level `1` บันทึกเฉพาะ operations ที่ช้ากว่า threshold ที่คุณเลือกเป็นมิลลิวินาที; level `2` บันทึกทุกอย่าง (มีประโยชน์ตอน development แต่ส่งเสียงรบกวนมากเกินไปใน production); level `0` ปิดมัน
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // Record every operation slower than 100 ms
+    db.setProfilingLevel(1, { slowms: 100 })
+
+    // Check the current setting
+    db.getProfilingStatus()
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.command({ profile: 1, slowms: 100 });
+    const status = await db.command({ profile: -1 });
+    console.log(status);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.command("profile", 1, slowms=100)
+    status = db.command("profile", -1)
+    print(status)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    if err := db.RunCommand(ctx, bson.D{
+        {Key: "profile", Value: 1},
+        {Key: "slowms", Value: 100},
+    }).Err(); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    db.run_command(doc! { "profile": 1, "slowms": 100 }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## การอ่าน system.profile
+
+เมื่อ profiler เปิดอยู่ คุณคิวรี `system.profile` เหมือน collection อื่น ๆ เรียงตามเวลาจากมากไปน้อยและดู operations ล่าสุดที่ช้าที่สุด ฟิลด์ที่ต้องจับตาคือ `millis` (ใช้เวลานานเท่าไร), `docsExamined` เทียบกับ `nreturned` (อ่านเอกสารกี่อันเทียบกับที่คืน) และ `planSummary` (ว่ามันใช้ index หรือ collection scan):
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.system.profile
+      .find({}, { op: 1, ns: 1, millis: 1, planSummary: 1, docsExamined: 1, nreturned: 1 })
+      .sort({ ts: -1 })
+      .limit(5)
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const slow = await db
+      .collection("system.profile")
+      .find({})
+      .project({ op: 1, ns: 1, millis: 1, planSummary: 1 })
+      .sort({ ts: -1 })
+      .limit(5)
+      .toArray();
+    console.log(slow);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    slow = (
+        db["system.profile"]
+        .find({}, {"op": 1, "ns": 1, "millis": 1, "planSummary": 1})
+        .sort("ts", -1)
+        .limit(5)
+    )
+    for entry in slow:
+        print(entry)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().
+        SetSort(bson.D{{Key: "ts", Value: -1}}).
+        SetLimit(5)
+    cur, err := db.Collection("system.profile").Find(ctx, bson.M{}, opts)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let opts = FindOptions::builder()
+        .sort(doc! { "ts": -1 })
+        .limit(5)
+        .build();
+    let mut cursor = db
+        .collection::<Document>("system.profile")
+        .find(doc! {})
+        .with_options(opts)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+profile entry เดียวเล่าเรื่องราวทั้งหมดได้ในพริบตา อันนี้อ่านเอกสารหนึ่งล้านอันเพื่อคืนสิบสองอัน โดยมี plan summary เป็น `COLLSCAN` — กรณีตัวอย่างของการขาด index:
+
+```json
+{
+  "op": "query",
+  "ns": "library.members",
+  "millis": 2143,
+  "planSummary": "COLLSCAN",
+  "docsExamined": 1000000,
+  "nreturned": 12
+}
+```
+
+เมื่อ `docsExamined` ใหญ่กว่า `nreturned` มาก แสดงว่าคุณพบปัญหาแล้ว ขั้นตอนต่อไปคือ `explain` บนคิวรีนั้นเป๊ะ ๆ เพื่อยืนยัน plan แล้วจึงแก้ไข:
+
+```js
+db.members.find({ joined: 2023 }).explain("executionStats")
+```
+
+## วิธีแก้ไขทั่วไป
+
+คิวรีที่ช้าส่วนใหญ่หายได้ด้วยหนึ่งในไม่กี่ท่าต่อไปนี้:
+
+- **เพิ่ม index** บนฟิลด์ที่คิวรีใช้ filter หรือ sort เพื่อให้เซิร์ฟเวอร์ seek แทนที่จะ scan นี่คือการแก้ไขที่ส่งผลกระทบสูงสุดเพียงอย่างเดียวและเป็นเหตุผลที่ profiler มีอยู่
+- **Project ให้น้อยลง** ขอเฉพาะฟิลด์ที่คุณต้องการแทนที่จะเอาทั้งเอกสาร ซึ่งลด bytes ที่ต้องเคลื่อนย้ายและสามารถทำให้คิวรีถูกตอบจาก index ได้ทั้งหมด
+- **หลีกเลี่ยงผลลัพธ์ที่ไม่มีขอบเขต** ใช้ `limit` กับคิวรีที่อาจ match เอกสารจำนวนมากเสมอ; การกวาดทั้ง collection โดยไม่ตั้งใจนั้นช้าไม่ว่า index จะดีแค่ไหน
+- **ปรับขนาด connection ให้พอเหมาะ** driver ดูแล **connection pool** และนำ connection มาใช้ซ้ำแทนที่จะเปิดอันใหม่ต่อ request การใช้ client ที่แชร์กันซ้ำ — ไม่ใช่สร้างอันใหม่ต่อการเรียกแต่ละครั้ง — ทำให้ pool นั้นแข็งแรงและหลีกเลี่ยงการใช้ขีดจำกัด connection ของเซิร์ฟเวอร์จนหมด
+
+**ใน Compass / Atlas:** Compass มีมุมมอง *Performance Insights* และ *Explain Plan* ที่รัน `explain` ให้คุณและทำเครื่องหมาย collection scan ให้เห็นด้วยตา Atlas ไปไกลกว่าด้วย *Performance Advisor* ที่เฝ้าดู traffic จริงของคุณและแนะนำ index ที่ควรสร้าง และแท็บ *Profiler* ที่นำ operations ที่ช้าที่สุดออกมาแสดงโดยที่คุณไม่ต้องไปแตะ `system.profile` ด้วยมือ
+
+## เคล็ดลับและข้อควรระวัง
+
+- ทำ profile ที่ level `1` พร้อม `slowms` ที่สมเหตุสมผลใน production ไม่ใช่ level `2` — การบันทึกทุก operation เพิ่ม overhead และท่วม collection
+- `system.profile` เป็น collection แบบ **capped**: มันมีขนาดคงที่และ entry เก่า ๆ จะหลุดออกไป อ่านมันทันทีหลังจากทำซ้ำคิวรีที่ช้า มิเช่นนั้นหลักฐานจะหมดอายุไป
+- profiler บอกคุณว่าคิวรี *ไหน* ช้า; `explain` บอกคุณว่า *ทำไม* ใช้พวกมันตามลำดับนั้น — หาตัวการก่อน แล้วจึงวินิจฉัยมัน
+- อัตราส่วน `docsExamined` ต่อ `nreturned` ที่สูงคือสัญญาณเดียวที่ชัดเจนที่สุดของการขาดหรือใช้ index ผิด ตั้งเป้าให้อ่านใกล้เคียงกับที่คุณคืน
+
+<Callout title="วัดก่อน แล้วจึงแก้">
+เปิด profiler เพื่อหาคิวรีที่ช้าจริง ๆ อ่าน system.profile หาอัตราส่วน docsExamined ต่อ nreturned ที่สูง ยืนยันด้วย explain แล้วแก้มัน — โดยปกติด้วยการเพิ่ม index ที่ถูกต้อง project ให้น้อยลง และจำกัดขอบเขตผลลัพธ์ อย่าเดาเรื่อง performance
+</Callout>
+
+export const quizPerf = [
+  {
+    q: 'database profiler ทำอะไร?',
+    options: [
+      'มันสร้าง index ให้กับคิวรีที่ช้าโดยอัตโนมัติ',
+      'มันบันทึก operations และระยะเวลาของพวกมันลงใน collection system.profile',
+      'มัน replicate คิวรีที่ช้าไปยัง secondary',
+      'มันบล็อกคิวรีใด ๆ ที่ช้ากว่า slowms',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน profile entry, docsExamined ใหญ่กว่า nreturned มาก สิ่งนี้บ่งบอกอะไร?',
+    options: [
+      'คิวรีกำลังใช้ index ที่เหมาะสมที่สุด',
+      'คิวรีกำลังอ่านเอกสารมากกว่าที่มันคืนมาก — น่าจะขาด index',
+      'profiler ถูกตั้งค่าผิด',
+      'ชุดผลลัพธ์เล็กเกินไปจนไม่สำคัญ',
+    ],
+    answer: 1,
+  },
+  {
+    q: '"working set" คืออะไร?',
+    options: [
+      'รายการ index บน collection',
+      'ส่วนของข้อมูลและ index ที่คิวรีแตะต้องอย่างแข็งขัน ซึ่งคุณต้องการให้พอดีกับ RAM',
+      'backup ของ write ล่าสุด',
+      'ชุดของ connection ใน pool ของ driver',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม driver จึงควรนำ client เดียวและ connection pool ของมันมาใช้ซ้ำ?',
+    options: [
+      'มันรับประกัน strong consistency',
+      'การนำ connection ใน pool มาใช้ซ้ำหลีกเลี่ยงการเปิดอันใหม่ต่อ request และการใช้ขีดจำกัดของเซิร์ฟเวอร์จนหมด',
+      'มันเปิดใช้ sharding โดยอัตโนมัติ',
+      'มันปิด profiler',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/performance-and-profiling" questions={quizPerf} />
+
+<ProgressTracker client:visible id="operations-and-scaling/performance-and-profiling" />

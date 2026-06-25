@@ -1,0 +1,140 @@
+---
+title: ทำไม index จึงสำคัญ
+description: query ที่ไม่มี index ต้องสแกนทุกเอกสารอย่างไร และ index เปลี่ยนการสแกนเหล่านั้นให้เป็นการ seek แบบเรียงลำดับที่รวดเร็วได้อย่างไร
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+query ที่คืนคำตอบถูกต้องก็ยังเป็น query ที่ช้าได้ เมื่อคุณขอให้ MongoDB หาสมาชิกทุกคนที่เข้าร่วมในปี 2023 และไม่มีอะไรช่วยมันเลย เซิร์ฟเวอร์มีทางเลือกเดียว นั่นคือเปิด collection ที่เอกสารแรกแล้วอ่านไปข้างหน้า ตรวจทีละตัว จนกว่าจะดูครบทุกเอกสาร การอ่านแบบกำลังดิบนี้เรียกว่า **collection scan** และ MongoDB ติดป้ายมันว่า `COLLSCAN` ในข้อมูลวินิจฉัย กับสมาชิกห้องสมุดไม่กี่คนมันมองไม่เห็น แต่บน collection ที่มีเอกสารสิบล้านรายการ มันคือความต่างระหว่างการตอบกลับในหนึ่งมิลลิวินาทีกับการตอบกลับที่คลานต้วมเตี้ยม
+
+**index** คือทางแก้ มันเป็นโครงสร้างข้อมูลแยกต่างหากที่เรียงลำดับไว้ ซึ่งเซิร์ฟเวอร์ดูแลควบคู่ไปกับ collection ของคุณ เก็บค่าของฟิลด์หนึ่งหรือหลายฟิลด์ในลำดับที่เรียงไว้ โดยแต่ละค่าจับคู่กับพอยน์เตอร์ที่ชี้กลับไปยังเอกสารฉบับเต็ม เพราะค่าถูกเรียงไว้ เซิร์ฟเวอร์จึงกระโดดตรงไปยังค่าที่ต้องการได้แทนที่จะอ่านทั้งหมด ด้วยเหตุผลเดียวกับที่คุณพลิกไปท้ายเล่มตำราแทนที่จะอ่านทุกหน้าเพื่อหาว่าคำศัพท์หนึ่งถูกนิยามไว้ตรงไหน ทั้งโมดูลนี้ว่าด้วยการสร้าง index ที่ถูกต้องสำหรับ query ที่ถูกต้อง และพิสูจน์ชัยชนะด้วย `explain`
+
+## scan เทียบกับ seek
+
+ลองนึกภาพสองกลยุทธ์วางเทียบกัน เมื่อไม่มี index นั้น query จะเดินผ่านทั้ง collection เมื่อมี index มันจะไต่ลงต้นไม้ที่เรียงลำดับไว้แล้วลงตรงช่วงที่ตรงกันพอดี:
+
+export const scanVsIndexDiagram = `flowchart TB
+  subgraph NoIndex["Without an index — COLLSCAN"]
+    Q1["Query: joined equals 2023"] --> S0["Read doc 1"]
+    S0 --> S1["Read doc 2"]
+    S1 --> S2["Read doc 3"]
+    S2 --> S3["...read every document"]
+    S3 --> R1["Return the matches"]
+  end
+  subgraph WithIndex["With an index — IXSCAN"]
+    Q2["Query: joined equals 2023"] --> B0["Index root"]
+    B0 --> B1["Sorted branch"]
+    B1 --> B2["Leaf: joined equals 2023"]
+    B2 --> R2["Follow pointers to matching docs"]
+  end`
+
+<Mermaid code={scanVsIndexDiagram} title="การสแกนอ่านทุกเอกสาร ส่วนการ seek ด้วย index กระโดดไปยังช่วงที่ตรงกันแล้วตามพอยน์เตอร์" />
+
+เส้นทางด้านขวาแตะเฉพาะเอกสารที่ต้องการ ส่วนเส้นทางด้านซ้ายแตะทุกตัวแล้วโยนทิ้งเกือบหมด การอ่านที่สูญเปล่านั้นแหละคือสิ่งที่ index ขจัดออกไป
+
+## index แรก
+
+การสร้าง index เป็นการเรียกครั้งเดียว คุณตั้งชื่อฟิลด์และทิศทาง — `1` สำหรับจากน้อยไปมาก — แล้วเซิร์ฟเวอร์จะสร้างโครงสร้างให้คุณ ตรงนี้เราทำ index บนฟิลด์ `joined` ของ `members` ในห้องสมุด เพื่อให้การกรองหรือเรียงตามปีที่เข้าร่วมกลายเป็นการ seek:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ joined: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ joined: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("joined", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "joined", Value: 1}}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "joined": 1 }).build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+การเรียกนั้นคืนชื่อที่ MongoDB ตั้งให้ index ใหม่ — มันอนุมานชื่อจากฟิลด์และทิศทางเว้นแต่คุณจะกำหนดเอง:
+
+```json
+{ "createdIndexes": ["joined_1"], "ok": 1 }
+```
+
+**ใน Compass:** เปิด collection แล้วเลือกแท็บ **Indexes** คุณจะเห็น index `_id_` ในตัวอยู่เสมอ และคุณเพิ่มอันใหม่ได้ด้วยปุ่ม **Create Index** โดยพิมพ์ชื่อฟิลด์และเลือกทิศทาง
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+บทเรียนต่อยอดจากฟิลด์เดียวไปสู่กล่องเครื่องมือเต็มชุด:
+
+1. **ทำไม index จึงสำคัญ** — scan เทียบกับ seek และต้นทุนของการไม่มีเลย
+2. **single และ compound indexes** — การทำ index ฟิลด์เดียว แล้วหลายฟิลด์ และ prefix rule ที่ตัดสินว่า compound index ให้บริการ query ใดได้บ้าง
+3. **กฎ ESR** — การจัดลำดับฟิลด์ (Equality, Sort, Range) ที่ทำให้ compound index คุ้มค่ากับที่ลงทุนไป
+4. **explain และ query plan** — การอ่านผลลัพธ์ของ `explain` เพื่อยืนยันว่ามีการใช้ index และจับ covered query
+5. **ประเภทของ index** — multikey, text, TTL, partial, unique และ sparse index สำหรับกรณีที่ index ธรรมดาครอบคลุมไม่ได้
+
+## เคล็ดลับและจุดพลาด
+
+- ทุก collection เริ่มต้นด้วย index หนึ่งอันอยู่แล้ว นั่นคือ unique index บน `_id` คุณไม่ต้องสร้างมันเลย และดรอปมันไม่ได้
+- index ไม่ได้มาฟรี มันเร่งการอ่านให้เร็วขึ้นแต่เพิ่มงานให้ทุก insert, update และ delete เพราะ index ต้องถูกทำให้ตรงกันตลอด ทำ index เฉพาะฟิลด์ที่ query ของคุณใช้จริง ไม่ใช่ทุกฟิลด์
+- index อยู่บนดิสก์และในหน่วยความจำเหมือนกับข้อมูลที่มันบรรยายถึง กอง index ที่ไม่ได้ใช้ก็เปลืองทั้งสองอย่าง จึงคุ้มที่จะลบอันที่ไม่มี query ใดพึ่งพาออกไป
+
+<Callout title="หนึ่งแนวคิดเบื้องหลัง index ทุกอัน">
+index แลกต้นทุนการเขียนที่เพิ่มขึ้นเล็กน้อยและพื้นที่จัดเก็บ กับความสามารถในการหาเอกสารด้วยการ seek ผ่านค่าที่เรียงลำดับไว้แทนที่จะสแกนทุกเอกสาร ส่วนที่เหลือของโมดูลนี้เป็นเพียงการเลือกว่าจะเรียงฟิลด์ใด
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'MongoDB ทำอะไรเพื่อตอบ query เมื่อไม่มี index ที่ใช้ประโยชน์ได้?',
+    options: [
+      'มันปฏิเสธที่จะรัน query',
+      'มันอ่านทุกเอกสารใน collection (เป็น COLLSCAN)',
+      'มันคืนเฉพาะเอกสารแรกที่เจอ',
+      'มันสร้าง index อัตโนมัติแล้วจึงตอบ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'index คืออะไรในแก่นแท้?',
+    options: [
+      'สำเนาในแคชของผลลัพธ์ query ล่าสุด',
+      'โครงสร้างที่เรียงลำดับแยกต่างหากของค่าฟิลด์พร้อมพอยน์เตอร์ที่ชี้ไปยังเอกสาร',
+      'แบ็กอัปของ collection บนเซิร์ฟเวอร์อีกตัว',
+      'ตัวแทนที่เร็วกว่าของ collection ตัวมันเอง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทุก collection มี index ใดโดยที่คุณไม่ต้องสร้าง?',
+    options: ['index บนฟิลด์แรกที่คุณ insert', 'unique index บน _id', 'text index', 'ไม่มี index จนกว่าคุณจะเพิ่ม'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="indexes/index" />

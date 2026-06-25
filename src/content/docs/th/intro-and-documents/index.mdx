@@ -1,0 +1,88 @@
+---
+title: บทนำและ Documents
+description: คอร์สนี้ครอบคลุมอะไรบ้าง MongoDB ในฐานะ document database สรุปในย่อหน้าเดียว และแผนที่ของแปดโมดูลที่รออยู่ข้างหน้า
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ยินดีต้อนรับสู่ **MongoDB — From Zero to Hero** คอร์สนี้จะพาคุณจากคนที่ไม่เคยแตะ database มาก่อนเลย ไปสู่การออกแบบโมเดลข้อมูล query ข้อมูล สร้าง index เพื่อความเร็ว รวมข้อมูลด้วย aggregation ให้กลายเป็นรายงาน และรันมันบน production ได้อย่างสบายมือ เราจะทำงานผ่านตัวอย่างที่จับต้องได้ตลอดทาง: โลกจำลองเล็ก ๆ ของสมาชิกห้องสมุดและหนังสือที่พวกเขายืม ตั้งใจให้เล็กไว้เพื่อให้แนวคิดหลักยังคงเป็นจุดเด่น ทุก operation จะถูกแสดงห้าแบบ — ใน shell **mongosh** และใน driver ของ **Node.js**, **Python**, **Go**, และ **Rust** — เพื่อให้บทเรียนนำไปใช้ได้กับ stack ที่คุณทำงานจริง
+
+MongoDB เป็น **document database**: แทนที่จะเก็บข้อมูลของคุณเป็น row ในตารางที่ตายตัว มันเก็บข้อมูลเป็น **document** — object คล้าย JSON ที่มี field, object ซ้อนใน และ array — จัดกลุ่มอยู่ใน **collection** document หน้าตาเป็นยังไงก็ได้ตามที่ข้อมูลของคุณเป็นโดยธรรมชาติ ดังนั้นรูปร่างของข้อมูลใน database จึงมักจะตรงกับรูปร่างของ object ในโค้ดของคุณ โดยไม่มีชั้นแปลงข้อมูลคั่นกลาง
+
+## เส้นทางข้างหน้า
+
+คอร์สนี้มีแปดโมดูล แต่ละโมดูลต่อยอดจากอันก่อนหน้า ดังนั้นการทำตามลำดับจึงเป็นเส้นทางที่ราบรื่นที่สุด แม้ว่าทุกโมดูลจะยืนอยู่ได้ด้วยตัวเองหากคุณอยากกระโดดไปยังหัวข้อใดหัวข้อหนึ่งโดยเฉพาะ
+
+export const journeyDiagram = `flowchart TD
+  M1["1. Intro & Documents"] --> M2["2. CRUD"]
+  M2 --> M3["3. Querying"]
+  M3 --> M4["4. Indexes"]
+  M4 --> M5["5. Aggregation"]
+  M5 --> M6["6. Data Modeling"]
+  M6 --> M7["7. Transactions & Consistency"]
+  M7 --> M8["8. Operations & Scaling"]`
+
+<Mermaid code={journeyDiagram} title="แปดโมดูลของคอร์ส เรียงตามลำดับที่ต่อยอดกัน" />
+
+## แต่ละโมดูลครอบคลุมอะไรบ้าง
+
+- **Intro & Documents** — โมดูลที่คุณกำลังอยู่ตอนนี้ document database คืออะไร วิธีรัน MongoDB บนเครื่องด้วย Docker, shell และ Compass, และ BSON document จริง ๆ คืออะไร
+- **CRUD** — สี่คำกริยาประจำวัน: การสร้าง อ่าน อัปเดต และลบ document
+- **Querying** — การกรองด้วย operator, การจัดเรียง, การจำกัดจำนวน, การ project field, และการแบ่งหน้าผลลัพธ์
+- **Indexes** — ทำให้ query เร็วขึ้น เข้าใจว่า index มีต้นทุนอะไร และอ่าน query plan
+- **Aggregation** — pipeline ที่จัดกลุ่ม ปรับรูปร่าง และสรุปข้อมูลให้กลายเป็นรายงาน
+- **Data Modeling** — การตัดสินใจว่าเมื่อไรควร embed ข้อมูลที่เกี่ยวข้อง และเมื่อไรควรเก็บไว้ใน collection แยกต่างหาก
+- **Transactions & Consistency** — atomicity หลาย document, read และ write concern, และการรับประกันที่คุณพึ่งพาได้
+- **Operations & Scaling** — การ backup, replica set เพื่อความทนทาน, และ sharding เพื่อการเติบโต
+
+## โมดูลนี้วางโครงไว้อย่างไร
+
+โมดูลแรกนี้ให้ทุกอย่างที่คุณต้องการก่อนที่งานจริงจะเริ่มต้น:
+
+1. **What is MongoDB** — document database เทียบกับ relational และเมื่อไรแต่ละแบบเหมาะสม
+2. **Setup with Docker** — รัน MongoDB บนเครื่องจาก image ทางการในไม่กี่คำสั่ง
+3. **The shell and Compass** — คุยกับ database จาก terminal และ GUI และการเชื่อมต่อจากแต่ละ driver
+4. **Documents and BSON** — รูปแบบไบนารีที่อยู่ใต้ JSON ของคุณ และ type ที่ document เก็บได้
+5. **Document vs relational** — การแปลคำศัพท์ relational เป็นคำศัพท์ MongoDB แบบเทียบเคียงกัน
+
+## เคล็ดลับและข้อควรระวัง
+
+- คุณไม่จำเป็นต้องท่องจำอะไรในนี้ เป้าหมายของโมดูลนี้คือความคล่องกับคำศัพท์ — document, collection, BSON, `_id` — เพื่อให้โมดูลถัด ๆ ไปอ่านได้ลื่นไหล
+- ทุกอย่างรันบนเครื่อง เราใช้ Docker เพื่อให้ไม่มีอะไรต้องติดตั้งถาวร และไม่มีอะไรต้องตามเก็บกวาดด้วยมือทีหลัง
+- ถ้าคุณรู้ SQL อยู่แล้ว บทเรียนสุดท้ายของโมดูลนี้คือทางที่เร็วที่สุดในการ map สิ่งที่คุณรู้เข้ากับ MongoDB
+
+<Callout title="หนึ่งโลก ใช้ทุกที่">
+ตลอดคอร์สเราจะกลับมาที่ห้องสมุดในจินตนาการเดิมซ้ำ ๆ: สมาชิก ค่าปรับที่พวกเขาค้างชำระ และหนังสือที่พวกเขายืม การใช้ชุดข้อมูลเล็ก ๆ ชุดเดียวซ้ำหมายความว่าคุณจะใช้สมาธิไปกับ database ไม่ใช่การเรียนรู้ตัวอย่างใหม่ในทุกบทเรียน
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the basic unit of data MongoDB stores?',
+    options: [
+      'row ในตารางที่ตายตัว',
+      'document — object คล้าย JSON ภายใน collection',
+      'คู่ key-value ที่ไม่มีโครงสร้าง',
+      'ค่าของ column เดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How many modules make up this course?',
+    options: ['สี่', 'หก', 'แปด', 'สิบสอง'],
+    answer: 2,
+  },
+  {
+    q: 'Which module teaches making queries fast?',
+    options: ['Querying', 'Indexes', 'Aggregation', 'Operations & Scaling'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="intro-and-documents/index" />

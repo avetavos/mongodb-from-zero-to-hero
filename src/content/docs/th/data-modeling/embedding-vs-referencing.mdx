@@ -1,0 +1,138 @@
+---
+title: Embedding กับ referencing
+description: สองวิธีในการเชื่อมโยง document ใน MongoDB — การ nest ข้อมูลที่เกี่ยวข้องไว้ใน document เดียว หรือเก็บ id แล้วค้นหา — และวิธีชั่งน้ำหนักระหว่าง read locality กับความซ้ำซ้อนและการเติบโตของ document
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+มีสองวิธีเท่านั้นในการแสดงความสัมพันธ์ระหว่าง document ใน MongoDB และเกือบทุกการตัดสินใจในการ modeling คือการเลือกระหว่างสองวิธีนี้ คุณสามารถ **embed**: วางข้อมูลที่เกี่ยวข้องไว้ภายใน parent document โดย nest เป็น sub-object หรือ array หรือคุณสามารถ **reference**: เก็บข้อมูลที่เกี่ยวข้องไว้ใน collection ของมันเองและเก็บตัวระบุ — โดยปกติคือ `_id` ของ document ที่เกี่ยวข้อง — ไว้ใน parent แล้วค้นหามันด้วย query ครั้งที่สองเมื่อต้องการ Embedding เอื้อต่อการอ่าน ส่วน referencing เอื้อต่อความยืดหยุ่นและหลีกเลี่ยงสำเนา การรู้ว่าควรหยิบอันไหนมาใช้คือสัญชาตญาณที่มีประโยชน์ที่สุดอย่างหนึ่งในการ modeling แบบ document
+
+เราจะใช้คำสั่งซื้อและรายการสินค้าในนั้นเป็นตัวอย่างที่ใช้ต่อเนื่อง เพราะข้อมูลเดียวกันสามารถไปได้ทั้งสองทางอย่างสมเหตุสมผล ขึ้นอยู่กับว่าแอปพลิเคชันทำงานอย่างไร
+
+## Embedding: เก็บไว้ด้วยกัน
+
+เมื่อคุณ embed ข้อมูลที่เกี่ยวข้องจะอยู่ภายใน parent คำสั่งซื้อด้านล่างพารายการสินค้ามาด้วยเป็น array ที่ nest อยู่ ทำให้ document คือคำตอบที่สมบูรณ์ของ "แสดงคำสั่งซื้อนี้ให้ฉันดู":
+
+```json
+{
+  "_id": "order_5001",
+  "customer": "Grace Hopper",
+  "status": "shipped",
+  "items": [
+    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
+    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
+  ]
+}
+```
+
+สิ่งที่ได้คือ **read locality**: ทุกอย่างที่คุณต้องการมาถึงในการอ่านครั้งเดียว ไม่มี join และไม่มีการวิ่งไปกลับครั้งที่สอง ข้อมูลที่ embed ยังถูกอัปเดตแบบ atomic ไปพร้อมกับ parent ของมัน — การเขียนครั้งเดียวแตะทั้งคำสั่งซื้อและรายการสินค้าทั้งหมดไปพร้อมกัน ต้นทุนมีสองอย่าง อย่างแรกคือ **ความซ้ำซ้อน**: ชื่อและราคาของสินค้าเป็นสำเนา หากราคาสินค้าตัวจริง (canonical) เปลี่ยน สำเนานี้จะไม่เปลี่ยนตาม อย่างที่สองคือ **การเติบโตของ document**: ทุกรายการที่ embed ทำให้คำสั่งซื้อใหญ่ขึ้น และ document ที่เติบโตโดยไม่มีขอบเขตในที่สุดจะชนเพดานแข็ง 16 MB
+
+## Referencing: เก็บแยกไว้
+
+เมื่อคุณ reference parent จะเก็บแค่ตัวระบุ ส่วนข้อมูลจริงอยู่ที่อื่น ตรงนี้คำสั่งซื้อเก็บลูกค้าเป็น reference และเก็บ id ของสินค้าสำหรับรายการต่าง ๆ แทนที่จะคัดลอกรายละเอียดสินค้า:
+
+```json
+{
+  "_id": "order_5001",
+  "customerId": "cust_77",
+  "status": "shipped",
+  "items": [
+    { "productId": "BK-204", "qty": 1 },
+    { "productId": "BK-991", "qty": 2 }
+  ]
+}
+```
+
+รายละเอียดสินค้าอยู่ที่เดียว ใน collection ของมันเอง:
+
+```json
+{ "_id": "BK-204", "title": "Distributed Systems", "price": 42.0 }
+```
+
+ตอนนี้ **ไม่มีความซ้ำซ้อน** — การเปลี่ยนราคาใน `products` collection ถูกเห็นทุกที่ทันที — และ document คำสั่งซื้อยังคงเล็ก ต้นทุนคือภาพสะท้อนกลับด้านของ embedding: การ render คำสั่งซื้อต้องใช้ **การค้นหาครั้งที่สอง** (join ฝั่งแอปพลิเคชัน หรือ `$lookup` ใน aggregation pipeline) เพื่อแปลง id เหล่านั้นให้เป็นชื่อและราคา คุณแลกการอ่านครั้งเดียวที่รวดเร็วกับการรับประกันว่าข้อมูลจะไม่มีวันเก่าค้าง
+
+## เปรียบเทียบทั้งสองแบบเคียงข้างกัน
+
+การตัดสินใจมาลงที่ว่าคุณอยากเจ็บแบบไหนมากกว่า: ต้นทุนของสำเนาที่อาจคลาดเคลื่อน หรือต้นทุนของการค้นหาเพิ่มในทุกการอ่าน
+
+export const embedRefDiagram = `flowchart TB
+  subgraph Embed["Embedding — one document"]
+    E0["Read the order"] --> E1["Order document"]
+    E1 --> E2["items array nested inside"]
+    E2 --> E3["Done — one read, no join"]
+  end
+  subgraph Reference["Referencing — linked documents"]
+    F0["Read the order"] --> F1["Order document with productId values"]
+    F1 --> F2["Second lookup into products"]
+    F2 --> F3["Join results to render"]
+  end`
+
+<Mermaid code={embedRefDiagram} title="Embedding ตอบการอ่านในครั้งเดียวแต่คัดลอกข้อมูล ส่วน referencing หลีกเลี่ยงสำเนาแต่ต้องการการค้นหาครั้งที่สอง" />
+
+กฎคร่าว ๆ ที่มีประโยชน์: embed ข้อมูลที่ **อ่านด้วยกัน เขียนด้วยกัน และมีขนาดจำกัด** ส่วน reference ข้อมูลที่ **ใหญ่ ถูกแชร์ข้าม parent หลายตัว ถูกอัปเดตบ่อยด้วยตัวเอง หรือมีจำนวนไม่จำกัด** ชื่อลูกค้าและรายการสินค้าที่เป็นของคำสั่งซื้อเดียวเท่านั้นคือการ embed ที่เป็นธรรมชาติ ส่วน product catalog ที่แชร์โดยคำสั่งซื้อนับพัน หรือรายการ comment ที่อาจโตได้ไม่จำกัด คือ reference ที่เป็นธรรมชาติ
+
+**ใน Compass:** เปิดแท็บ **Schema** บน collection แล้ว Compass จะสุ่มตัวอย่าง document ของคุณเพื่อแสดงว่ามี field ใดบ้าง ชนิดของมัน และ array กับ nested object ปรากฏบ่อยแค่ไหน — เป็นวิธีรวดเร็วในการดูว่าจริง ๆ แล้วคุณได้ embedding หรือ referencing อยู่ และ array ที่ embed ของคุณโตขึ้นมากแค่ไหน
+
+## เคล็ดลับและข้อควรระวัง
+
+- Embedding ให้การเขียนแบบ atomic แก่คุณฟรี ๆ: parent และลูกที่ embed ไว้เปลี่ยนในการทำงานครั้งเดียว โดยไม่ต้องประสานงานแบบ multi-document
+- Referencing เก็บข้อมูลที่แชร์กันไว้ที่เดียว ดังนั้นการอัปเดตจึงถูกเห็นทุกที่ — แต่ทุกการอ่านที่ต้องการข้อมูลที่ resolve แล้วต้องจ่ายค่าค้นหาเพิ่ม
+- คุณสามารถผสมทั้งสองแบบใน document เดียวได้ เป็นเรื่องปกติที่จะ embed snapshot ขนาดเล็กแบบ denormalize (ไม่กี่ field ที่คุณแสดงบ่อย ๆ) *และ* เก็บ reference ไปยังเรคคอร์ดฉบับเต็มไว้ใช้เมื่อต้องการทุกอย่าง
+- จับตาการเติบโตของ document บน array ที่ embed array ที่มีแต่โตขึ้นเรื่อย ๆ คือวิธีที่พบบ่อยที่สุดที่การตัดสินใจ embed จะค่อย ๆ กลายเป็นปัญหาอย่างเงียบ ๆ
+
+<Callout title="Embed สิ่งที่คุณอ่านด้วยกัน">
+สัญญาณที่ชัดเจนที่สุดสำหรับ embedding คือ co-access: ถ้าแอปพลิเคชันของคุณเกือบทุกครั้งอ่านข้อมูลสองชิ้นในจังหวะเดียวกัน และลูกมีขอบเขตจำกัดและเป็นของ parent เดียวเท่านั้น ให้ embed มัน ถ้าข้อมูลถูกแชร์ ใหญ่ หรือโตได้ไม่จำกัด ให้ reference แทน
+</Callout>
+
+export const quizEmbedRef = [
+  {
+    q: 'ข้อได้เปรียบหลักของการ embed ข้อมูลที่เกี่ยวข้องไว้ใน document คืออะไร?',
+    options: [
+      'มันรับประกันว่าข้อมูลจะไม่มีวันซ้ำซ้อน',
+      'การอ่านครั้งเดียวคืนทุกอย่างโดยไม่ต้อง join',
+      'มันทำให้ document เล็กลง',
+      'มันลบข้อจำกัด document ขนาด 16 MB',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ต้นทุนหลักของการ reference แทนที่จะ embed คืออะไร?',
+    options: [
+      'parent document โตขึ้นโดยไม่มีขอบเขต',
+      'การอ่านต้องใช้การค้นหาครั้งที่สองเพื่อ resolve reference',
+      'การเขียนไม่สามารถถูก acknowledge ได้อีกต่อไป',
+      'คุณต้องคัดลอกข้อมูลที่ถูก reference',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อมูลใดเป็นตัวเลือกที่เป็นธรรมชาติที่สุดสำหรับการ reference มากกว่าการ embed?',
+    options: [
+      'field ที่อยู่ไม่กี่อันที่เป็นของผู้ใช้คนเดียว',
+      'product catalog ที่แชร์ข้ามคำสั่งซื้อนับพัน',
+      'string สถานะบน document ของมันเอง',
+      'field timestamp อันเดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมความซ้ำซ้อนจาก embedding บางครั้งจึงเป็นปัญหา?',
+    options: [
+      'MongoDB ห้ามเก็บค่าเดียวกันสองครั้ง',
+      'สำเนาอาจคลาดเคลื่อนไม่ตรงกันเมื่อค่าตัวจริงเปลี่ยน',
+      'มันเกินขนาด document limit เสมอ',
+      'มันปิดการใช้งานการเขียนแบบ atomic',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/embedding-vs-referencing" questions={quizEmbedRef} />
+
+<ProgressTracker client:visible id="data-modeling/embedding-vs-referencing" />

@@ -1,0 +1,158 @@
+---
+title: การ modeling ความสัมพันธ์
+description: วิธี model ความสัมพันธ์แบบ one-to-one, one-to-many และ many-to-many ใน MongoDB ด้วย embedding และ referencing รวมถึงข้อจำกัด document ขนาด 16 MB และอันตรายของ array ที่ไม่มีขอบเขต
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ทุกความสัมพันธ์ระหว่าง entity ตกอยู่ในหนึ่งในสามรูปร่างตาม **cardinality** — ของอย่างหนึ่งมีความสัมพันธ์กับของอีกอย่างหนึ่งจำนวนเท่าไร ผู้ใช้มี profile หนึ่งอัน (one-to-one) ผู้ใช้เขียน post หลายอัน (one-to-many) นักเรียนลงทะเบียนหลายวิชา และแต่ละวิชามีนักเรียนหลายคน (many-to-many) ในฐานข้อมูลเชิงสัมพันธ์ รูปร่างกำหนดกลไกตายตัว: foreign key และ join table ส่วนใน MongoDB รูปร่างเพียงจำกัดตัวเลือกของคุณให้แคบลง คุณยังคงเลือก embed หรือ reference สำหรับแต่ละอัน โดยมีข้อแลกเปลี่ยนจากบทเรียนก่อนหน้าเป็นแนวทาง บทเรียนนี้จะพาเดินผ่านทั้งสามรูปร่างและข้อจำกัดด้านขนาดที่กำกับมันไว้
+
+## One-to-one
+
+เมื่อ document หนึ่งสัมพันธ์กับอีก document หนึ่งเพียงหนึ่งเดียว embedding มักเป็นทางที่เหมาะตามธรรมชาติ — ข้อมูลที่เกี่ยวข้องมีขอบเขตจำกัด เป็นของ parent เดียว และถูกอ่านควบคู่กันไป ผู้ใช้และ profile ของเขากลายเป็น document เดียว:
+
+```json
+{
+  "_id": "user_42",
+  "email": "ada@example.com",
+  "profile": {
+    "displayName": "Ada Lovelace",
+    "bio": "Writes algorithms for engines that do not exist yet.",
+    "joinedYear": 2024
+  }
+}
+```
+
+export const oneToOneDiagram = `flowchart LR
+  U["User document"] --> P["profile sub-object embedded inside"]`
+
+<Mermaid code={oneToOneDiagram} title="One-to-one: embed ข้อมูลที่เกี่ยวข้องเป็น sub-object ใน document เดียวกัน" />
+
+คุณจะแยก one-to-one ออกเป็นสอง document ก็ต่อเมื่อส่วนที่เกี่ยวข้องนั้นใหญ่ ถูกอ่านไม่บ่อย หรือถูกเข้าถึงอย่างอิสระ — เช่น เก็บไฟล์ binary ขนาดหนักหรือ block audit ที่แทบไม่แตะไว้ใน collection ของมันเอง เพื่อให้ document ที่ร้อนยังคงเล็ก
+
+## One-to-many
+
+ความสัมพันธ์แบบ one-to-many — parent หนึ่ง ลูกหลายตัว — มีสองรูปร่างที่ดี ถ้าลูกมีจำนวนน้อยและมีขอบเขต ให้ **embed มันเป็น array** บล็อกโพสต์กับ tag ไม่กี่อันของมันคือการ embed ที่สะอาด:
+
+```json
+{
+  "_id": "post_310",
+  "title": "Why documents win",
+  "tags": ["mongodb", "modeling", "nosql"]
+}
+```
+
+แต่เมื่อฝั่ง "many" สามารถโตได้ใหญ่ หรือถูก query ด้วยตัวเอง ให้ **reference จากฝั่งลูก** แทน: แต่ละ document ลูกเก็บ id ของ parent ผู้ใช้ที่อาจมี post นับพันจะเก็บ post ไว้ใน collection ของมันเอง โดยแต่ละอันชี้กลับไป:
+
+```json
+{ "_id": "post_310", "authorId": "user_42", "title": "Why documents win" }
+```
+
+export const oneToManyDiagram = `flowchart TB
+  subgraph FewBounded["Few and bounded — embed array"]
+    A0["Post document"] --> A1["tags: array of values"]
+  end
+  subgraph ManyUnbounded["Many or unbounded — reference from child"]
+    B0["User document"]
+    B1["Post: authorId points to user"]
+    B2["Post: authorId points to user"]
+    B1 --> B0
+    B2 --> B0
+  end`
+
+<Mermaid code={oneToManyDiagram} title="One-to-many: embed เป็น array เมื่อลูกมีจำนวนน้อยและมีขอบเขต; reference จากฝั่งลูกเมื่อฝั่ง many โตได้ใหญ่" />
+
+คำถามชี้ขาดคือ "รายการนี้จะโตได้ไม่จำกัดหรือไม่?" tag ของ post จะไม่ ส่วน post ของผู้ใช้อาจโต คำถามเดียวนั้นมักเลือก model ให้คุณได้
+
+## Many-to-many
+
+ในความสัมพันธ์แบบ many-to-many แต่ละฝั่งสัมพันธ์กับอีกฝั่งหลายตัว — นักเรียนกับวิชา บทความกับ tag นักแสดงกับภาพยนตร์ แนวทางที่สะอาดคือ **referencing ด้วย array ของ id** บนฝั่งใดฝั่งหนึ่งหรือทั้งสองฝั่ง การวาง array ไว้บนฝั่งที่คุณอ่านบ่อยที่สุดให้ query ที่ใช้ทั่วไปเร็วที่สุด ตรงนี้นักเรียนแต่ละคนพาวิชาที่ตนลงทะเบียนติดตัวมา:
+
+```json
+{ "_id": "student_7", "name": "Linus", "courseIds": ["c_db", "c_os", "c_net"] }
+```
+
+และ document วิชายืนด้วยตัวเอง ถูก reference ด้วย id:
+
+```json
+{ "_id": "c_db", "title": "Database Systems", "term": "Fall 2026" }
+```
+
+export const manyToManyDiagram = `flowchart TB
+  S1["Student: courseIds array"]
+  S2["Student: courseIds array"]
+  C1["Course c_db"]
+  C2["Course c_os"]
+  S1 --> C1
+  S1 --> C2
+  S2 --> C1`
+
+<Mermaid code={manyToManyDiagram} title="Many-to-many: เก็บ array ของ id ที่ถูก reference ไว้บนฝั่งที่คุณอ่านบ่อยที่สุด" />
+
+การเก็บ array ของ reference ไว้บน **ทั้งสอง** ฝั่ง (นักเรียนแสดงรายการวิชาของตน *และ* วิชาแสดงรายการนักเรียนของตน) ทำให้อ่านได้เร็วทั้งสองทิศทาง แต่เพิ่มงานเขียนเป็นสองเท่า — การลงทะเบียนนักเรียนหนึ่งคนตอนนี้หมายถึงการอัปเดตสอง document และคอยทำให้สอดคล้องกัน เลือก reference สองฝั่งเฉพาะเมื่อคุณอ่านทั้งสองทิศทางบ่อยจริง ๆ
+
+## ข้อจำกัด 16 MB และ array ที่ไม่มีขอบเขต
+
+ทุก document ของ MongoDB มีเพดานแข็งที่ **16 เมกะไบต์** ซึ่งกว้างขวางเพียงพอสำหรับข้อมูลทั่วไป แต่มันเปลี่ยน embedding ให้เป็นกับดักเมื่อใดก็ตามที่ array ที่ embed ไม่มีขอบเขตบนตามธรรมชาติ คำสั่งซื้อที่มีรายการสินค้าไม่กี่อันปลอดภัยตลอดไป ส่วนห้องแชทที่ embed ทุกข้อความ หรือ stock ticker ที่ embed ทุก price tick ในที่สุดจะกระแทกข้อจำกัด — และก่อนหน้านั้นนานแล้ว document ที่โตขึ้นเรื่อย ๆ จะกลายเป็นอ่านและเขียนใหม่ได้ช้า เพราะเซิร์ฟเวอร์ย้ายทั้ง document ในแต่ละครั้งที่อัปเดต
+
+กฎที่ตามมาคือ **อย่า embed array ที่สามารถโตได้ไม่จำกัด** หากจำนวนนับเปิดกว้าง ให้ reference ลูกเข้า collection ของมันเอง หรือใช้ Bucket pattern จากบทเรียนถัดไปเพื่อจำกัดการเติบโตของแต่ละ document Embed เฉพาะสิ่งที่จำกัดตามธรรมชาติ
+
+## เคล็ดลับและข้อควรระวัง
+
+- รูปร่าง cardinality จำกัดตัวเลือกของคุณให้แคบลง แต่คุณยังคงเลือก embed หรือ reference สำหรับแต่ละความสัมพันธ์ตามขนาด การเติบโต และการเข้าถึง — ไม่มีคำตอบอัตโนมัติ
+- One-to-one เกือบทุกครั้ง embed; ข้อยกเว้นคือส่วนย่อยที่ใหญ่หรือถูกอ่านไม่บ่อยซึ่งคุ้มค่าที่จะมี collection ของมันเอง
+- สำหรับ one-to-many ถามว่า "ฝั่ง many โตได้ไม่จำกัดหรือไม่?" ถ้าใช่ ให้ reference จากฝั่งลูก ถ้าไม่ array ที่ embed นั้นง่ายและเร็วกว่า
+- Reference สองฝั่งใน many-to-many ทำให้อ่านได้เร็วทั้งสองทิศทาง แต่ทุกการเขียนต้องอัปเดตทั้งสองฝั่ง — คุ้มเมื่อทั้งสองทิศทางร้อนเท่านั้น
+- ข้อจำกัด 16 MB เป็นกำแพงแข็ง แต่ *ประสิทธิภาพ* ของ document เสื่อมลงนานก่อนที่คุณจะไปถึง จงปฏิบัติต่อการเติบโตที่ไม่มีขอบเขตว่าเป็นศัตรูตัวจริง ไม่ใช่แค่เพดาน
+
+<Callout title="Cardinality จำกัด; การเข้าถึงตัดสิน">
+ปล่อยให้รูปร่างของความสัมพันธ์ตัดตัวเลือกที่ผิดอย่างชัดเจนออกไป แล้วปล่อยให้ access pattern และคำถามเรื่องการเติบโตเลือกระหว่างสิ่งที่เหลืออยู่ และไม่ว่าคุณจะทำอะไร อย่า embed array ที่ไม่มีขอบเขตตามธรรมชาติ — นั่นคือวิธีที่การตัดสินใจ embed กลายเป็นหน้าผา 16 MB
+</Callout>
+
+export const quizRelationships = [
+  {
+    q: 'สำหรับความสัมพันธ์แบบ one-to-one ที่ข้อมูลที่เกี่ยวข้องมีขนาดเล็กและถูกอ่านด้วยกัน อะไรมักดีที่สุด?',
+    options: [
+      'reference มันจาก collection แยกต่างหาก',
+      'embed มันเป็น sub-object ใน document เดียวกัน',
+      'เก็บมันใน join table',
+      'แยกมันออกเป็นหลาย document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ในความสัมพันธ์แบบ one-to-many เมื่อใดที่คุณควร reference จากฝั่งลูกแทนที่จะ embed เป็น array?',
+    options: [
+      'เสมอ ไม่ว่าขนาดจะเป็นอย่างไร',
+      'เมื่อฝั่ง many สามารถโตได้ใหญ่ หรือถูก query ด้วยตัวเอง',
+      'เฉพาะเมื่อมีลูกเพียงตัวเดียวเท่านั้น',
+      'ไม่มีวัน — embedding ถูกต้องเสมอ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ขนาดสูงสุดแบบแข็งของ document หนึ่งใน MongoDB คือเท่าไร?',
+    options: ['1 MB', '16 MB', '256 MB', 'ไม่มีข้อจำกัด'],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการ embed array ที่ไม่มีขอบเขตจึงอันตรายแม้ก่อนที่มันจะถึง 16 MB?',
+    options: [
+      'MongoDB ปฏิเสธ array ทั้งหมดที่เกินสิบ element',
+      'document ที่โตขึ้นเรื่อย ๆ กลายเป็นอ่านและเขียนใหม่ได้ช้า',
+      'array ไม่สามารถ index ได้',
+      'มันลบ element เก่าโดยอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="data-modeling/modeling-relationships" questions={quizRelationships} />
+
+<ProgressTracker client:visible id="data-modeling/modeling-relationships" />

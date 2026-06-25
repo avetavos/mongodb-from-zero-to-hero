@@ -1,0 +1,167 @@
+---
+title: shell และ Compass
+description: พื้นฐาน mongosh, ทัวร์ Compass GUI, และวิธีเชื่อมต่อกับ MongoDB จากแต่ละสภาพแวดล้อมทั้งห้า
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+มีสามวิธีที่คุณจะคุยกับ MongoDB: shell **mongosh** สำหรับคำสั่งที่รวดเร็วและเขียนสคริปต์ได้; **MongoDB Compass** ซึ่งเป็น graphical client ทางการ สำหรับคลิกไปมาและสำรวจ; และ **driver** ในภาษาของแอปพลิเคชันคุณสำหรับงานจริง บทเรียนนี้ครอบคลุมทั้งสามอย่าง โดยจบด้วยวิธีเปิดการเชื่อมต่อจากแต่ละสภาพแวดล้อมทั้งห้าที่คอร์สนี้ใช้
+
+ทุกอันเชื่อมต่อด้วยที่อยู่ชนิดเดียวกัน — **connection string** — ดังนั้นเมื่อคุณเข้าใจมันแล้ว การสลับไปมาระหว่างเครื่องมือก็เป็นเรื่องเล็กน้อย
+
+## พื้นฐาน mongosh
+
+`mongosh` เป็น JavaScript shell แบบโต้ตอบ คุณพิมพ์คำสั่ง มันรันกับเซิร์ฟเวอร์ และพิมพ์ผลลัพธ์ออกมา คำสั่งจำนวนหยิบมือเดียวครอบคลุมเกือบทุกอย่างที่คุณทำในแต่ละวัน:
+
+```js
+show dbs
+```
+
+`show dbs` แสดงรายการ database บนเซิร์ฟเวอร์ การจะเริ่มทำงานภายในอันใดอันหนึ่ง — เช่น database `library` — คุณ `use` มัน database ไม่จำเป็นต้องมีอยู่ก่อน MongoDB สร้างมันขึ้นทันทีที่คุณเขียน document แรกลงไป:
+
+```js
+use library
+```
+
+ตอนนี้ `db` อ้างถึง database `library` การอ่าน document ออกจาก collection คือ `db.<collection>.find()`:
+
+```js
+db.members.find()
+```
+
+เมื่อ query คืน document มากกว่าที่จะพอบนหน้าจอ mongosh แสดง batch แรกและพิมพ์ `Type "it" for more` การพิมพ์ `it` ดึง batch ถัดมา — `it` ย่อมาจาก **iterate**:
+
+```js
+it
+```
+
+นั่นคือลูปหลัก: `show dbs` เพื่อดูว่ามีอะไรอยู่, `use` เพื่อเลือก database, `db.coll.find()` เพื่ออ่าน, และ `it` เพื่อแบ่งหน้าผ่านผลลัพธ์
+
+## ทัวร์ Compass
+
+**MongoDB Compass** เป็น desktop GUI ทางการ และมันเป็นวิธีที่เป็นมิตรที่สุดในการสำรวจข้อมูลที่คุณยังไม่เข้าใจ คุณเชื่อมต่อโดยวาง connection string ลงในกล่องบนหน้าจอเริ่มต้น — สำหรับการตั้งค่า Docker บนเครื่องนั่นคืออะไรประมาณ `mongodb://localhost:27017` หรือ `mongodb://root:secret@localhost:27017` ถ้าคุณเปิดใช้ authentication — แล้วคลิก **Connect**
+
+เมื่อเชื่อมต่อแล้ว แถบด้านข้างซ้ายแสดงรายการ **database** ของคุณ และการขยายอันหนึ่งจะแสดงรายการ **collection** ของมัน การคลิก collection จะเปิดมันขึ้นมา และตามด้านบนคุณจะได้แถวของ tab ที่ map เข้ากับสิ่งต่าง ๆ ที่คุณจะเรียนในคอร์สนี้:
+
+- tab **Documents** แสดง document จริง คุณเลื่อนดูมันได้ แก้ field โดยดับเบิลคลิกที่ค่าของมัน และเพิ่ม document ใหม่ด้วยปุ่ม **ADD DATA** สีเขียวที่มุมขวาบน
+- tab **Schema** สุ่มตัวอย่าง collection และวาดภาพว่ามี field ใดอยู่บ้างและเก็บ type อะไร — เป็นวิธีที่รวดเร็วในการเข้าใจ collection ที่ไม่คุ้นเคยโดยไม่ต้องอ่านทุก document
+- tab **Aggregations** เป็นตัวสร้าง pipeline แบบ visual คุณเพิ่ม stage ทีละอันและเฝ้าดู document แปลงร่าง ซึ่งทำให้โมดูล aggregation ตามได้ง่ายขึ้นมาก
+- **Explain Plan** (มีให้เมื่อคุณรัน query) แสดงว่า MongoDB ดำเนินการมันอย่างไร — ว่ามันใช้ index หรือสแกนทั้งหมด — ซึ่งเป็นหัวใจของโมดูล index
+
+Compass และ shell ส่งเสริมกัน: Compass สำหรับการดูและสำรวจ, shell สำหรับการทำซ้ำและเขียนสคริปต์ ไม่มีอันไหนแทนที่ driver ในโค้ดแอปพลิเคชันของคุณ
+
+## การเชื่อมต่อจากแต่ละสภาพแวดล้อม
+
+เมื่อถึงเวลาเขียนแอปพลิเคชัน คุณเชื่อมต่อด้วย **driver** connection string เหมือนเดิม ต่างกันแค่ API รอบ ๆ มัน นี่คือวิธีเปิดการเชื่อมต่อในแต่ละสภาพแวดล้อมทั้งห้า — shell เริ่มด้วย string ตรง ๆ ในขณะที่แต่ละ driver สร้าง client และตรวจสอบมันด้วย ping
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    mongosh "mongodb://localhost:27017"
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { MongoClient } from "mongodb";
+
+    const client = new MongoClient("mongodb://localhost:27017");
+    await client.connect();
+    await client.db("library").command({ ping: 1 });
+    console.log("connected");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo import MongoClient
+
+    client = MongoClient("mongodb://localhost:27017")
+    client.admin.command("ping")
+    print("connected")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
+    if err != nil {
+        return err
+    }
+    if err := client.Ping(ctx, nil); err != nil {
+        return err
+    }
+    fmt.Println("connected")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let client = Client::with_uri_str("mongodb://localhost:27017").await?;
+    client
+        .database("library")
+        .run_command(doc! { "ping": 1 })
+        .await?;
+    println!("connected");
+    ```
+  </TabItem>
+</Tabs>
+
+เมื่อ client เชื่อมต่อแล้ว คุณใช้มันซ้ำตลอดอายุของโปรแกรม การสร้าง client ใหม่ทุก request เป็นความผิดพลาดที่พบบ่อยและมีราคาแพง — client จัดการ pool ของการเชื่อมต่อที่ตั้งใจให้แชร์กัน
+
+## การเลือกเครื่องมือ
+
+export const toolDiagram = `flowchart TD
+  Q["What do you want to do"] --> S["Quick one-off command or a script"]
+  Q --> C["Explore and understand unfamiliar data"]
+  Q --> D["Build a feature in your app"]
+  S --> SH["mongosh shell"]
+  C --> CO["Compass GUI"]
+  D --> DR["A driver in your language"]`
+
+<Mermaid code={toolDiagram} title="เลือก shell สำหรับเขียนสคริปต์ Compass สำหรับสำรวจ และ driver สำหรับโค้ดแอปพลิเคชัน" />
+
+## เคล็ดลับและข้อควรระวัง
+
+- **รูปแบบของ connection string** คือ `mongodb://[user:password@]host:port[/database]` host และ port เป็นเพียงส่วนที่จำเป็น credential และ default database เป็น optional
+- **ใช้ shell vs Compass vs driver** ตามเจตนา: shell สำหรับคำสั่งที่เร็วและทำซ้ำได้, Compass สำหรับการสำรวจแบบ visual และการค้นพบ schema, และ driver สำหรับอะไรก็ตามที่แอปพลิเคชันของคุณทำบน production
+- **Authentication** เปลี่ยน string ไม่ใช่ workflow ถ้าคุณตั้ง root user ในบทเรียน Docker ให้ใส่ `root:secret@` ไว้ก่อน host ในทุกเครื่องมือ
+- **ใช้ client เดียวซ้ำ** driver ทั้งหมดถูกสร้างขึ้นรอบ ๆ object client ที่มีอายุยืนพร้อม connection pool ภายใน สร้างมันครั้งเดียวตอนเริ่มต้น
+
+<Callout title="หนึ่ง string สามประตู">
+shell, Compass, และทุก driver ล้วนเปิด database เดียวกันผ่าน connection string เดียวกัน เรียน string เพียงครั้งเดียวแล้วคุณก็เข้าถึง MongoDB ได้จากทุกที่
+</Callout>
+
+export const quizShell = [
+  {
+    q: 'In mongosh, what does typing "it" do after a find()?',
+    options: [
+      'แทรก document ทดสอบ',
+      'iterate — ดึง batch ถัดไปของผลลัพธ์',
+      'สลับไปยัง database อื่น',
+      'ทำซ้ำคำสั่งล่าสุด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which Compass tab samples a collection and shows which fields and types exist?',
+    options: ['Documents', 'Schema', 'Explain Plan', 'Indexes'],
+    answer: 1,
+  },
+  {
+    q: 'What is the recommended lifecycle for a driver client object?',
+    options: [
+      'สร้าง client ใหม่สำหรับทุก request',
+      'สร้าง client อายุยืนอันเดียวตอนเริ่มต้นและใช้ซ้ำ',
+      'สร้าง client เฉพาะเมื่อเกิด error',
+      'อย่าสร้าง client เลย ให้ shell จัดการ',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/the-shell-and-compass" questions={quizShell} />
+
+<ProgressTracker client:visible id="intro-and-documents/the-shell-and-compass" />

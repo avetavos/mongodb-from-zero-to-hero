@@ -1,0 +1,163 @@
+---
+title: Sharding
+description: MongoDB แบ่ง collection หนึ่งออกไปยังหลาย shards ตาม shard key อย่างไร บทบาทของ mongos และ config servers และวิธีเลือก shard key ที่คุณจะไม่ต้องเสียใจภายหลัง
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+replica set ทำให้ข้อมูลของคุณยังอยู่รอด แต่สมาชิกทุกตัวก็ยังถือ *ทั้งหมด* ของชุดข้อมูล นั่นใช้ได้ไปจนถึงจุดที่เครื่องหนึ่งไม่สามารถบรรจุข้อมูลทั้งหมดของคุณได้อีกต่อไป หรือ primary หนึ่งไม่สามารถรับ write ทั้งหมดได้อีกต่อไป การเพิ่มหน่วยความจำและดิสก์ที่เร็วขึ้น — การ scale *up* — มีเพดานและแพงขึ้นอย่างรวดเร็ว แต่ **Sharding** scale *out* แทน: มันแบ่ง collection เชิงตรรกะหนึ่งออกไปยังหลายเครื่อง เพื่อให้ทั้งข้อมูลและภาระ write ถูกแบ่งกันในหมู่พวกมัน แต่ละเครื่องถือเพียงส่วนของมัน และคุณเพิ่ม capacity ด้วยการเพิ่มเครื่อง
+
+## ส่วนประกอบของ sharded cluster
+
+Sharding นำเสนอสามบทบาทนอกเหนือจากตัว shards เอง **shard** คือ replica set ที่ถือส่วนหนึ่งของข้อมูล **config servers** คือ replica set ของพวกมันเองที่เก็บ metadata ของ cluster — แผนที่ว่าข้อมูลไหนอยู่บน shard ไหน และ **mongos** คือ router ขนาดเบาที่แอปพลิเคชันของคุณเชื่อมต่อแทนที่จะเชื่อมต่อ shard ใด shard หนึ่ง; มันปรึกษาแผนที่นั้นและส่งต่อแต่ละ request ไปยัง shard หรือ shards ที่ถูกต้อง
+
+export const shardTopology = `flowchart TB
+  App["Application"] --> M["mongos router"]
+  M --> CFG["Config servers — store the chunk map"]
+  M --> Sh1["Shard 1 (replica set)"]
+  M --> Sh2["Shard 2 (replica set)"]
+  M --> Sh3["Shard 3 (replica set)"]
+  CFG -. "tells mongos where each chunk lives" .- M`
+
+<Mermaid code={shardTopology} title="แอปพลิเคชันคุยกับ mongos เท่านั้น ซึ่งใช้แผนที่ของ config servers เพื่อนำทาง request ไปยัง shard ที่ถูกต้อง" />
+
+แอปพลิเคชันของคุณไม่เคยติดต่อ shard โดยตรง มันเชื่อมต่อกับ `mongos` ซึ่งดูแยกไม่ออกจากเซิร์ฟเวอร์ MongoDB ปกติ เบื้องหลัง endpoint เดียวนั้น `mongos` อ่าน metadata ที่ config servers ถืออยู่และตัดสินใจว่าแต่ละคิวรีและแต่ละ write อยู่ที่ไหน
+
+## shard key, chunks และ balancer
+
+ทั้งระบบขึ้นอยู่กับการตัดสินใจหนึ่งอย่าง: **shard key** ซึ่งเป็นฟิลด์ (หรือชุดของฟิลด์) ที่ MongoDB ใช้ตัดสินว่าเอกสารหนึ่งอยู่บน shard ไหน MongoDB แบ่งช่วงของ key ออกเป็นบล็อกที่ต่อเนื่องกันเรียกว่า **chunks** และกำหนดแต่ละ chunk ให้กับ shard เมื่อข้อมูลโตขึ้น chunk ที่ใหญ่เกินไปจะถูกแบ่งเป็นสอง และกระบวนการเบื้องหลังที่เรียกว่า **balancer** จะย้าย chunks ระหว่าง shards อย่างเงียบ ๆ เพื่อให้พวกมันเท่ากันโดยประมาณ
+
+export const chunkFlow = `flowchart LR
+  K["Shard key value"] --> C["Which chunk owns this value"]
+  C --> S["Which shard owns that chunk"]
+  S --> Done["Document lands on that shard"]
+  Bal["Balancer"] -. "migrates chunks to keep shards even" .- S`
+
+<Mermaid code={chunkFlow} title="shard key ของเอกสารตัดสิน chunk ของมัน และ chunk ตัดสิน shard ของมัน; balancer ปรับจำนวน chunk ให้เท่ากันเมื่อเวลาผ่านไป" />
+
+มีสองวิธีในการแมป key ไปยัง chunks **Ranged** sharding เก็บค่า key ที่อยู่ใกล้กันไว้ด้วยกัน — มีประโยชน์เมื่อคุณคิวรีตามช่วง แต่เสี่ยงถ้า write กระจุกตัวที่ปลายด้านหนึ่งของช่วง เพราะพวกมันจะกองทับกันลงบน shard เดียว **Hashed** sharding ส่ง key ผ่าน hash ก่อน กระจายแม้แต่ค่าที่เรียงต่อเนื่องให้กระจายทั่วถึงข้าม shards — เยี่ยมสำหรับการกระจาย write แต่มันทำลาย locality ดังนั้นคิวรีแบบช่วงต้องกระจายออกไปทุก shard คุณเปิด sharding บน collection และเลือกกลยุทธ์ได้ในการเรียกเดียว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    sh.enableSharding("library")
+
+    // Ranged shard key on memberId
+    sh.shardCollection("library.loans", { memberId: 1 })
+
+    // Or hashed, to spread writes evenly
+    sh.shardCollection("library.events", { deviceId: "hashed" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const admin = client.db("admin");
+    await admin.command({ enableSharding: "library" });
+    await admin.command({
+      shardCollection: "library.loans",
+      key: { memberId: 1 },
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    admin = client.admin
+    admin.command("enableSharding", "library")
+    admin.command(
+        "shardCollection", "library.loans", key={"memberId": 1}
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    admin := client.Database("admin")
+    if err := admin.RunCommand(ctx, bson.D{
+        {Key: "shardCollection", Value: "library.loans"},
+        {Key: "key", Value: bson.D{{Key: "memberId", Value: 1}}},
+    }).Err(); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let admin = client.database("admin");
+    admin
+        .run_command(doc! {
+            "shardCollection": "library.loans",
+            "key": { "memberId": 1 },
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## การเลือก shard key ที่ดี
+
+shard key ที่ไม่ดีไม่สามารถแก้ไขแบบเงียบ ๆ ภายหลังได้ ดังนั้นการเลือกนี้สมควรได้รับความใส่ใจตั้งแต่แรก สามคุณสมบัติที่ทำให้ key ดี **High cardinality** หมายถึง key มีค่าที่แตกต่างกันจำนวนมาก เพื่อให้ข้อมูลแบ่งออกเป็น chunks ได้หลายอัน — ฟิลด์ที่มีค่าเพียงไม่กี่ค่าจำกัดว่าคุณกระจายได้ไกลแค่ไหน **Even distribution** หมายถึงค่ากระจายตัวข้ามเอกสาร เพื่อให้ไม่มี shard ใด shard หนึ่งกลายเป็นคอขวด และ **low hotspotting** หมายถึง write ไม่ได้พุ่งเป้าไปยังช่วงที่กำลังโตเดียวกันทั้งหมด; key ที่เพิ่มขึ้นเรื่อย ๆ อย่างสม่ำเสมอเช่น timestamp หรือ id ที่ auto-increment คือกับดักคลาสสิก เพราะทุก write ใหม่ลงบน chunk "สูงสุด" เดียวกันและถล่ม shard เดียว การ hash key เช่นนั้น หรือการนำมาผสมกับฟิลด์ที่มี cardinality สูงกว่า จะทำลาย hotspot นั้น
+
+**ใน Atlas:** มุมมอง cluster เปิด sharding ออกมาเป็นตัวเลือกการตั้งค่า และ *Shard Key Advisor* กับ *Shard Key Analyzer* ช่วยให้คุณประเมินการกระจายตัวของ key ที่เป็นตัวเลือกก่อนที่คุณจะตัดสินใจเลือกมัน — คุ้มค่าที่จะใช้มาก เมื่อพิจารณาว่า key เปลี่ยนยากแค่ไหนหลังจากนั้น
+
+## เคล็ดลับและข้อควรระวัง
+
+- เลือก shard key อย่างระมัดระวัง; **การเปลี่ยนมันยาก** และในอดีตต้องสร้าง collection ใหม่ collection ที่ reshard ได้มีอยู่ในเวอร์ชันสมัยใหม่ แต่ก็ยังเป็น operation ที่ควรหลีกเลี่ยง ดังนั้นเลือก key ให้ถูกตั้งแต่ครั้งแรก
+- อย่า shard เร็วเกินไป replica set เดี่ยวรองรับ traffic ได้มากมาย shard เมื่อคุณมีหลักฐานว่าเครื่องเดียวตามไม่ทัน ไม่ใช่ตามความรู้สึก
+- คิวรีที่รวม shard key เข้าไปคือ **targeted** — `mongos` ส่งมันไปยัง shard เดียวเป๊ะ ๆ คิวรีที่ไม่มีมันคือ **scatter-gather** — มันกระจายออกไปทุก shard ออกแบบคิวรีทั่วไปของคุณให้พก shard key ไปด้วย
+- hashed key กระจาย write ได้สวยงามแต่ทำลายคิวรีแบบช่วง; ranged key รักษา locality ไว้แต่เสี่ยง hotspot เลือกการแลกเปลี่ยนที่ตรงกับวิธีที่คุณอ่านและเขียนจริง ๆ
+
+<Callout title="shard key คือการตัดสินใจที่สำคัญ">
+Sharding กระจาย collection หนึ่งข้ามหลาย shards และ router ใช้แผนที่ของ config servers เพื่อส่งแต่ละ request ไปยัง shard ที่ถูกต้อง ทุกอย่างขึ้นอยู่กับ shard key: เลือกอันที่มี high cardinality และ even distribution และหลีกเลี่ยง key ที่เพิ่มขึ้นแบบ monotonic ที่ทำให้เกิด hotspot บน shard เดียว
+</Callout>
+
+export const quizShard = [
+  {
+    q: 'แอปพลิเคชันเชื่อมต่อกับอะไรใน sharded cluster?',
+    options: [
+      'shard ที่ถูกเลือกแบบสุ่ม',
+      'mongos router',
+      'config servers โดยตรง',
+      'balancer',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'config servers เก็บอะไร?',
+    options: [
+      'สำเนาเต็มของทุกเอกสาร',
+      'metadata ของ cluster ที่แมปว่า chunks ไหนอยู่บน shards ไหน',
+      'oplog ของแต่ละ shard',
+      'ผลลัพธ์คิวรีที่ถูก cache ไว้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณสมบัติใดที่เป็นปัญหาสำหรับ shard key?',
+    options: [
+      'High cardinality',
+      'การกระจายตัวของค่าที่สม่ำเสมอ',
+      'ค่าที่เพิ่มขึ้นแบบ monotonic ที่ส่งทุก write ใหม่ไปยัง shard เดียว',
+      'การถูกใช้ในคิวรีทั่วไป',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'การแลกเปลี่ยนของ hashed shard key เทียบกับ ranged คืออะไร?',
+    options: [
+      'hashed key กระจาย write อย่างสม่ำเสมอแต่ทำให้คิวรีแบบช่วงกระจายออกไปทุก shard',
+      'hashed key ช้ากว่าเสมอสำหรับทุก operation',
+      'ranged key ใช้เป็น shard key ไม่ได้',
+      'ไม่มีความแตกต่างระหว่างพวกมัน',
+    ],
+    answer: 0,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/sharding" questions={quizShard} />
+
+<ProgressTracker client:visible id="operations-and-scaling/sharding" />

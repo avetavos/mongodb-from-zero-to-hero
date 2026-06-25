@@ -1,0 +1,185 @@
+---
+title: กฎ ESR
+description: จัดลำดับฟิลด์ของ compound index แบบ Equality, Sort, Range เพื่อรีดประโยชน์จาก index อันเดียวให้ได้มากที่สุด พร้อมตัวอย่างที่ทำให้เห็นว่าทำไมลำดับจึงชนะ
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+บทเรียนก่อนทิ้งคำถามค้างไว้: เมื่อคุณสร้าง compound index สำหรับ query หนึ่ง ฟิลด์ควรเรียงลำดับอย่างไร คำตอบคือกฎสั้นๆ ที่จำง่ายชื่อ **ESR** — **Equality, Sort, Range** ระบุฟิลด์ที่ query ใช้สำหรับการจับคู่แบบเป๊ะก่อน แล้วตามด้วยฟิลด์ที่คุณเรียง แล้วตามด้วยฟิลด์ใดที่คุณ query เป็นช่วง ทำตามลำดับนั้นแล้ว index อันเดียวสามารถตอบสนองทั้งตัวกรอง การเรียง และการสแกนช่วงในรอบเดียว โดยไม่ต้องเรียงในหน่วยความจำเพิ่ม และไม่มีการอ่านที่สูญเปล่า
+
+มาลองทำกันให้ตลอดด้วย query รูปธรรมกับ `members` ในห้องสมุดของเรา
+
+## query ที่เรากำลังเพิ่มประสิทธิภาพ
+
+สมมติว่าเราต้องการสมาชิกทุกคนใน city ที่กำหนด ที่มี fines มากกว่าสอง เรียงตามปีที่เข้าร่วม query นี้แตะสามฟิลด์ในสามรูปแบบที่ต่างกัน:
+
+- `city` — การจับคู่แบบ **equality**: `city` เท่ากับค่าเป๊ะค่าหนึ่ง
+- `joined` — ฟิลด์ **sort**: ผลลัพธ์กลับมาเรียงตามปีที่เข้าร่วม
+- `fines` — เป็น **range**: `fines` มากกว่าสอง เป็นช่วงค่ามากกว่าค่าเดียว
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ city: "Berlin", fines: { $gt: 2 } })
+      .sort({ joined: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members")
+      .find({ city: "Berlin", fines: { $gt: 2 } })
+      .sort({ joined: 1 })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    list(
+        db.members
+        .find({"city": "Berlin", "fines": {"$gt": 2}})
+        .sort("joined", 1)
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetSort(bson.D{{Key: "joined", Value: 1}})
+    cur, err := coll.Find(
+        ctx,
+        bson.M{"city": "Berlin", "fines": bson.M{"$gt": 2}},
+        opts,
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let cur = coll
+        .find(doc! { "city": "Berlin", "fines": { "$gt": 2 } })
+        .sort(doc! { "joined": 1 })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## การประยุกต์ ESR
+
+ESR บอกว่า: ฟิลด์ equality ก่อน, ฟิลด์ sort ที่สอง, ฟิลด์ range ท้ายสุด นั่นให้ index `{ city: 1, joined: 1, fines: 1 }`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ city: 1, joined: 1, fines: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ city: 1, joined: 1, fines: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("city", 1), ("joined", 1), ("fines", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys: bson.D{
+                {Key: "city", Value: 1},
+                {Key: "joined", Value: 1},
+                {Key: "fines", Value: 1},
+            },
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "city": 1, "joined": 1, "fines": 1 })
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+นี่คือเหตุผลที่ลำดับนี้ใช้ได้:
+
+export const esrDiagram = `flowchart TB
+  E["Equality: city equals Berlin"] --> EX["Index seeks to one narrow city block"]
+  EX --> S["Sort: joined ascending"]
+  S --> SX["Inside that block, docs are already ordered by joined — no extra sort"]
+  SX --> R["Range: fines greater than 2"]
+  R --> RX["Walk the matching join order, keeping only fines above 2"]
+  RX --> Out["Results: filtered, sorted, no in-memory sort step"]`
+
+<Mermaid code={esrDiagram} title="Equality บีบลงเหลือบล็อกเดียว Sort ถูกตอบสนองด้วยลำดับของ index และ Range คือการเดินขั้นสุดท้าย" />
+
+equality บน `city` ตรึงการค้นหาไว้ที่ชิ้นต่อเนื่องชิ้นเดียวของ index ภายในชิ้นนั้นเอกสารถูกวางเรียงตามลำดับ `joined` อยู่แล้ว ดังนั้น MongoDB จึงคืนเอกสารแบบเรียงโดยไม่ต้องมีขั้นตอนเรียงแยกต่างหาก range บน `fines` มาท้ายสุดเพราะ range ทำให้ฟิลด์ของ index ที่ตามมาไม่เรียงลำดับ — ถ้า `fines` มาก่อน `joined` ปีที่เข้าร่วมภายในช่วงนั้นจะกระจัดกระจาย และ MongoDB จะต้องเรียงมันในหน่วยความจำหลังการอ่าน
+
+## ทำไมลำดับอื่นจึงแพ้
+
+เปรียบเทียบกับลำดับที่ดูน่าเลือกแต่ผิด `{ city: 1, fines: 1, joined: 1 }` ซึ่งวาง range ไว้ก่อน sort equality บน `city` ยังคงใช้ได้ แต่ `fines: { $gt: 2 }` เป็น range และเมื่อ index เดินผ่าน range แล้ว ทุกฟิลด์ที่ตามมาจะไม่อยู่ในช่วงที่เรียงต่อเนื่องเดียวอีกต่อไป ดังนั้น `joined` จึงใช้สำหรับการเรียงไม่ได้ และ MongoDB ก็ถอยกลับไปเรียงในหน่วยความจำแบบ blocking ของชุดผลลัพธ์ทั้งหมด query ยังคงคืนคำตอบที่ถูกต้อง — เพียงแต่ช้ากว่าและใช้หน่วยความจำมากกว่า การเรียงที่ซ่อนอยู่นั้นแหละคือสิ่งที่ ESR มีไว้เพื่อหลีกเลี่ยง
+
+วิธีจำที่มีประโยชน์: range "ผลาญ" การเรียงทั้งหมดของฟิลด์ที่ตามมา ดังนั้นคุณวางมันไว้ท้ายสุด หลังจากที่คุณได้การบีบด้วย equality และการเรียงมาฟรีแล้ว
+
+**ใน Compass:** สร้าง index ผู้ท้าชิงในแท็บ **Indexes** แล้วรัน query ในแท็บ **Explain Plan** เมื่อ ESR ถูกตอบสนองคุณจะเห็นการเรียงถูกจัดการโดย index เมื่อไม่ใช่ plan จะแสดงขั้นตอน sort ที่ชัดเจนซึ่งกินผลลัพธ์เข้าไป
+
+## เคล็ดลับและจุดพลาด
+
+- ESR เป็นค่าตั้งต้น ไม่ใช่กฎตายตัว มันเป็นจุดเริ่มต้นที่ถูกต้องสำหรับ query รูปแบบ "filter, sort, range" ที่พบบ่อย แต่ยืนยันด้วย `explain` บนข้อมูลจริงของคุณเสมอ
+- ฟิลด์ equality มีได้มากกว่าหนึ่ง และทั้งหมดอยู่ด้านหน้า เช่นเดียวกับฟิลด์ range หลายฟิลด์ที่ท้ายสุด ส่วนฟิลด์ sort ฟิลด์เดียวอยู่ตรงกลาง
+- ผลตอบแทนของการทำ ESR ให้ถูกคือการกำจัดการเรียงในหน่วยความจำ plan ที่มีขั้นตอน sort ชัดเจนบนชุดผลลัพธ์ขนาดใหญ่คือสัญญาณว่าลำดับฟิลด์ของคุณกำลังต่อสู้กับ query
+
+<Callout title="Equality, Sort, Range">
+จัดลำดับฟิลด์ของ compound index ตามวิธีที่ query ใช้มัน: การจับคู่แบบเป๊ะก่อน, ฟิลด์ sort ถัดมา, การเปรียบเทียบแบบ range ท้ายสุด ลำดับเดียวนั้นให้ index หนึ่งอันบีบ เรียง และสแกนได้โดยไม่ต้องมีการเรียงแยกต่างหาก
+</Callout>
+
+export const quizEsr = [
+  {
+    q: 'ESR ย่อมาจากอะไร ในแง่ลำดับฟิลด์?',
+    options: ['Equality, Sort, Range', 'Equality, Search, Result', 'Exact, Sort, Reverse', 'Equality, Sort, Reduce'],
+    answer: 0,
+  },
+  {
+    q: 'ทำไมฟิลด์ range จึงไปท้ายสุดใน ESR index?',
+    options: [
+      'ฟิลด์ range ทำ index ไม่ได้เลย',
+      'range ทำให้ฟิลด์ของ index ที่ตามมาไม่เรียงลำดับ ซึ่งจะทำลายการเรียงในภายหลัง',
+      'ฟิลด์ range เลือกได้เฉพาะเจาะจงน้อยที่สุดเสมอ',
+      'MongoDB กำหนดให้ฟิลด์ range มาท้ายสุดในเชิงไวยากรณ์',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณวางฟิลด์ range ไว้ก่อนฟิลด์ sort query plan จะแสดงอะไร?',
+    options: [
+      'query ถูกปฏิเสธ',
+      'ขั้นตอน sort ในหน่วยความจำที่ชัดเจน เพราะลำดับของ index ไม่ตอบสนองการเรียงอีกต่อไป',
+      'covered query โดยไม่มีการดึงเอกสาร',
+      'plan เดียวกับลำดับ ESR ที่ถูกต้อง',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/the-esr-rule" questions={quizEsr} />
+
+<ProgressTracker client:visible id="indexes/the-esr-rule" />

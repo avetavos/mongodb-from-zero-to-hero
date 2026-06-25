@@ -1,0 +1,215 @@
+---
+title: Multi-document transactions
+description: รันหลายการดำเนินการข้ามเอกสารและคอลเลกชันเป็นหน่วย ACID เดียวด้วย session, withTransaction, commit และ abort แสดงด้วยตัวอย่างคลาสสิกการโอนเงินระหว่างบัญชี
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+บางครั้งการดำเนินการครั้งเดียวจำเป็นต้องเปลี่ยนแปลงหลายเอกสารจริง ๆ และต้องสำเร็จทั้งหมดหรือไม่สำเร็จเลยสักอย่าง กรณีในตำราเรียนคือการย้ายเงิน: หักจากบัญชีหนึ่งและเพิ่มให้อีกบัญชีหนึ่ง ถ้าการหักลงแต่การเพิ่มล้มเหลว เงินก็หายไป เมื่อเอกสารที่เกี่ยวข้องไม่สามารถรวมเป็นหนึ่งได้ — เพราะมันเป็นคนละบัญชี หรืออยู่คนละคอลเลกชัน — MongoDB มี **multi-document transaction** จริง ๆ ให้ มันให้การรับประกัน ACID เต็มรูปแบบข้ามทุกการดำเนินการภายในมัน: ทั้งหมด commit ด้วยกันหรือ roll back ด้วยกัน
+
+ราคาของการรับประกันนั้นคือ transaction ต้องใช้ **session** เพื่อรัน ต้องใช้ **replica set** (standalone server รันมันไม่ได้) และมีต้นทุนสูงกว่าการเขียนธรรมดา ดังนั้นนี่จึงเป็นเครื่องมือที่ใช้อย่างจงใจ ไม่ใช่ค่าเริ่มต้น
+
+## transaction อยู่ใน session
+
+ขั้นตอนเป็นแบบเดิมเสมอ คุณเริ่ม **session** จากนั้นรันการดำเนินการของคุณภายใน transaction ที่ผูกกับ session นั้น ตัวช่วยของ driver ที่เรียกว่า `withTransaction` ห่อหุ้มทุกอย่างไว้: มันเริ่ม transaction รัน callback ของคุณ **commit** ถ้ามันคืนค่ามาอย่างสะอาด และ **abort** (roll back ทุกอย่าง) ถ้ามัน throw นอกจากนี้มันยังลอง commit ใหม่โดยอัตโนมัติเมื่อเกิด transient error บางอย่าง ซึ่งเป็นเหตุผลที่คุณควรใช้มันมากกว่าการเริ่มและ commit ด้วยมือ
+
+export const txnFlow = `flowchart TD
+  S["startSession"] --> B["Begin transaction"]
+  B --> O1["Debit the source account"]
+  O1 --> O2["Credit the destination account"]
+  O2 --> C{"Both succeeded?"}
+  C -->|"Yes"| COMMIT["Commit — both changes become visible together"]
+  C -->|"No"| ABORT["Abort — every change is rolled back"]`
+
+<Mermaid code={txnFlow} title="transaction เริ่มใน session รันการดำเนินการของมัน จากนั้น commit การเปลี่ยนแปลงทั้งหมดด้วยกัน หรือ abort และ roll back ทุกอย่างกลับ" />
+
+## การโอนเงินระหว่างบัญชี
+
+ตรงนี้เราย้ายค่าสามหน่วยจาก Ada ไปยัง Linus ข้ามสองเอกสารในคอลเลกชัน `accounts` ทุกการดำเนินการส่ง **session** ผ่านไป ซึ่งคือสิ่งที่ผูกมันเข้ากับ transaction ถ้าการอัปเดตใดล้มเหลว — สมมติว่าต้นทางมียอดคงเหลือไม่พอแล้วเรา throw — การโอนทั้งหมดจะถูก roll back และยอดคงเหลือทั้งสองไม่เปลี่ยนแปลง:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const session = db.getMongo().startSession();
+    session.withTransaction(() => {
+      const accounts = session.getDatabase("library").accounts;
+      accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });
+      accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } });
+    });
+    session.endSession();
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const session = client.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const accounts = client.db("library").collection("accounts");
+        await accounts.updateOne(
+          { name: "Ada" },
+          { $inc: { balance: -3 } },
+          { session }
+        );
+        await accounts.updateOne(
+          { name: "Linus" },
+          { $inc: { balance: 3 } },
+          { session }
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with client.start_session() as session:
+        def transfer(s):
+            accounts = client.library.accounts
+            accounts.update_one(
+                {"name": "Ada"}, {"$inc": {"balance": -3}}, session=s
+            )
+            accounts.update_one(
+                {"name": "Linus"}, {"$inc": {"balance": 3}}, session=s
+            )
+
+        session.with_transaction(transfer)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    session, err := client.StartSession()
+    if err != nil {
+        return err
+    }
+    defer session.EndSession(ctx)
+
+    _, err = session.WithTransaction(ctx, func(sc mongo.SessionContext) (interface{}, error) {
+        accounts := client.Database("library").Collection("accounts")
+        if _, err := accounts.UpdateOne(sc,
+            bson.M{"name": "Ada"}, bson.M{"$inc": bson.M{"balance": -3}}); err != nil {
+            return nil, err
+        }
+        if _, err := accounts.UpdateOne(sc,
+            bson.M{"name": "Linus"}, bson.M{"$inc": bson.M{"balance": 3}}); err != nil {
+            return nil, err
+        }
+        return nil, nil
+    })
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut session = client.start_session().await?;
+    let accounts = client
+        .database("library")
+        .collection::<Document>("accounts");
+
+    session
+        .start_transaction()
+        .and_run((), |session, _| {
+            let accounts = accounts.clone();
+            async move {
+                accounts
+                    .update_one(doc! { "name": "Ada" }, doc! { "$inc": { "balance": -3 } })
+                    .session(&mut *session)
+                    .await?;
+                accounts
+                    .update_one(doc! { "name": "Linus" }, doc! { "$inc": { "balance": 3 } })
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .boxed()
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ก่อนการโอน บัญชีทั้งสองมีสภาพดังนี้:
+
+```json
+[
+  { "_id": 1, "name": "Ada", "balance": 10 },
+  { "_id": 2, "name": "Linus", "balance": 4 }
+]
+```
+
+หลังจาก commit สำเร็จ ค่าสามหน่วยได้ย้ายไปแล้วและยอดรวมยังคงเดิม ไม่มี reader คนใดเคยเห็นช่วงเวลาที่ค่าสามหน่วยของ Ada ออกไปจากเธอแล้วแต่ยังมาไม่ถึง Linus:
+
+```json
+[
+  { "_id": 1, "name": "Ada", "balance": 7 },
+  { "_id": 2, "name": "Linus", "balance": 7 }
+]
+```
+
+**ใน Compass:** Compass ไม่ขับเคลื่อน transaction จาก document editor ของมัน แต่คุณสามารถเปิดแท็บ **mongosh** ที่ฝังอยู่ด้านล่างของหน้าต่าง แล้วรันสคริปต์ที่อิง session ตรงนั้นกับ connection เดียวกันได้
+
+## เคล็ดลับและข้อควรระวัง
+
+- **transaction ต้องใช้ replica set** `mongod` แบบ standalone ตัวเดียวรันมันไม่ได้ การตั้งค่า Docker บนเครื่องในคอร์สนี้รัน replica set แบบหนึ่ง node อยู่แล้ว เพื่อให้คุณลองตัวอย่างเหล่านี้ได้
+- **ทำให้ transaction สั้น** transaction ถือ resource ไว้ตลอดอายุของมันและมีขีดจำกัดเวลาเป็นค่าเริ่มต้น ทำเฉพาะการเขียนที่ต้องเป็น atomic ภายในมัน และทำงานที่ช้า — การเรียกผ่านเครือข่าย การคำนวณหนัก — ไว้ภายนอก
+- **มีต้นทุนด้านประสิทธิภาพจริง** transaction ช้ากว่าการเขียน single-document ที่เทียบเท่า และมันสามารถ abort ภายใต้ write conflict และต้องลองใหม่ ใช้มันที่ซึ่งความถูกต้องเรียกร้อง ไม่ใช่เป็นผ้าห่มปลอบใจ
+- **ส่ง session ผ่านไปทุกที่** การดำเนินการภายใน callback ที่ลืมส่ง session จะรัน *นอก* transaction และจะไม่ถูก roll back
+
+<Callout title="ให้ความสำคัญกับการออกแบบ single-document ก่อน">
+ก่อนเขียน transaction ให้ถามว่าเอกสารสามารถปรับรูปร่างให้การเปลี่ยนแปลงพอดีกับเอกสารใดเอกสารหนึ่งได้หรือไม่ การเขียน single-document นั้นง่ายกว่า เร็วกว่า และเป็น atomic ฟรี ๆ transaction เป็นคำตอบเฉพาะเมื่อข้อมูลไม่สามารถนำมารวมกันได้จริง ๆ
+</Callout>
+
+export const quizMulti = [
+  {
+    q: 'อะไรผูกการดำเนินการเข้ากับ multi-document transaction?',
+    options: [
+      'ชื่อคอลเลกชันพิเศษ',
+      'การส่ง session ให้ทุกการดำเนินการใน transaction',
+      'การตั้ง write concern เป็น majority',
+      'การรันมันภายใน stored procedure',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'withTransaction ทำอะไรเมื่อ callback throw?',
+    options: [
+      'commit งานที่ทำมาจนถึงตอนนั้น',
+      'abort transaction และ roll back การเปลี่ยนแปลงทุกอย่าง',
+      'ลองใหม่ตลอดไปจนกว่าจะสำเร็จ',
+      'เพิกเฉยต่อ error และทำต่อ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ต้องใช้การ deploy แบบใดในการรัน transaction?',
+    options: [
+      'standalone server',
+      'replica set',
+      'sharded cluster เท่านั้น',
+      'การ deploy แบบใดก็ได้ รวมถึง standalone',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คำแนะนำที่ดีสำหรับเนื้อตัวของ transaction คืออะไร?',
+    options: [
+      'ทำงานให้มากที่สุดเท่าที่จะเป็นไปได้ภายในมัน',
+      'ทำให้สั้นและย้ายงานที่ช้าออกไปไว้ภายนอกมัน',
+      'รวมการเรียกผ่านเครือข่ายไว้ภายในมันเสมอ',
+      'ห้ามส่ง session ให้การดำเนินการ',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/multi-document-transactions" questions={quizMulti} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/multi-document-transactions" />

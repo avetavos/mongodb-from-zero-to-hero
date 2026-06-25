@@ -1,0 +1,127 @@
+---
+title: Documents และ BSON
+description: document ถูกเก็บเป็น BSON, type ของ BSON ที่พบบ่อย, และ field _id กับ ObjectId ของมันเข้ารหัสอะไรไว้จริง ๆ
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+คุณเขียน document เป็น JSON แต่ MongoDB ไม่ได้เก็บมันเป็น JSON text มันเก็บมันเป็น **BSON** — ย่อมาจาก **Binary JSON** — รูปแบบไบนารีที่กระชับซึ่งเพิ่มสิ่งที่ JSON ขาดไป: type ตัวเลขจริง, วันที่, ข้อมูลไบนารี, และ type พิเศษอีกสองสามอย่างของมันเอง BSON คือสิ่งที่ทำให้ document สแกนได้เร็ว แม่นยำเรื่องตัวเลข และสามารถพก type ที่ JSON text ธรรมดาแทนค่าไม่ได้
+
+คุณแทบไม่เคยเห็น BSON ดิบ ๆ shell และ driver แปลระหว่าง BSON และ object ตามธรรมชาติของภาษาคุณให้เอง แต่การรู้ว่า type ใดมีให้ใช้บ้าง — และอันไหนที่คุณกำลังเก็บอยู่จริง ๆ — ช่วยคุณให้พ้นจาก bug ละเอียดอ่อนทั้งหมวด โดยเฉพาะเรื่องตัวเลขและวันที่
+
+## type ของ BSON ที่พบบ่อย
+
+field ของ document เก็บอันใดอันหนึ่งในนี้ได้ อันที่ใช้ประจำวันมาก่อน:
+
+- **String** — ข้อความ UTF-8 เช่นชื่อหรือชื่อเรื่อง
+- **Int32** — จำนวนเต็ม 32 บิต เป็นค่าเริ่มต้นสำหรับจำนวนเต็มใน driver หลายตัว
+- **Int64** — จำนวนเต็ม 64 บิต สำหรับจำนวนเต็มที่ใหญ่เกินกว่า 32 บิต
+- **Double** — เลขทศนิยม floating-point 64 บิต เป็นค่าเริ่มต้นสำหรับตัวเลขที่มีจุดทศนิยม
+- **Boolean** — `true` หรือ `false`
+- **Date** — ช่วงเวลาหนึ่ง เก็บเป็นมิลลิวินาทีนับจาก Unix epoch
+- **Array** — รายการค่าที่มีลำดับ ซึ่งตัวมันเองอาจเป็น BSON type ใดก็ได้
+- **Embedded document** — document เต็มที่ซ้อนอยู่ภายใน field โดยมี field ของตัวเอง
+- **ObjectId** — identifier ขนาด 12 ไบต์ที่กระชับ เป็น type เริ่มต้นของ field `_id`
+- **Null** — ค่าว่างที่ระบุชัด (ต่างจากการที่ field ไม่มีอยู่)
+- **Decimal128** — เลขทศนิยม 128 บิตสำหรับเลขคณิตฐาน 10 ที่แม่นยำ เป็น type ที่ถูกต้องสำหรับเงิน
+
+document ก็แค่ type เหล่านี้ประกอบกัน นี่คือตัวอย่างที่อุดมสมบูรณ์ซึ่งใช้พวกมันส่วนใหญ่พร้อมกัน:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Ada",
+  "active": true,
+  "fines": 0,
+  "balance": "12.50",
+  "visits": 4815162342,
+  "joined": "2023-04-12T09:30:00Z",
+  "borrowed": ["Compilers", "Algorithms"],
+  "address": {
+    "city": "Cambridge",
+    "zip": "02139"
+  },
+  "nickname": null
+}
+```
+
+ใน document นั้น `name` เป็น string, `active` เป็น boolean, `fines` เป็น int32, `balance` เป็น Decimal128 (แสดงเป็น string เพื่อให้ความแม่นยำของมันอยู่รอด), `visits` เป็น int64, `joined` เป็น Date, `borrowed` เป็น array, `address` เป็น embedded document, และ `nickname` เป็น null ที่ระบุชัด หนึ่ง field หนึ่ง type — แต่ document เดียวผสมพวกมันได้อย่างอิสระ
+
+## type ซ้อนกันอย่างไร
+
+พลังของโมเดล document คือ array และ embedded document สามารถบรรจุ array และ document เพิ่มได้อีก ลึกลงไปได้ตามที่ข้อมูลของคุณต้องการ
+
+export const bsonDiagram = `flowchart TD
+  Doc["Document"] --> Scalars["Scalar fields\n string, int32, double, bool, date"]
+  Doc --> Id["_id: ObjectId"]
+  Doc --> Arr["Array field\n borrowed[ ]"]
+  Doc --> Emb["Embedded document\n address { }"]
+  Emb --> EmbF["city, zip"]`
+
+<Mermaid code={bsonDiagram} title="document คือ scalar field บวกกับ array และ embedded document ที่ซ้อนกันลึกเท่าใดก็ได้" />
+
+## field _id และ ObjectId
+
+ทุก document มี field `_id` และมันคือ **primary key** ของ document — ไม่ซ้ำกันภายใน collection ของมัน ถ้าคุณไม่ใส่มาตอน insert, MongoDB สร้าง `_id` ให้คุณ และ type เริ่มต้นของมันคือ **ObjectId**: ค่าขนาด 12 ไบต์ที่ออกแบบให้ไม่ซ้ำกันโดยไม่ต้องประสานงานกับเซิร์ฟเวอร์
+
+12 ไบต์เหล่านั้นไม่ใช่ค่าสุ่ม ObjectId เข้ารหัสตามลำดับดังนี้:
+
+- **timestamp 4 ไบต์** — วินาทีที่ id ถูกสร้าง นี่คือเหตุผลที่ ObjectId เรียงลำดับคร่าว ๆ ตามเวลาที่สร้าง และเหตุผลที่คุณสามารถดึงวันที่สร้างคร่าว ๆ ออกมาจากมันได้
+- **ค่าสุ่ม 5 ไบต์** — ไม่ซ้ำกันต่อเครื่องและ process ดังนั้นสอง process จึงไม่ชนกัน
+- **counter 3 ไบต์** — เพิ่มขึ้นต่อ process ดังนั้นแม้แต่ id ที่สร้างในวินาทีเดียวกันก็ต่างกัน
+
+เพราะ timestamp มาก่อน การเรียง collection ตาม `_id` จึงเกือบเหมือนการเรียงตามเวลาที่ insert — ผลพลอยได้ฟรีที่สะดวก
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Ada" }
+```
+
+คุณสามารถตั้ง `_id` เองเป็นค่าใดก็ได้ที่ไม่ซ้ำกัน — string, ตัวเลข, อีเมล — เมื่อข้อมูลของคุณมี key ตามธรรมชาติอยู่แล้ว MongoDB ต้องการเพียงให้มันมีอยู่และไม่ซ้ำกัน มันไม่จำเป็นต้องเป็น ObjectId
+
+## เคล็ดลับและข้อควรระวัง
+
+- **ObjectId ถูกสร้างฝั่ง client** โดย driver ไม่ใช่เซิร์ฟเวอร์ นั่นหมายความว่าแอปพลิเคชันของคุณรู้ `_id` ใหม่ทันทีที่มันสร้าง document ก่อนที่การ insert จะไปถึง database ด้วยซ้ำ
+- **Date ไม่เหมือนกับ BSON Timestamp type** ใช้ **Date** สำหรับเวลาที่คุณสนใจ — เมื่อมีบางสิ่งเกิดขึ้น ส่วน **Timestamp** ที่แยกออกไปเป็นค่าภายในที่ MongoDB ใช้สำหรับการจัดลำดับ replication และแทบไม่ใช่สิ่งที่คุณต้องการในข้อมูลของคุณเอง
+- **ใช้ Decimal128 สำหรับเงิน** **Double** ไม่สามารถแทนค่าเช่น `0.10` ได้อย่างแม่นยำ ซึ่งนำไปสู่ข้อผิดพลาดในการปัดเศษเวลารวมยอด Decimal128 ทำเลขคณิตฐาน 10 ได้อย่างแม่นยำ
+- **Null ไม่ใช่การไม่มีอยู่** field ที่ตั้งเป็น `null` มีอยู่ด้วยค่า null; field ที่ไม่เคยถูกตั้งค่าเลยจะไม่มีอยู่เลย query สามารถแยกแยะสองอย่างนี้ได้ ดังนั้นเลือกอย่างตั้งใจ
+
+<Callout title="JSON เข้าไป BSON อยู่ข้างใต้">
+คุณคิดเป็น JSON แต่ MongoDB เก็บ BSON — รูปแบบไบนารีที่มีตัวเลขจริง, วันที่, และ ObjectId การรู้ว่า field หนึ่งเก็บ type อะไรจริง ๆ โดยเฉพาะสำหรับตัวเลขและวันที่ ป้องกัน bug เงียบ ๆ ทั้งหมวด
+</Callout>
+
+export const quizBson = [
+  {
+    q: 'What does BSON stand for, and why does MongoDB use it?',
+    options: [
+      'Basic Storage Object Notation; มันเรียบง่ายกว่า JSON',
+      'Binary JSON; รูปแบบไบนารีที่กระชับซึ่งเพิ่ม type จริงอย่างวันที่และ ObjectId',
+      'Buffered Serial Object Network; มันสตรีมข้อมูลได้เร็วกว่า',
+      'Block Structured Object Notation; มันเก็บข้อมูลในบล็อกที่ตายตัว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the first part of an ObjectId encode?',
+    options: [
+      'ตัวเลขสุ่มเท่านั้น',
+      'timestamp 4 ไบต์ของตอนที่มันถูกสร้าง',
+      'ชื่อ collection',
+      'ขนาดของ document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which BSON type should you use to store money exactly?',
+    options: ['Double', 'Int32', 'Decimal128', 'String'],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/documents-and-bson" questions={quizBson} />
+
+<ProgressTracker client:visible id="intro-and-documents/documents-and-bson" />

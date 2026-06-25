@@ -1,0 +1,227 @@
+---
+title: Pipeline basics — $match และ $project
+description: ฟิลเตอร์สตรีมตั้งแต่เนิ่น ๆ ด้วย $match เพื่อให้ index ช่วยได้ จัดรูปและคำนวณฟิลด์ด้วย $project และเรียนรู้ว่าทำไมลำดับของ stage จึงสำคัญ
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+มีสอง stage ที่แบกรับงาน aggregation ส่วนใหญ่ไว้ก่อนที่อะไรหรูหราจะเกิดขึ้น: `$match` ทิ้งเอกสารที่คุณไม่ต้องการ และ `$project` จัดรูปเอกสารที่คุณเก็บไว้ใหม่ เรียนรู้สองตัวนี้ให้ดีแล้วคุณก็มีภาษาเคียวรีที่ก้าวข้าม `find` แล้ว บทเรียนที่ละเอียดอ่อนแต่สำคัญที่ซ่อนอยู่ในนั้นคือ **ตำแหน่งที่คุณวาง stage เปลี่ยนว่า pipeline ของคุณเร็วแค่ไหนและถูกต้องแค่ไหน**
+
+เรายังคงใช้คอลเลกชัน `sales` ต่อ ออเดอร์หนึ่งรายการมีหน้าตาแบบนี้:
+
+```json
+{
+  "_id": "a1",
+  "title": "Dune",
+  "genre": "fiction",
+  "quantity": 3,
+  "price": 12,
+  "buyer": "Ada"
+}
+```
+
+## $match ฟิลเตอร์สตรีม — วางไว้ก่อน
+
+`$match` เก็บเฉพาะเอกสารที่ฟิลด์ของมันตรงตามเงื่อนไข ไวยากรณ์ของมันคือไวยากรณ์เคียวรีเดียวกับที่คุณรู้จาก `find` อยู่แล้ว ดังนั้น `$gt`, `$in`, `$and` และที่เหลือทั้งหมดใช้ได้ เหตุผลที่ต้องวางมันไว้ **ก่อน** ไม่ใช่เรื่องสไตล์: เมื่อ `$match` เป็น stage แรกสุด เอนจิน aggregation สามารถใช้ **index** ของคอลเลกชันเพื่อข้ามเอกสารที่ไม่ตรงกันได้ทั้งหมด แทนที่จะสตรีมทั้งคอลเลกชันผ่าน stage ในภายหลัง
+
+export const matchProject = `flowchart LR
+  In["all sales"] --> M["$match: price >= 10 (uses index)"]
+  M --> P["$project: keep title, compute revenue"]
+  P --> Out["slim, reshaped documents"]`
+
+<Mermaid code={matchProject} title="ฟิลเตอร์ก่อนเพื่อให้ index ตัดสตรีมได้ แล้วค่อยจัดรูปสิ่งที่เหลือรอด" />
+
+ที่นี่เราเก็บเฉพาะออเดอร์ที่มีราคาอย่างน้อยสิบดอลลาร์ต่อชิ้น:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $match: { price: { $gte: 10 } } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $match: { price: { $gte: 10 } } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$match": {"price": {"$gte": 10}}},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$match": { "price": { "$gte": 10 } } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะออเดอร์ที่ราคาตั้งแต่สิบขึ้นไปเท่านั้นที่รอดเข้าไปยัง stage ถัดไป:
+
+```json
+[
+  { "_id": "a1", "title": "Dune", "genre": "fiction", "quantity": 3, "price": 12, "buyer": "Ada" },
+  { "_id": "a4", "title": "Foundation", "genre": "fiction", "quantity": 1, "price": 15, "buyer": "Linus" }
+]
+```
+
+## $project จัดรูปและคำนวณ
+
+`$project` ตัดสินใจว่าฟิลด์ใดออกจาก stage และให้คุณสร้างฟิลด์ **ใหม่** จาก expression ตั้งฟิลด์เป็น `1` เพื่อเก็บไว้ `0` เพื่อทิ้ง หรือเป็น expression เพื่อคำนวณ การอ้างอิงฟิลด์ภายใน expression ใช้ตัวนำหน้า `$` ดังนั้น `"$price"` หมายถึง "ค่าของฟิลด์ price" ที่นี่เราเก็บ title และคำนวณฟิลด์ `revenue` เป็น price คูณ quantity:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $match: { price: { $gte: 10 } } },
+      { $project: {
+          _id: 0,
+          title: 1,
+          revenue: { $multiply: ["$price", "$quantity"] }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $match: { price: { $gte: 10 } } },
+      { $project: {
+          _id: 0,
+          title: 1,
+          revenue: { $multiply: ["$price", "$quantity"] },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$match": {"price": {"$gte": 10}}},
+        {"$project": {
+            "_id": 0,
+            "title": 1,
+            "revenue": {"$multiply": ["$price", "$quantity"]},
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
+        {{"$project", bson.D{
+            {"_id", 0},
+            {"title", 1},
+            {"revenue", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$match": { "price": { "$gte": 10 } } },
+        doc! { "$project": {
+            "_id": 0,
+            "title": 1,
+            "revenue": { "$multiply": ["$price", "$quantity"] }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เอกสารแต่ละอันที่รอดมาตอนนี้เพรียวบางและมีฟิลด์ที่คำนวณแล้ว:
+
+```json
+[
+  { "title": "Dune", "revenue": 36 },
+  { "title": "Foundation", "revenue": 15 }
+]
+```
+
+**ใน Compass:** เพิ่ม stage `$match` แล้วตามด้วย stage `$project` ในแท็บ **Aggregations** ตัวอย่างสดใต้แต่ละ stage จะแสดงจำนวนเอกสารที่หดลงหลังจาก `$match` และฟิลด์ที่เปลี่ยนไปหลังจาก `$project` ซึ่งทำให้เห็นผลของลำดับ stage ได้ชัดเจนในพริบตา
+
+## ทำไมลำดับของ stage จึงสำคัญ
+
+วาง `$match` ไว้ *หลัง* stage ที่หนัก แล้วคุณก็จ่ายเพื่อประมวลผลเอกสารที่คุณกำลังจะทิ้งอยู่แล้ว วางไว้ *ก่อน* แล้วเอนจินจะตัดสตรีม — บางครั้งด้วย index — ก่อนที่งานอื่นใดจะเกิดขึ้น หลักการง่าย ๆ คือ: **ฟิลเตอร์ให้เร็วที่สุดเท่าที่ทำได้ จัดรูปให้ช้าที่สุดเท่าที่ทำได้** `$project` ที่ทิ้งฟิลด์ขนาดใหญ่ยังช่วย stage ในภายหลังได้ด้วยการทำให้แต่ละเอกสารเล็กลง แต่ชัยชนะที่ใหญ่ที่สุดเกือบทุกครั้งมาจาก `$match` ที่อยู่เนิ่น ๆ
+
+## ทิปและกับดัก
+
+- `$match` ที่อยู่เนิ่น ๆ ใช้ index ได้ ส่วน `$match` ที่มาหลัง `$group` หรือ `$project` มักใช้ไม่ได้ เพราะเอกสาร ณ จุดนั้นถูกคำนวณขึ้นใหม่ ไม่ใช่ถูกจัดเก็บไว้
+- ใน `$project` การผสมการรวม (`1`) และการยกเว้น (`0`) ใน stage เดียวกันอนุญาตให้ทำได้เฉพาะกับ `_id` เท่านั้น ให้ระบุฟิลด์ที่คุณต้องการ หรือทิ้งฟิลด์ที่คุณไม่ต้องการ — ไม่ใช่ทั้งสองอย่าง
+- เส้นทางฟิลด์ภายใน expression ต้องมีตัวนำหน้า `$`: `"$price"` คือค่าของฟิลด์ ส่วน `"price"` คือสตริงตัวอักษรนั้นเอง
+- ใช้ `$project` (หรือญาติของมันอย่าง `$set`) เพื่อคำนวณครั้งเดียวแล้วนำผลลัพธ์ไปใช้ซ้ำในภายหลัง แทนที่จะทำ expression เดียวกันซ้ำในหลาย stage
+
+<Callout title="ฟิลเตอร์เนิ่น ๆ จัดรูปทีหลัง">
+สัญชาตญาณแรกสำหรับ pipeline ใด ๆ ควรเป็น: ฉัน $match ให้เร็วกว่านี้ได้ไหม? ฟิลเตอร์ที่อยู่เนิ่น ๆ คือชัยชนะด้านประสิทธิภาพที่ราคาถูกที่สุดใน aggregation เพราะมันสามารถพึ่งพา index และทำให้ทุกอย่างที่ตามมาหดเล็กลง
+</Callout>
+
+export const quizBasics = [
+  {
+    q: 'ทำไมจึงดีที่สุดที่จะวาง $match เป็น stage แรกของ pipeline?',
+    options: [
+      'มันเป็น stage เดียวที่อนุญาตให้รันก่อน',
+      'เพื่อให้เอนจินใช้ index และตัดสตรีมก่อนงานในภายหลัง',
+      'เพราะ $match ปรากฏที่อื่นไม่ได้',
+      'มันเรียงลำดับผลลัพธ์โดยอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน stage $project, "$price" อ้างถึงอะไร?',
+    options: [
+      'ข้อความตัวอักษร price',
+      'ค่าที่จัดเก็บในฟิลด์ price ของแต่ละเอกสาร',
+      'ฟิลด์ใหม่ชื่อ price ที่ตั้งเป็นศูนย์',
+      'ราคาของทั้งคอลเลกชัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'รูปแบบ $project ใดที่ไม่ได้รับอนุญาตใน stage เดียว?',
+    options: [
+      'การรวมหลายฟิลด์ด้วย 1',
+      'การยกเว้นหลายฟิลด์ด้วย 0',
+      'การผสม 1 และ 0 สำหรับฟิลด์ที่ไม่ใช่ _id',
+      'การคำนวณฟิลด์ด้วย expression',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="aggregation/pipeline-basics" questions={quizBasics} />
+
+<ProgressTracker client:visible id="aggregation/pipeline-basics" />

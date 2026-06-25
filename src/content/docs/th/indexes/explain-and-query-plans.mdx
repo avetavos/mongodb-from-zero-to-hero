@@ -1,0 +1,258 @@
+---
+title: explain และ query plan
+description: อ่านผลลัพธ์ของ explain เพื่อยืนยันว่ามีการใช้ index เปรียบเทียบ COLLSCAN กับ IXSCAN ชั่งน้ำหนักจำนวนเอกสารที่ตรวจกับจำนวนเอกสารที่คืน และจับ covered query
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+คุณสร้าง index ที่สมบูรณ์แบบได้และยังคงไม่รู้ว่ามันได้ผล วิธีเดียวที่จะมั่นใจคือถาม MongoDB ว่ามันรัน query จริงอย่างไร และเครื่องมือสำหรับเรื่องนั้นคือ `explain` เมื่อให้ query มา `explain` รายงาน **plan** ที่เซิร์ฟเวอร์เลือก — ว่ามันใช้ index ใด หรือมันถอยกลับไปทำการสแกนเต็มหรือไม่ — และในโหมดที่อุดมที่สุด ก็รายงานตัวเลขจริงจากการรันมัน การอ่านผลลัพธ์นั้นคือทักษะที่ปฏิบัติได้จริงที่สุดในทั้งโมดูลนี้ เพราะมันเปลี่ยน "ฉันคิดว่านี่เร็ว" ให้กลายเป็น "ฉันเห็นว่ามันเร็ว"
+
+## ขอ execution stats
+
+`explain("executionStats")` รัน query แล้วคืนทั้ง plan ที่เลือกและจำนวนที่วัดได้ แนบมันกับ query ใดก็ได้กับ `members` ในห้องสมุดของเรา:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ city: "Berlin" })
+      .explain("executionStats")
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members")
+      .find({ city: "Berlin" })
+      .explain("executionStats");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.find({"city": "Berlin"}).explain()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var result bson.M
+    cmd := bson.D{
+        {Key: "explain", Value: bson.D{
+            {Key: "find", Value: "members"},
+            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
+        }},
+        {Key: "verbosity", Value: "executionStats"},
+    }
+    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let explain = db
+        .run_command(doc! {
+            "explain": { "find": "members", "filter": { "city": "Berlin" } },
+            "verbosity": "executionStats",
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## การอ่าน COLLSCAN
+
+ถ้าไม่มี index ครอบตัวกรอง ขั้นตอนของ plan ที่ชนะคือ `COLLSCAN` ตัวเลขที่บอกอะไรได้คือ `totalDocsExamined` — จำนวนเอกสารที่เซิร์ฟเวอร์ต้องอ่าน — เทียบกับ `nReturned` — จำนวนที่มันคืนกลับมาจริง การสแกนอ่านทุกอย่างเพื่อหาเพียงไม่กี่ตัว:
+
+```json
+{
+  "queryPlanner": {
+    "winningPlan": { "stage": "COLLSCAN", "direction": "forward" }
+  },
+  "executionStats": {
+    "nReturned": 3,
+    "totalDocsExamined": 10000,
+    "executionTimeMillis": 12
+  }
+}
+```
+
+การตรวจหนึ่งหมื่นเอกสารเพื่อคืนสามตัวคืออาการตามตำราของการขาด index อัตราส่วนของ `totalDocsExamined` ต่อ `nReturned` คือมาตรวัดประสิทธิภาพของคุณ: ยิ่งใกล้หนึ่งต่อหนึ่งยิ่งดี
+
+## การอ่าน IXSCAN
+
+สร้าง index บน `city` รัน `explain` เดิม แล้ว plan ที่ชนะจะเปลี่ยน ขั้นตอนบนสุดตอนนี้คือ `FETCH` — การดึงเอกสารฉบับเต็ม — ซึ่งป้อนมาจาก `IXSCAN` ที่เดินเฉพาะชิ้นที่เกี่ยวข้องของ index ที่สำคัญคือ `totalKeysExamined` และ `totalDocsExamined` ลดลงมาตรงกับ `nReturned`:
+
+```json
+{
+  "queryPlanner": {
+    "winningPlan": {
+      "stage": "FETCH",
+      "inputStage": {
+        "stage": "IXSCAN",
+        "indexName": "city_1",
+        "direction": "forward"
+      }
+    }
+  },
+  "executionStats": {
+    "nReturned": 3,
+    "totalKeysExamined": 3,
+    "totalDocsExamined": 3,
+    "executionTimeMillis": 0
+  }
+}
+```
+
+เซิร์ฟเวอร์ตรวจคีย์ index สามคีย์พอดีและดึงเอกสารสามฉบับพอดีเพื่อคืนผลลัพธ์สามตัว นั่นคือชัยชนะที่ index ซื้อให้คุณ ทำให้มองเห็นได้
+
+## planner เลือกอย่างไร
+
+เมื่อ index หลายอันให้บริการ query ได้ MongoDB ไม่เดา มันสร้าง plan ผู้ท้าชิงสำหรับแต่ละ index ที่ใช้การได้ รันสั้นๆ พร้อมกัน เลือกอันที่ทำงานน้อยที่สุด แล้วแคชตัวเลือกนั้นไว้เพื่อให้ query ที่เหมือนกันในอนาคตข้ามการแข่งขัน:
+
+export const plannerDiagram = `flowchart LR
+  Q["Incoming query"] --> P["Query planner"]
+  P --> C1["Candidate plan: index A"]
+  P --> C2["Candidate plan: index B"]
+  P --> C3["Candidate plan: collection scan"]
+  C1 --> T["Trial run — measure work"]
+  C2 --> T
+  C3 --> T
+  T --> W["Winning plan"]
+  W --> Cache["Plan cached for matching queries"]`
+
+<Mermaid code={plannerDiagram} title="planner ทดสอบแต่ละผู้ท้าชิง เลือกอันที่ถูกที่สุด และแคชผู้ชนะไว้สำหรับ query ที่ตรงกัน" />
+
+นี่คือเหตุผลที่ `explain` รายงาน `winningPlan` และบางครั้งรายการ `rejectedPlans`: คุณกำลังเห็นผลลัพธ์ของการแข่งขันนั้น
+
+## covered query
+
+มีอีกหนึ่งระดับที่ดีกว่า `IXSCAN` ที่เร็วบวก `FETCH`: query ที่ index ตอบได้**โดยไม่ต้องดึงเอกสารเลย** สิ่งนี้เกิดขึ้นเมื่อทุกฟิลด์ที่ query ต้องการ — ทั้งฟิลด์ตัวกรองและฟิลด์ที่คุณขอกลับมาใน projection — อยู่ใน index เซิร์ฟเวอร์อ่านคำตอบตรงจากคีย์ index และข้ามเอกสารไปทั้งหมด query เช่นนั้นเป็น **covered** และ plan ของมันไม่มีขั้นตอน `FETCH`
+
+สร้าง index บน `{ city: 1, joined: 1 }` แล้วขอเฉพาะ `joined` ขณะกด `_id` ไว้ (เพราะ `_id` ไม่อยู่ใน index นี้):
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members
+      .find({ city: "Berlin" }, { joined: 1, _id: 0 })
+      .explain("executionStats")
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members")
+      .find({ city: "Berlin" }, { projection: { joined: 1, _id: 0 } })
+      .explain("executionStats");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.find(
+        {"city": "Berlin"},
+        {"joined": 1, "_id": 0},
+    ).explain()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cmd := bson.D{
+        {Key: "explain", Value: bson.D{
+            {Key: "find", Value: "members"},
+            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
+            {Key: "projection", Value: bson.D{{Key: "joined", Value: 1}, {Key: "_id", Value: 0}}},
+        }},
+        {Key: "verbosity", Value: "executionStats"},
+    }
+    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let explain = db
+        .run_command(doc! {
+            "explain": {
+                "find": "members",
+                "filter": { "city": "Berlin" },
+                "projection": { "joined": 1, "_id": 0 },
+            },
+            "verbosity": "executionStats",
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+plan ไปจาก `IXSCAN` ตรงสู่ผลลัพธ์โดยไม่มี `FETCH` คั่นกลาง และ `totalDocsExamined` เป็น `0` — เป็นเครื่องบ่งชี้ว่าไม่เคยมีการอ่านเอกสารเลย:
+
+```json
+{
+  "queryPlanner": {
+    "winningPlan": {
+      "stage": "PROJECTION_COVERED",
+      "inputStage": { "stage": "IXSCAN", "indexName": "city_1_joined_1" }
+    }
+  },
+  "executionStats": {
+    "nReturned": 3,
+    "totalKeysExamined": 3,
+    "totalDocsExamined": 0
+  }
+}
+```
+
+**ใน Compass:** แท็บ **Explain Plan** เรนเดอร์สิ่งนี้เป็นต้นไม้ของขั้นตอนแบบภาพพร้อมจำนวนเดียวกัน คุณจึงยืนยัน `IXSCAN` จับ `COLLSCAN` ที่หลงมา และเห็น `Documents Examined` เทียบกับ `Documents Returned` ได้โดยไม่ต้องอ่านผลลัพธ์ดิบ
+
+## เคล็ดลับและจุดพลาด
+
+- อัตราส่วนหัวเรื่องคือ `totalDocsExamined` เทียบกับ `nReturned` เมื่อมันใกล้หนึ่งต่อหนึ่ง index ของคุณกำลังทำหน้าที่ของมัน เมื่อมันพองโต แสดงว่ามีบางอย่างกำลังสแกน
+- `executionStats` รัน query จริงเพื่อวัดมัน ดังนั้นบนการเขียนหรือการอ่านที่แพง จงระมัดระวังเรื่องจังหวะที่คุณเรียกมัน
+- covered query ต้องจัดการ `_id` เนื่องจาก `_id` ถูกคืนมาโดยปริยายและแทบไม่อยู่ใน index ที่คุณทำเอง คุณมักจะกดมันไว้ใน projection เพื่อให้ query ยังคงเป็น covered
+- ขั้นตอน `FETCH` ไม่ใช่ความล้มเหลว — มันแค่หมายความว่า index เจอเอกสารแล้วแต่ projection ต้องการฟิลด์ที่ index ไม่ได้ถือไว้ covered query เป็นการเพิ่มประสิทธิภาพ ไม่ใช่ข้อบังคับ
+
+<Callout title="เชื่อ plan ไม่ใช่ลางสังหรณ์ของคุณ">
+รัน explain("executionStats") แล้วเปรียบเทียบ totalDocsExamined กับ nReturned COLLSCAN หรือช่องว่างที่ใหญ่ระหว่างทั้งสองคือหลักฐานว่าคุณต้องการ index ที่ดีกว่า — และ totalDocsExamined ที่เป็นศูนย์คือหลักฐานว่า query ของคุณเป็น covered
+</Callout>
+
+export const quizExplain = [
+  {
+    q: 'ในผลลัพธ์ของ explain ขั้นตอน COLLSCAN บ่งบอกอะไร?',
+    options: [
+      'query ใช้ index ที่มีประสิทธิภาพที่สุดที่มีอยู่',
+      'query อ่านทั้ง collection เพราะไม่มี index ที่ใช้ประโยชน์ได้ให้บริการมัน',
+      'query ถูกครอบโดย index (covered)',
+      'query รันล้มเหลว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การเปรียบเทียบใดบ่งชี้ query ที่ไม่มีประสิทธิภาพได้ดีที่สุด?',
+    options: [
+      'nReturned น้อยกว่า totalDocsExamined มาก',
+      'totalKeysExamined เท่ากับ nReturned',
+      'executionTimeMillis เท่ากับศูนย์',
+      'winningPlan ที่ระบุชื่อ index',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'อะไรทำให้ query เป็น "covered"?',
+    options: [
+      'มันใช้ index อะไรก็ได้',
+      'ทุกฟิลด์ที่มันต้องการ รวมถึงฟิลด์ที่ projected อยู่ใน index ดังนั้นจึงไม่มีการดึงเอกสาร',
+      'มันคืนเอกสารน้อยกว่าสิบฉบับ',
+      'มันรันภายใน transaction',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/explain-and-query-plans" questions={quizExplain} />
+
+<ProgressTracker client:visible id="indexes/explain-and-query-plans" />

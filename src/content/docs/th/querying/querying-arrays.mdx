@@ -1,0 +1,312 @@
+---
+title: การ query array
+description: จับคู่ element เดียวของ array บังคับหลายเงื่อนไขบน element เดียวด้วย $elemMatch บังคับให้มีหลายค่าด้วย $all filter ตามความยาวด้วย $size และเข้าถึง element ตาม index ด้วย dot path
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+field ของ document สามารถเก็บ array ได้ และการ query มันมีเรื่องเซอร์ไพรส์ที่น่ารักติดมาด้วย: เมื่อคุณ filter field ที่เป็น array กับค่าธรรมดา MongoDB จะตรวจ **ทุก element** และจับคู่ถ้า *มีอันใด* ผ่านเงื่อนไข กฎข้อเดียวนี้ทำให้ query array แบบง่ายอ่านได้เหมือนกับ query แบบ scalar ทุกประการ ความซับซ้อนจะปรากฏก็ต่อเมื่อคุณต้องการให้หลายเงื่อนไขเป็นจริงบน element *เดียวกัน* ซึ่งเป็นจุดที่ `$elemMatch` แสดงคุณค่าของมัน
+
+ในบทเรียนนี้สมาชิกแต่ละคนถือ array `borrowed` ของชื่อหนังสือ และบางคนถือ array `tags` ของป้ายความสนใจ
+
+## การจับคู่ element เดียว
+
+หากต้องการถามว่า "ใครยืม *Compilers* อยู่ตอนนี้?" ให้ filter field ที่เป็น array ด้วยค่านั้นราวกับว่ามันเป็น scalar MongoDB จะมองเข้าไปใน array ให้คุณเอง:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ borrowed: "Compilers" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ borrowed: "Compilers" })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"borrowed": "Compilers"}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"borrowed": "Compilers"})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "borrowed": "Compilers" })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+สมาชิกคนใดก็ตามที่ array มีชื่อหนังสือนั้นจะตรง ไม่ว่ามันจะอยู่ตำแหน่งไหนในรายการ:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "borrowed": ["Algorithms", "Compilers"]
+  }
+]
+```
+
+## หลายเงื่อนไขบน element เดียวกัน: $elemMatch
+
+นี่คือกับดัก สมมติว่า `scores` เก็บ array ของตัวเลข และคุณต้องการ document ที่มี element มากกว่า 80 **และ** น้อยกว่า 90 การเขียน `{ scores: { $gt: 80, $lt: 90 } }` *ไม่ได้* หมายความเช่นนั้น — มันจับคู่ถ้า *บาง* element เกิน 80 และ *บาง* element (อาจคนละตัว) ต่ำกว่า 90 หากต้องการตรึงทั้งสองเงื่อนไขไว้บน **หนึ่ง** element ให้ใช้ `$elemMatch`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      scores: { $elemMatch: { $gt: 80, $lt: 90 } }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      scores: { $elemMatch: { $gt: 80, $lt: 90 } }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "scores": {"$elemMatch": {"$gt": 80, "$lt": 90}}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "scores": bson.M{"$elemMatch": bson.M{"$gt": 80, "$lt": 90}},
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "scores": { "$elemMatch": { "$gt": 80, "$lt": 90 } }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะ document ที่มี element เดียวอยู่ในช่วง 81–89 เท่านั้นที่ตรง — ตรงนี้ `85` ผ่านเกณฑ์ แม้ว่า array จะมีค่าที่อยู่นอกช่วงด้วย:
+
+```json
+[
+  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "scores": [70, 85, 95] }
+]
+```
+
+## การบังคับให้มีหลายค่า: $all
+
+`$all` จับคู่เมื่อ array มี **ทุกค่า** ที่ระบุไว้ ไม่ว่าจะเรียงลำดับใด มันคือ AND ของการเป็นสมาชิก "ใครยืมทั้ง *Algorithms* และ *Compilers* พร้อมกัน?" ก็คือสิ่งนี้พอดี:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      borrowed: { $all: ["Algorithms", "Compilers"] }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      borrowed: { $all: ["Algorithms", "Compilers"] }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "borrowed": {"$all": ["Algorithms", "Compilers"]}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "borrowed": bson.M{"$all": bson.A{"Algorithms", "Compilers"}},
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "borrowed": { "$all": ["Algorithms", "Compilers"] }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะสมาชิกที่ถือทั้งสองชื่อหนังสือเท่านั้นที่ส่งกลับมา การมีเพียงอันเดียวยังไม่พอ:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "borrowed": ["Algorithms", "Compilers"]
+  }
+]
+```
+
+## การ filter ตามความยาว: $size
+
+`$size` จับคู่ array ที่มีความยาวตรงเป๊ะ "ใครยืมหนังสืออยู่สองเล่มพอดีตอนนี้?" คือ query operator เดียว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ borrowed: { $size: 2 } })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ borrowed: { $size: 2 } })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"borrowed": {"$size": 2}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"borrowed": bson.M{"$size": 2}})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "borrowed": { "$size": 2 } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+สมาชิกที่ array `borrowed` มี element สองตัวพอดีจะตรง:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "borrowed": ["Algorithms", "Compilers"]
+  }
+]
+```
+
+## การเข้าถึง element ตาม index
+
+ตำแหน่งใน array สามารถระบุที่อยู่ได้ด้วย dotted numeric path: `borrowed.0` คือ element แรก, `borrowed.1` คือตัวที่สอง และต่อ ๆ ไป ใช้สิ่งนี้เพื่อ query element ที่ตำแหน่งที่รู้แน่ — "หนังสือเล่ม *แรก* ที่ใครยืมคือ *Algorithms*?":
+
+```js
+db.members.find({ "borrowed.0": "Algorithms" })
+```
+
+dot path เดียวกันใช้ได้เมื่อ array เก็บ sub-document — `reviews.0.rating` เข้าถึง field `rating` ของรีวิวแรก ซึ่งเป็นรูปแบบที่บทเรียนถัดไปจะเจาะลึก
+
+**ใน Compass:** filter สำหรับ array ใส่ในแถบ filter เหมือนกับ scalar เลย เช่น `{ borrowed: { $size: 2 } }` Compass แสดง array ที่ตรงแบบ inline และให้คุณกางออกเพื่อดูแต่ละ element ได้
+
+## เคล็ดลับและจุดที่พลาดง่าย
+
+- **ทำไม `$elemMatch` ถึงสำคัญ:** ถ้าไม่มีมัน หลายเงื่อนไขบน field ที่เป็น array จะถูกตรวจ *ข้ามทุก element* ดังนั้น `{ scores: { $gt: 80, $lt: 90 } }` อาจตรงกับ array อย่าง `[70, 95]` ได้ — แต่ละ element ผ่านเกณฑ์คนละอัน `$elemMatch` บังคับให้ทุกเงื่อนไขอยู่บน element เดียว ซึ่งแทบจะตรงกับสิ่งที่คุณตั้งใจจริง ๆ เสมอ
+- **`$all` ไม่ขึ้นกับลำดับ** มันแค่ตรวจว่าแต่ละค่ามีอยู่ที่ใดที่หนึ่ง มันไม่บอกอะไรเกี่ยวกับตำแหน่งหรือ element ส่วนเกิน ในขณะที่ `$size` ตรึงความยาวที่แน่นอน
+- **`$size` รับเฉพาะตัวเลขตรง ๆ เท่านั้น** คุณเขียน `{ $size: { $gt: 1 } }` ไม่ได้ หากต้องการ query "มากกว่าหนึ่ง element" ให้สร้าง field ความยาวหรือใช้ aggregation framework
+- **filter ค่าเดียวบน array จับคู่แบบการบรรจุ (containment)** `{ borrowed: "Compilers" }` จับคู่ array ใดก็ตามที่ *มี* ชื่อหนังสือนั้น — มันไม่ได้บังคับว่า array ต้องเท่ากับ `["Compilers"]`
+
+<Callout title="ข้ามทุก element กับ ภายใน element เดียว">
+คำถามที่กำหนดทุก query สำหรับ array คือ: เงื่อนไขต้องเป็นจริงบน element เดียวกัน หรือเพียงที่ใดที่หนึ่งใน array? filter หลายเงื่อนไขแบบธรรมดากระจายไปทั่ว element ส่วน $elemMatch ล็อกมันไว้บนหนึ่ง element การเลือกผิดคือบั๊กของ query array ที่พบบ่อยที่สุด
+</Callout>
+
+export const quizArrays = [
+  {
+    q: 'คุณ filter field ที่เป็น array ชื่อ borrowed กับค่าธรรมดา "Compilers" อะไรจะตรง?',
+    options: [
+      'เฉพาะ array ที่เท่ากับ ["Compilers"] เป๊ะ ๆ',
+      'document ใดก็ตามที่ array borrowed มี "Compilers"',
+      'ไม่มีอะไรเลย array ต้องใช้ $in',
+      'เฉพาะ element แรกของ array',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมจึงใช้ $elemMatch แทนที่จะใส่สองเงื่อนไขบน field ที่เป็น array โดยตรง?',
+    options: [
+      'มันเร็วกว่าแต่อย่างอื่นเหมือนกัน',
+      'มันบังคับให้ทุกเงื่อนไขเป็นจริงบน element เดียวกันตัวเดียว',
+      'มันจำเป็นสำหรับทุก query ของ array',
+      'มัน sort array ก่อน',
+    ],
+    answer: 1,
+  },
+  {
+    q: '{ borrowed: { $all: ["Algorithms", "Compilers"] } } จับคู่อะไร?',
+    options: [
+      'array ที่มีชื่อหนังสือใดชื่อหนึ่ง',
+      'array ที่มีทั้งสองชื่อหนังสือ ไม่ว่าจะเรียงลำดับใด',
+      'array ที่เท่ากับสอง element นั้นตามลำดับเป๊ะ ๆ',
+      'array ที่มีความยาว 2 เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณจะจับคู่ document ที่ array มี element สามตัวพอดีได้อย่างไร?',
+    options: ['{ field: { $len: 3 } }', '{ field: { $size: 3 } }', '{ field: { $count: 3 } }', '{ field: { $all: 3 } }'],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="querying/querying-arrays" questions={quizArrays} />
+
+<ProgressTracker client:visible id="querying/querying-arrays" />

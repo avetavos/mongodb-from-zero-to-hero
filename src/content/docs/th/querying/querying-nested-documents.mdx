@@ -1,0 +1,264 @@
+---
+title: การ query nested document
+description: เข้าถึง field ที่ฝังอยู่ด้วย dot notation เข้าใจว่าทำไมการจับคู่ sub-document ทั้งก้อนจึงไวต่อลำดับ ในขณะที่การจับคู่ตาม field ไม่เป็น และ query array ของ sub-document
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+document ซ้อนกันได้ สมาชิกหนึ่งคนสามารถถือ object `address` ที่ฝังอยู่ และ object นั้นมี field ของตัวเอง มีสองวิธีที่ต่างกันชัดเจนในการ query เข้าไปใน sub-document และทั้งสองทำงานต่างกันมาก: คุณสามารถเข้าถึง field ภายในเดียวด้วย **dot notation** หรือจับคู่ **sub-document ทั้งก้อน** ในคราวเดียว วิธีแรกผ่อนปรน วิธีที่สองคือการเปรียบเทียบแบบตรงเป๊ะที่ไวต่อลำดับซึ่งทำคนประหลาดใจ บทเรียนนี้ทำให้ความต่างนั้นเป็นรูปธรรม
+
+ตอนนี้สมาชิกแต่ละคนมี `address` ที่ฝังอยู่พร้อม `city` และ `zip` และมี `contact` พร้อม `email` และ `phone`
+
+## การเข้าถึง field ภายในด้วย dot notation
+
+หากต้องการจับคู่ field เดียวที่ฝังลึกอยู่ใน object ให้ระบุ path ด้วยจุด: `"address.city"` เครื่องหมายอัญประกาศจำเป็นเพราะ key มีจุดอยู่ ตรงนี้เราหาสมาชิกทุกคนที่อาศัยอยู่ใน Cambridge:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ "address.city": "Cambridge" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ "address.city": "Cambridge" })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({"address.city": "Cambridge"}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"address.city": "Cambridge"})
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "address.city": "Cambridge" })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+query เข้าถึงเข้าไปใน `address` และจับคู่เฉพาะ `city` ของมัน โดยไม่สนใจสิ่งอื่นที่ sub-document ถืออยู่:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
+    "name": "Grace",
+    "address": { "city": "Cambridge", "zip": "02139" }
+  }
+]
+```
+
+dot path ต่อกันได้ลึกเท่าที่ข้อมูลของคุณลึก และรวมกับ operator ได้อย่างอิสระ — `{ "address.zip": { $exists: true } }` ทำงานตรงตามที่คุณคาดเป๊ะ
+
+## การจับคู่ sub-document ทั้งก้อน: ลำดับมีผล
+
+คุณยังสามารถส่ง document ทั้งก้อนเป็นค่าให้ field `address` ได้ด้วย วิธีนี้ **ไม่** เหมือนกับ query แบบใช้จุด มันเรียกร้องการจับคู่แบบ *ตรงเป๊ะ*: field เดียวกัน ค่าเดียวกัน และ **ลำดับเดียวกัน** โดยไม่อนุญาตให้มี field เกิน ตรงนี้เราจับคู่ที่อยู่เต็ม:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      address: { city: "Cambridge", zip: "02139" }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      address: { city: "Cambridge", zip: "02139" }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "address": {"city": "Cambridge", "zip": "02139"}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "address": bson.D{
+            {Key: "city", Value: "Cambridge"},
+            {Key: "zip", Value: "02139"},
+        },
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "address": { "city": "Cambridge", "zip": "02139" }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+อันนี้ตรงกับ Grace — แต่เป็นเพราะ `address` ที่เก็บไว้ของเธอมี `city` มาก่อนและ `zip` มาทีหลัง โดยไม่มี field อื่น:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
+    "name": "Grace",
+    "address": { "city": "Cambridge", "zip": "02139" }
+  }
+]
+```
+
+หาก document ที่เก็บไว้เรียง `zip` ก่อน `city` หรือเพิ่ม field `country` เข้ามา filter เดียวกันนี้จะส่งกลับ **ไม่มีอะไรเลย** — นั่นคือกับดักความไวต่อลำดับ และเป็นเหตุผลว่าทำไม dot notation จึงมักเป็นตัวเลือกที่ปลอดภัยกว่า สังเกตว่าตัวอย่าง Go ใช้ `bson.D` ซึ่งเป็น document ที่มีลำดับ ก็เพราะลำดับมีความสำคัญตรงนี้พอดี
+
+## array ของ sub-document
+
+รูปร่างจริงที่พบบ่อยที่สุดคือ array ที่ element เป็น sub-document สมมติว่าสมาชิกแต่ละคนมี array `reviews` แต่ละรีวิวมี `book` และ `rating` query แบบใช้จุดธรรมดาอย่าง `"reviews.rating"` ตรวจเงื่อนไข *ข้ามทุก* รีวิว ดังนั้นหากต้องการบังคับทั้งสอง field บนรีวิว *เดียวกัน* คุณรวมจิตวิญญาณของ dot path เข้ากับ `$elemMatch` ตรงนี้เราหาสมาชิกที่มีรีวิวของ *Algorithms* ที่ให้คะแนนอย่างน้อย 4:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({
+      reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
+    })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members").find({
+      reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
+    }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find({
+        "reviews": {"$elemMatch": {"book": "Algorithms", "rating": {"$gte": 4}}}
+    }))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{
+        "reviews": bson.M{"$elemMatch": bson.M{
+            "book":   "Algorithms",
+            "rating": bson.M{"$gte": 4},
+        }},
+    })
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {
+            "reviews": { "$elemMatch": { "book": "Algorithms", "rating": { "$gte": 4 } } }
+        })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะสมาชิกที่รีวิว *เดียวกัน* ระบุชื่อหนังสือนั้นและผ่านเกณฑ์คะแนนเท่านั้นที่ตรง:
+
+```json
+[
+  {
+    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
+    "name": "Margaret",
+    "reviews": [
+      { "book": "Algorithms", "rating": 5 },
+      { "book": "Networks", "rating": 3 }
+    ]
+  }
+]
+```
+
+**ใน Compass:** แถบ filter รับ key แบบมีจุดได้โดยตรง เช่น `{ "address.city": "Cambridge" }` แท็บ Documents แสดง object ที่ซ้อนกันเป็น tree node ที่กางได้ ซึ่งทำให้ง่ายต่อการยืนยันลำดับ field ที่แน่นอนก่อนที่คุณจะลองจับคู่ sub-document ทั้งก้อน
+
+## เคล็ดลับและจุดที่พลาดง่าย
+
+- **ความไวต่อลำดับคือเรื่องใหญ่** การจับคู่ embedded document โดยส่ง document ทั้งก้อนให้ field เปรียบเทียบทั้งก้อนแบบตามตัวอักษร — field เดียวกัน ค่าเดียวกัน ลำดับเดียวกัน ไม่มีส่วนเกิน จัดเรียง key ใหม่แล้วการจับคู่จะหายไปอย่างเงียบ ๆ
+- **dot notation ไม่ขึ้นกับลำดับและจับคู่บางส่วน** `{ "address.city": "Cambridge" }` สนใจ field เดียวและไม่สนใจอย่างอื่น ซึ่งเป็นเหตุผลว่าทำไมมันจึงเป็นตัวเลือกใช้งานประจำวันสำหรับข้อมูลที่ฝังอยู่
+- **ใส่อัญประกาศให้ key ใดก็ตามที่มีจุด** `address.city` ต้องเขียนเป็น string `"address.city"` ตัว identifier ที่มีจุดโดยไม่ใส่อัญประกาศไม่ถูกต้องใน document literal ของ driver ส่วนใหญ่
+- **array ของ sub-document ต้องใช้ `$elemMatch` สำหรับเงื่อนไขหลาย field** ด้วยเหตุผลเดียวกับ array แบบ scalar — มิฉะนั้นเงื่อนไขจะกระจายไปทั่ว element ต่าง ๆ ของ array
+
+<Callout title="จุดสำหรับ field, document เต็มสำหรับทั้งก้อน">
+หากต้องการจับคู่ field ที่ฝังลึกเดียว ให้ใช้ dot path ที่ใส่อัญประกาศ — บางส่วนและไม่ขึ้นกับลำดับ หากต้องการจับคู่ embedded document ทั้งก้อน ให้ส่ง document สมบูรณ์ให้ field — แต่จงรู้ว่ามันคือการเปรียบเทียบแบบตรงเป๊ะมีลำดับที่พังทันทีที่ key ที่เก็บไว้ถูกจัดเรียงใหม่หรือมี field เพิ่มเข้ามา
+</Callout>
+
+export const quizNested = [
+  {
+    q: 'คุณจะจับคู่ field city ภายใน object address ที่ฝังอยู่ได้อย่างไร?',
+    options: [
+      '{ address: { city: "Cambridge" } }',
+      '{ "address.city": "Cambridge" }',
+      '{ city: "Cambridge" }',
+      '{ address: "city.Cambridge" }',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรคือสิ่งพิเศษเกี่ยวกับการจับคู่ embedded sub-document ทั้งก้อน อย่าง { address: { city, zip } }?',
+    options: [
+      'มันจับคู่ document ใดก็ตามที่มี field เหล่านั้น',
+      'มันคือการเปรียบเทียบแบบตรงเป๊ะ: field เดียวกัน ค่าเดียวกัน ลำดับเดียวกัน ไม่มีส่วนเกิน',
+      'มันเหมือนกับ dot notation',
+      'มันตรวจเฉพาะ field แรกเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมตัวอย่าง Go จึงใช้ bson.D สำหรับการจับคู่ sub-document ทั้งก้อน?',
+    options: [
+      'bson.D เร็วกว่า bson.M',
+      'เพราะลำดับ field มีความสำคัญและ bson.D รักษาลำดับไว้',
+      'bson.M เก็บ string ไม่ได้',
+      'มันจำเป็นสำหรับทุก query',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'หากต้องการบังคับ book และ rating บน element เดียวกันของ array reviews คุณใช้:',
+    options: ['สองเงื่อนไขแบบใช้จุด', '$all', '$elemMatch', '$size'],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="querying/querying-nested-documents" questions={quizNested} />
+
+<ProgressTracker client:visible id="querying/querying-nested-documents" />

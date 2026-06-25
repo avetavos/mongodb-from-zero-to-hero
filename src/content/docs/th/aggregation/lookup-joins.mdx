@@ -1,0 +1,291 @@
+---
+title: $lookup — การ join คอลเลกชัน
+description: join เอกสารจากคอลเลกชันอื่นด้วย $lookup โดยใช้ localField และ foreignField ทำงานกับ array ที่ได้ และใช้รูปแบบ pipeline สำหรับ join ที่ซับซ้อนขึ้น
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MongoDB เก็บข้อมูลที่เกี่ยวข้องกันไว้ในคอลเลกชันแยกกันบ่อยพอที่บางครั้งคุณจะต้องเย็บสองคอลเลกชันกลับเข้าด้วยกัน stage `$lookup` ทำการ join นั้นภายใน aggregation pipeline: สำหรับแต่ละเอกสารที่เข้ามา มันค้นหาเอกสารที่ตรงกันในอีกคอลเลกชันหนึ่ง แล้วแนบเข้ามาเป็นฟิลด์ **array** มันคือ left outer join — ทุกเอกสารอินพุตจะผ่านมา พร้อม array ว่างเมื่อไม่มีอะไรตรงกัน
+
+เราเพิ่มคอลเลกชันที่สองเข้ามาในร้าน นอกจาก `sales` แล้ว ตอนนี้มีคอลเลกชัน `books` ที่อธิบายแต่ละชื่อเรื่อง:
+
+```json
+{ "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
+```
+
+ออเดอร์ใน sales อ้างถึงหนังสือด้วย `title` ของมัน:
+
+```json
+{ "_id": "a1", "title": "Dune", "quantity": 3, "price": 12 }
+```
+
+## รูปแบบความเท่ากัน: localField และ foreignField
+
+`$lookup` แบบที่ง่ายที่สุดจับคู่ฟิลด์ในเครื่องหนึ่งฟิลด์กับฟิลด์ต่างถิ่นหนึ่งฟิลด์ คุณระบุชื่อคอลเลกชันที่จะ join (`from`) ฟิลด์บนเอกสารที่เข้ามา (`localField`) ฟิลด์บนเอกสารต่างถิ่น (`foreignField`) และชื่อของฟิลด์ array ที่จะเพิ่ม (`as`)
+
+export const joinFlow = `flowchart LR
+  S["sales: title = Dune"] --> L["$lookup from books on title"]
+  B["books: _id = Dune"] --> L
+  L --> O["sales doc with book array attached"]`
+
+<Mermaid code={joinFlow} title="เอกสาร sales แต่ละอันถูก join เข้ากับ books ที่ตรงกัน และพามันไปในฟิลด์ array ใหม่" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $lookup: {
+          from: "books",
+          localField: "title",
+          foreignField: "_id",
+          as: "book"
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $lookup: {
+          from: "books",
+          localField: "title",
+          foreignField: "_id",
+          as: "book",
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$lookup": {
+            "from": "books",
+            "localField": "title",
+            "foreignField": "_id",
+            "as": "book",
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$lookup", bson.D{
+            {"from", "books"},
+            {"localField", "title"},
+            {"foreignField", "_id"},
+            {"as", "book"},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$lookup": {
+            "from": "books",
+            "localField": "title",
+            "foreignField": "_id",
+            "as": "book"
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ตอนนี้เอกสาร sales แต่ละอันพา array `book` ที่เก็บเอกสาร book ที่ตรงกัน:
+
+```json
+[
+  {
+    "_id": "a1",
+    "title": "Dune",
+    "quantity": 3,
+    "price": 12,
+    "book": [
+      { "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
+    ]
+  }
+]
+```
+
+ผลลัพธ์เป็น **array เสมอ** แม้ว่าจะมีเอกสารตรงกันอย่างมากที่สุดเพียงหนึ่งอัน เพราะโดยทั่วไปการ join อาจตรงกันหลายอัน ขั้นถัดไปที่พบบ่อยคือ `$unwind` (บทเรียนถัดไป) เพื่อแบน array หนึ่งสมาชิกนั้นให้เป็นออบเจกต์ธรรมดา
+
+**ใน Compass:** แท็บ **Aggregations** มี `$lookup` ให้เลือกจาก dropdown และให้คุณเลือกคอลเลกชันต่างถิ่นและฟิลด์ด้วยช่องกรอกฟอร์ม การดูตัวอย่างแสดงฟิลด์ array ใหม่ที่ถูกต่อท้ายแต่ละเอกสาร ซึ่งทำให้พฤติกรรม "join แนบ array" เป็นรูปธรรม
+
+## รูปแบบ pipeline สำหรับ join ที่ซับซ้อนขึ้น
+
+เมื่อคุณต้องการมากกว่าความเท่ากันของฟิลด์เดียว — ฟิลเตอร์เอกสารต่างถิ่น project พวกมัน หรือจับคู่ตามหลายเงื่อนไข — ให้ใช้ **รูปแบบ pipeline** คุณประกาศตัวแปร `let` จากเอกสารในเครื่องและรัน sub-pipeline กับคอลเลกชันต่างถิ่น โดยเปรียบเทียบด้วย `$expr` ที่นี่เราแนบเฉพาะหนังสือที่ตีพิมพ์หลังปี 1950 โดยเปิดเผยแค่ author และ year:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $lookup: {
+          from: "books",
+          let: { t: "$title" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$t"] } } },
+            { $match: { year: { $gt: 1950 } } },
+            { $project: { _id: 0, author: 1, year: 1 } }
+          ],
+          as: "book"
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $lookup: {
+          from: "books",
+          let: { t: "$title" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$t"] } } },
+            { $match: { year: { $gt: 1950 } } },
+            { $project: { _id: 0, author: 1, year: 1 } },
+          ],
+          as: "book",
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$lookup": {
+            "from": "books",
+            "let": {"t": "$title"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$_id", "$$t"]}}},
+                {"$match": {"year": {"$gt": 1950}}},
+                {"$project": {"_id": 0, "author": 1, "year": 1}},
+            ],
+            "as": "book",
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$lookup", bson.D{
+            {"from", "books"},
+            {"let", bson.D{{"t", "$title"}}},
+            {"pipeline", bson.A{
+                bson.D{{"$match", bson.D{{"$expr", bson.D{{"$eq", bson.A{"$_id", "$$t"}}}}}}},
+                bson.D{{"$match", bson.D{{"year", bson.D{{"$gt", 1950}}}}}},
+                bson.D{{"$project", bson.D{{"_id", 0}, {"author", 1}, {"year", 1}}}},
+            }},
+            {"as", "book"},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$lookup": {
+            "from": "books",
+            "let": { "t": "$title" },
+            "pipeline": [
+                { "$match": { "$expr": { "$eq": ["$_id", "$$t"] } } },
+                { "$match": { "year": { "$gt": 1950 } } },
+                { "$project": { "_id": 0, "author": 1, "year": 1 } }
+            ],
+            "as": "book"
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ตอนนี้ array ที่แนบมาเก็บเฉพาะเอกสารต่างถิ่นที่ถูกตัดทอนและกรองแล้ว:
+
+```json
+[
+  {
+    "_id": "a1",
+    "title": "Dune",
+    "quantity": 3,
+    "price": 12,
+    "book": [ { "author": "Frank Herbert", "year": 1965 } ]
+  }
+]
+```
+
+สังเกตไวยากรณ์ `$$t`: `$` ตัวเดียวอ้างถึงฟิลด์ของเอกสารต่างถิ่น ส่วน `$$` อ้างถึงตัวแปร `let` ที่พามาจากเอกสารในเครื่อง
+
+## ทิปและกับดัก
+
+- `$lookup` รันเคียวรีกับคอลเลกชันต่างถิ่นสำหรับทุกเอกสารอินพุต **สร้าง index บน `foreignField`** (หรืออะไรก็ตามที่ sub-pipeline จับคู่ด้วย) ไม่เช่นนั้นการ join อาจช้าลงเมื่อขนาดข้อมูลในโลกจริง
+- มันคือ left outer join: เอกสารอินพุตที่ไม่มีคู่ตรงกันก็ยังผ่านมา พร้อม array `as` ว่าง ฟิลเตอร์พวกนั้นทิ้งภายหลังด้วย `$match` ถ้าคุณต้องการเฉพาะแถวที่ join แล้ว
+- การ join ทรงพลังแต่ไม่ฟรี ถ้าคุณพบว่าตัวเองกำลัง join สองคอลเลกชันเดิมในทุกการอ่าน นั่นอาจเป็นสัญญาณว่าข้อมูลอยากถูก **ฝัง** (embedded) มากกว่าถูกอ้างอิง — เป็นคำถามเรื่องการออกแบบข้อมูลที่จะกล่าวถึงในภายหลัง
+- ฟิลด์ผลลัพธ์ที่ตั้งชื่อใน `as` เป็น array เสมอ จับคู่ `$lookup` กับ `$unwind` เมื่อคุณคาดว่าจะตรงกันอันเดียวและต้องการออบเจกต์แบนราบ
+
+<Callout title="lookup แนบ array">
+$lookup คือ left outer join ที่แขวนเอกสารต่างถิ่นที่ตรงกันไว้บนฟิลด์ array ใหม่ รูปแบบความเท่ากัน join หนึ่งฟิลด์กับหนึ่งฟิลด์ ส่วนรูปแบบ pipeline ให้คุณฟิลเตอร์และจัดรูปฝั่งต่างถิ่นใหม่ได้ สร้าง index บนฟิลด์ต่างถิ่น เพราะการ join เคียวรีมันหนึ่งครั้งต่อเอกสารอินพุต
+</Callout>
+
+export const quizLookup = [
+  {
+    q: 'ในรูปแบบความเท่ากันของ $lookup, ตัวเลือก "as" ตั้งชื่ออะไร?',
+    options: [
+      'คอลเลกชันต่างถิ่นที่จะ join',
+      'ฟิลด์ในเครื่องที่จะจับคู่',
+      'ฟิลด์ array ใหม่ที่เก็บเอกสารที่ตรงกัน',
+      'ลำดับการเรียงของการ join',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'เอกสาร sales หนึ่งอันตรงกับ book พอดีหนึ่งอัน ฟิลด์ที่ $lookup เพิ่มเข้ามามีชนิดเป็นอะไร?',
+    options: [
+      'ออบเจกต์ฝังตัวธรรมดา',
+      'array ที่บรรจุเอกสารที่ตรงกัน',
+      'สตริงที่มี _id ที่ตรงกัน',
+      'ค่า null',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'index ใดช่วยปรับปรุงประสิทธิภาพของ $lookup ได้มากที่สุด?',
+    options: [
+      'index บน localField',
+      'index บน foreignField ในคอลเลกชันที่ถูก join',
+      'index บนฟิลด์ as',
+      'ไม่มี index ใดช่วย $lookup ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ในรูปแบบ pipeline, $$t อ้างถึงอะไร?',
+    options: [
+      'ฟิลด์บนเอกสารต่างถิ่น',
+      'ตัวแปร let ที่พามาจากเอกสารในเครื่อง',
+      'ชื่อของคอลเลกชันต่างถิ่น',
+      'สตริงตัวอักษร',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/lookup-joins" questions={quizLookup} />
+
+<ProgressTracker client:visible id="aggregation/lookup-joins" />

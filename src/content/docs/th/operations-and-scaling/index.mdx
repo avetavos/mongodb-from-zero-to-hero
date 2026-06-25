@@ -1,0 +1,95 @@
+---
+title: การรัน MongoDB ใน production
+description: สี่เรื่องที่ต้องใส่ใจใน production — high availability ด้วย replica set, การ scale ในแนวนอนด้วย sharding, performance และ security — และทั้งหมดนี้ประกอบกันอย่างไร
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+`mongod` ตัวเดียวที่รันบนเครื่องแล็ปท็อปของคุณนั้นยอดเยี่ยมสำหรับการเรียนรู้ แต่เป็นสิ่งที่ผิดที่สุดที่จะเอาไปวางไว้หน้าผู้ใช้จริง ทันทีที่ฐานข้อมูลเก็บข้อมูลที่ผู้คนพึ่งพา จะมีคำถามสี่ข้อตามมาที่เซิร์ฟเวอร์เดี่ยวตอบได้ไม่ดีนัก จะเกิดอะไรขึ้นเมื่อเครื่องนั้นเครื่องเดียวพัง? จะเกิดอะไรขึ้นเมื่อเครื่องเดียวไม่สามารถเก็บข้อมูลทั้งหมดหรือรับ traffic ทั้งหมดได้อีกต่อไป? ทำไมคิวรีที่เคยตอบทันทีเมื่อสัปดาห์ที่แล้วตอนนี้กลับใช้เวลาสองวินาที? และใครกันแน่ที่ได้รับอนุญาตให้อ่านข้อมูลนี้ และผ่านการเชื่อมต่อแบบไหน?
+
+โมดูลนี้พูดถึงคำถามทั้งสี่ข้อนี้ และ MongoDB มีคำตอบที่ชัดเจนสำหรับแต่ละข้อ **High availability** มาจาก *replica set* — ข้อมูลของคุณหลายชุดที่เลือกผู้นำคนใหม่โดยอัตโนมัติเมื่อชุดหนึ่งล้มเหลว **การ scale ในแนวนอน** มาจาก *sharding* — การแบ่ง collection เชิงตรรกะหนึ่งอันออกไปยังหลายเครื่อง เพื่อให้ทั้งชุดข้อมูลและภาระงานถูกแบ่งกัน **Performance** มาจากการเข้าใจว่าเวลาหายไปไหน: การ profile คิวรีที่ช้า, การเก็บ working set ไว้ในหน่วยความจำ, และการเลือกใช้ index ที่เหมาะสม **Security** มาจากการเปิดการป้องกันที่ปิดอยู่โดยค่าเริ่มต้น: authentication, การเข้ารหัสระหว่างการส่ง, และเครือข่ายที่ไม่เปิดให้ฐานข้อมูลถูกเข้าถึงจากอินเทอร์เน็ตสาธารณะ
+
+## รูปร่างของ deployment ใน production
+
+แนวคิดเชิงโครงสร้างสองอย่าง — replication และ sharding — ซ้อนกันอยู่ replica set ให้ความทนทานแก่ข้อมูลหนึ่งชุด ส่วน sharded cluster คือ replica set หลายชุด แต่ละชุดถือ *ส่วนหนึ่ง* ของข้อมูล โดยมี router อยู่ด้านหน้าที่รู้ว่าส่วนไหนอยู่ที่ไหน:
+
+export const productionOverview = `flowchart TB
+  App["Application"] --> Router["mongos router"]
+  Router --> CSRS["Config servers (replica set)"]
+  Router --> ShardA
+  Router --> ShardB
+  subgraph ShardA["Shard A — replica set"]
+    PA["Primary"] --> S1A["Secondary"]
+    PA --> S2A["Secondary"]
+  end
+  subgraph ShardB["Shard B — replica set"]
+    PB["Primary"] --> S1B["Secondary"]
+    PB --> S2B["Secondary"]
+  end`
+
+<Mermaid code={productionOverview} title="sharded cluster คือ replica set หลายชุดที่อยู่หลัง router แต่ละ shard ก็มี high availability ในตัวมันเอง" />
+
+อ่านไดอะแกรมนั้นจากล่างขึ้นบน แต่ละกล่องที่แรเงาคือ **replica set** หนึ่งชุด: primary หนึ่งตัวบวก secondaries ที่ถือข้อมูลชุดเดียวกัน เพื่อให้ node เดียวที่ล้มเหลวไม่ทำให้ข้อมูลสูญหาย วางสองชุดนั้นเคียงข้างกัน ให้แต่ละชุดถือ collection คนละส่วน แล้วเอา **mongos** router มาวางด้านหน้าเพื่อนำทุก request ไปยังส่วนที่ถูกต้อง — นั่นคือ **sharded cluster** คุณไม่จำเป็นต้องเริ่มด้วยการ shard; deployment ส่วนใหญ่อยู่อย่างมีความสุขเป็น replica set เดี่ยวได้เป็นเวลานาน และจะ shard ก็ต่อเมื่อเครื่องเดียวตามไม่ทันจริง ๆ เท่านั้น
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+บทเรียนเรียงตามลำดับเดียวกับคำถามทั้งสี่ข้อ:
+
+1. **การรัน MongoDB ใน production** — ภาพรวมเรื่อง availability, scale, performance และ security นี้
+2. **Replica sets** — primaries, secondaries, oplog ที่ทำให้พวกมันซิงค์กัน และ election อัตโนมัติที่เลือก primary ใหม่เมื่อตัวหนึ่งล้มเหลว
+3. **Sharding** — การแบ่ง collection ตาม shard key ข้าม shards, บทบาทของ balancer และ config servers, และวิธีเลือก shard key ที่คุณจะไม่ต้องเสียใจภายหลัง
+4. **Performance และ profiling** — การหาคิวรีที่ช้าด้วย database profiler, การอ่าน `explain` ซ้ำ, และวิธีแก้ไขทั่วไปที่ทำให้คิวรีกลับมาเร็วอีกครั้ง
+5. **Security และ Atlas** — authentication และ roles, TLS, การล็อกเครือข่าย, encryption at rest, และวิธีที่ MongoDB Atlas มอบทั้งหมดนี้ให้คุณในรูปแบบ managed service
+
+## เคล็ดลับและข้อควรระวัง
+
+- ฟีเจอร์เหล่านี้ประกอบกันมากกว่าจะแข่งกัน คุณมักจะรัน replica set ก่อนเสมอเพื่อ availability และจะเพิ่ม sharding ภายหลังก็ต่อเมื่อ scale บังคับเท่านั้น ส่วน security ใช้กับทั้งสองอย่างตั้งแต่วันแรก
+- Sharding ไม่ใช่พลาสเตอร์ปิดแผลสำหรับ performance ของคิวรีที่ช้า การขาด index ก็เจ็บปวดพอ ๆ กันไม่ว่าจะมีสิบ shard หรือมีเครื่องเดียว แก้ performance ก่อน แล้วค่อย scale ทีหลัง
+- ความผิดพลาดใน production ที่พบบ่อยที่สุดเป็นสิ่งที่หลีกเลี่ยงได้ง่ายที่สุด: การปล่อยฐานข้อมูลให้เข้าถึงได้บนอินเทอร์เน็ตโดยปิด authentication ไว้ บทเรียนเรื่อง security มีอยู่ก็เพื่อให้คุณไม่ทำเช่นนั้น
+
+<Callout title="สี่เรื่องที่ต้องใส่ใจ สี่คำตอบ">
+MongoDB ใน production คือสี่ปัญหาที่มีสี่คำตอบที่มีชื่อเรียก: replica sets สำหรับ availability, sharding สำหรับ scale, profiling และ indexes สำหรับ performance, และ auth บวก TLS บวก network rules สำหรับ security ส่วนที่เหลือของโมดูลนี้จะค่อย ๆ พูดถึงทีละอย่าง
+</Callout>
+
+export const quizOverview = [
+  {
+    q: 'ฟีเจอร์ใดของ MongoDB ที่ให้ high availability — รอดจากการล้มเหลวของเซิร์ฟเวอร์เดียว?',
+    options: [
+      'Sharding',
+      'replica set',
+      'database profiler',
+      'compound index',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'sharded cluster ในเชิงโครงสร้างคืออะไร?',
+    options: [
+      'เซิร์ฟเวอร์ขนาดใหญ่มากเครื่องเดียวที่มีหน่วยความจำเพิ่ม',
+      'replica set หลายชุด แต่ละชุดถือส่วนหนึ่งของข้อมูล อยู่หลัง router',
+      'สำเนาแบบอ่านอย่างเดียวของฐานข้อมูลหนึ่ง',
+      'backup ที่เก็บไว้บนเครื่องที่สอง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อใดที่คุณควรเลือกใช้ sharding?',
+    options: [
+      'ทันที สำหรับทุก deployment ใหม่',
+      'เพื่อแก้คิวรีเดียวที่ช้า',
+      'เมื่อเครื่องเดียวไม่สามารถเก็บข้อมูลหรือรับภาระงานได้อีกต่อไป',
+      'เฉพาะเมื่อเปิด authentication แล้วเท่านั้น',
+    ],
+    answer: 2,
+  },
+]
+
+<Quiz client:visible id="operations-and-scaling/index" questions={quizOverview} />
+
+<ProgressTracker client:visible id="operations-and-scaling/index" />

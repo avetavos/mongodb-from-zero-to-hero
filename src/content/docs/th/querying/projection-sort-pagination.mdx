@@ -1,0 +1,341 @@
+---
+title: Projection, sort และการแบ่งหน้า
+description: เลือกว่า field ไหนจะส่งกลับมาด้วย projection จัดลำดับผลลัพธ์ด้วย sort แบ่งหน้าด้วย limit และ skip วนซ้ำ cursor และเรียนรู้ว่าทำไม skip ขนาดใหญ่จึงช้า
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+filter ตัดสินว่า document *ไหน* จะส่งกลับมา ตัวควบคุมอีกสามตัวตัดสินว่า document เหล่านั้นจะหน้าตาเป็นอย่างไรระหว่างทางมาถึงแอปของคุณ: **projection** ตัด field, **sort** กำหนดลำดับ และ **limit** กับ **skip** แบ่งผลลัพธ์ออกเป็นหน้า เมื่อรวมกันมันช่วยไม่ให้คุณลาก document ทั้งก้อนและ collection ทั้งก้อนข้ามเครือข่ายในเวลาที่คุณต้องการแค่ชื่อกับหนึ่งหน้าสิบรายการ บทเรียนนี้ครอบคลุมทั้งสี่ และจบด้วยลูกเล่นการแบ่งหน้าหนึ่งตัวที่ค่อย ๆ ช้าลงอย่างเงียบ ๆ
+
+เรากลับมาที่สมาชิกห้องสมุด `members` แบบง่าย แต่ละคนมี `name`, ปี `joined` และ `fines`
+
+## Projection: การเลือก field
+
+projection คือ document ตัวที่สองที่ส่งให้ `find` ซึ่งระบุว่าจะเก็บ field ไหน ตั้ง field เป็น `1` เพื่อรวมมัน ทุกอย่างที่คุณไม่ได้ระบุจะถูกตัดทิ้ง — ยกเว้น `_id` ซึ่งจะส่งกลับมาเว้นแต่คุณจะกำหนดให้แยกออกอย่างชัดเจนด้วย `0` ตรงนี้เราต้องการเฉพาะชื่อกับปีที่เข้าร่วม โดยไม่เอา `_id`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find(
+      { fines: 0 },
+      { name: 1, joined: 1, _id: 0 }
+    )
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find({ fines: 0 })
+      .project({ name: 1, joined: 1, _id: 0 })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find(
+        {"fines": 0},
+        {"name": 1, "joined": 1, "_id": 0},
+    ))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetProjection(bson.M{"name": 1, "joined": 1, "_id": 0})
+    cur, err := coll.Find(ctx, bson.M{"fines": 0}, opts)
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! { "fines": 0 })
+        .projection(doc! { "name": 1, "joined": 1, "_id": 0 })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เฉพาะ field ที่ขอเท่านั้นที่มาถึง และ `_id` หายไป:
+
+```json
+[
+  { "name": "Margaret", "joined": 2023 },
+  { "name": "Ada", "joined": 2024 }
+]
+```
+
+คุณอาจรวม field หรือแยก field ออกได้ แต่ผสมทั้งสองใน projection เดียวไม่ได้ — ข้อยกเว้นเดียวคือการแยก `_id` ออกควบคู่ไปกับ list ที่รวม field ดังตัวอย่างข้างต้น
+
+## การ sort ผลลัพธ์
+
+`sort` จัดลำดับผลลัพธ์ตาม field หนึ่งหรือมากกว่า: `1` คือจากน้อยไปมาก, `-1` คือจากมากไปน้อย เมื่อเสมอกันจะตัดสินด้วย key ที่คุณระบุทีหลัง ตรงนี้เราเรียงทุกคนจากค่าปรับมากที่สุดไปน้อยที่สุด:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find().sort({ fines: -1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find()
+      .sort({ fines: -1 })
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(db.members.find().sort("fines", -1))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().SetSort(bson.D{{Key: "fines", Value: -1}})
+    cur, err := coll.Find(ctx, bson.M{}, opts)
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {})
+        .sort(doc! { "fines": -1 })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ยอดค้างสูงสุดมาก่อน:
+
+```json
+[
+  { "name": "Linus", "joined": 2023, "fines": 5 },
+  { "name": "Grace", "joined": 2021, "fines": 3 },
+  { "name": "Margaret", "joined": 2023, "fines": 0 }
+]
+```
+
+## การแบ่งหน้า: limit และ skip
+
+`limit` จำกัดจำนวน document ที่คุณได้รับ ส่วน `skip` ทิ้งจำนวนเท่านั้นจากด้านหน้าก่อน เมื่อรวมกับ `sort` ที่เสถียร มันสร้างหน้าออกมา สำหรับหน้าที่สองที่มีสองรายการ เรียงตามชื่อ คุณ skip สองตัวแรกแล้วเอาสองตัว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find()
+      .sort({ name: 1 })
+      .skip(2)
+      .limit(2)
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const docs = await db.collection("members")
+      .find()
+      .sort({ name: 1 })
+      .skip(2)
+      .limit(2)
+      .toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    docs = list(
+        db.members.find().sort("name", 1).skip(2).limit(2)
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.Find().
+        SetSort(bson.D{{Key: "name", Value: 1}}).
+        SetSkip(2).
+        SetLimit(2)
+    cur, err := coll.Find(ctx, bson.M{}, opts)
+    if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .find(doc! {})
+        .sort(doc! { "name": 1 })
+        .skip(2)
+        .limit(2)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+คุณจะได้สมาชิกคนที่สามและสี่ตามลำดับชื่อ — หน้าที่สอง:
+
+```json
+[
+  { "name": "Grace", "joined": 2021, "fines": 3 },
+  { "name": "Linus", "joined": 2023, "fines": 5 }
+]
+```
+
+## ชิ้นส่วนเหล่านี้ประกอบกันอย่างไร
+
+เซิร์ฟเวอร์ใช้ stage เหล่านี้ในลำดับที่ตายตัว ไม่ว่าคุณจะต่อ method ในลำดับใด: มัน filter ก่อน แล้ว sort สิ่งที่ตรง แล้ว skip แล้ว limit การรู้ลำดับนี้อธิบายว่าทำไมจึงต้องมี sort เพื่อหน้าที่เสถียร และทำไม skip ขนาดใหญ่จึงสิ้นเปลือง
+
+export const pipelineDiagram = `flowchart LR
+  C["Collection"] --> F["find filter"]
+  F --> S["sort"]
+  S --> SK["skip n"]
+  SK --> L["limit k"]
+  L --> R["Cursor of k documents"]`
+
+<Mermaid code={pipelineDiagram} title="การอ่านไหลผ่าน find แล้ว sort แล้ว skip แล้ว limit — ตามลำดับนั้น — ก่อนที่ cursor จะมาถึงคุณ" />
+
+## การวนซ้ำ cursor
+
+`find` ส่งคืน **cursor** ไม่ใช่ list driver ดึง document มาทีละ batch ขณะที่คุณวนซ้ำ ดังนั้นคุณสามารถ stream ผลลัพธ์ก้อนใหญ่ได้โดยไม่ต้องโหลดทั้งหมดเข้า memory ในคราวเดียว การเรียก `toArray` (หรือสิ่งเทียบเท่า) เพียงแค่ดึง cursor ออกให้คุณจนหมด:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const cursor = db.members.find().sort({ name: 1 })
+    while (cursor.hasNext()) {
+      printjson(cursor.next())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const cursor = db.collection("members").find().sort({ name: 1 });
+    for await (const doc of cursor) {
+      console.log(doc.name);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cursor = db.members.find().sort("name", 1)
+    for doc in cursor:
+        print(doc["name"])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{})
+    if err != nil {
+        return err
+    }
+    defer cur.Close(ctx)
+    for cur.Next(ctx) {
+        var doc bson.M
+        if err := cur.Decode(&doc); err != nil {
+            return err
+        }
+        fmt.Println(doc["name"])
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll.find(doc! {}).sort(doc! { "name": 1 }).await?;
+    while let Some(doc) = cursor.try_next().await? {
+        println!("{:?}", doc.get_str("name"));
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## ทำไม skip ขนาดใหญ่จึงช้า
+
+`skip(n)` ไม่ได้กระโดดไปยัง document ตัวที่ n — เซิร์ฟเวอร์ยังต้อง *เดินผ่าน* `n` ตัวที่ตรงก่อน จึงจะส่งอะไรกลับมาได้ ในหน้าที่สองนั่นเล็กน้อย แต่ในหน้าที่ 5,000 ฐานข้อมูลต้องไถผ่าน document หลายแสนตัวเพียงเพื่อโยนทิ้ง วิธีแก้คือ **range-based pagination**: แทนที่จะ skip ให้จำค่าสุดท้ายที่คุณเห็นแล้วขอ document *หลังจาก* มัน หากต้องการไปต่อจากสมาชิกคนสุดท้ายชื่อ "Linus" คุณจะ filter ไปข้างหน้าแทนการ skip:
+
+```js
+db.members.find({ name: { $gt: "Linus" } })
+  .sort({ name: 1 })
+  .limit(2)
+```
+
+วิธีนี้อ่านเฉพาะหน้าที่คุณต้องการเสมอ ไม่ว่าคุณจะลึกแค่ไหน เราจะกลับมาที่ range-based pagination และ index ที่ทำให้มันเร็วในโมดูลถัด ๆ ไป — สำหรับตอนนี้ แค่รู้ว่า `skip` ใช้ได้ดีกับหน้าตื้น ๆ และเป็นปัญหากับหน้าที่ลึก
+
+**ใน Compass:** แท็บ Documents มีตัวควบคุมเฉพาะสำหรับทั้งหมดนี้ — กล่อง **Project** สำหรับรายชื่อ field, กล่อง **Sort** สำหรับลำดับ และช่อง **skip/limit** ข้างแถบ filter ดังนั้นคุณสร้าง query ทั้งก้อนได้โดยไม่ต้องเขียน method chain ด้วยมือ
+
+## เคล็ดลับและจุดที่พลาดง่าย
+
+- **sort ก่อนแบ่งหน้าเสมอ** หากไม่มี `sort` ที่ชัดเจน ลำดับของผลลัพธ์ไม่รับประกัน ดังนั้น `skip`/`limit` อาจส่ง document ที่ซ้ำหรือขาดหายระหว่างหน้า การ sort ที่เสถียรบน field ที่มีความเป็นเอกลักษณ์พอคือสิ่งที่ทำให้การแบ่งหน้าถูกต้อง
+- **`_id` ถูกรวมไว้เว้นแต่คุณจะแยกมันออก** เพิ่ม `_id: 0` ลงใน projection เมื่อคุณไม่ต้องการมัน นี่คือกรณีเดียวที่คุณอาจผสมการแยกออกกับ list ที่รวม field ได้
+- **อย่าผสมการรวมและการแยกออก** นอกเหนือจากนั้น projection คือ list ของ field ที่จะเก็บ หรือ list ที่จะทิ้ง ไม่ใช่ทั้งสอง
+- **ต้นทุนของ `skip` ขนาดใหญ่เพิ่มขึ้นตามหมายเลขหน้า** สำหรับหน้าที่ลึก ให้เปลี่ยนไปใช้ range-based pagination บน field ที่มี index ซึ่งอ่านเฉพาะ document ที่คุณส่งกลับจริง ๆ
+
+<Callout title="Filter, sort, skip, limit — ตามลำดับนั้น">
+เซิร์ฟเวอร์ใช้การอ่านในลำดับเดิมเสมอ: เลือกสิ่งที่ตรง จัดลำดับ ทิ้งส่วนหน้าที่ถูก skip แล้วจำกัดจำนวน การซึมซับลำดับนั้นบอกคุณว่าทำไมหน้าจึงต้องมี sort และทำไม skip ที่ลึกจึงต้องจ่ายค่าทุก document ที่มันเดินผ่าน — นั่นคือเมล็ดพันธุ์ของ range-based pagination
+</Callout>
+
+export const quizPagination = [
+  {
+    q: 'ใน projection { name: 1, _id: 0 } ส่งกลับอะไร?',
+    options: [
+      'ทุก field ยกเว้น name',
+      'เฉพาะ field name โดยตัด _id ออก',
+      'name บวก _id',
+      'error เพราะคุณแยก _id ออกไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'sort({ fines: -1 }) ทำอะไร?',
+    options: [
+      'ส่งกลับเฉพาะ document ที่ fines ติดลบ',
+      'จัดลำดับผลลัพธ์ตาม fines สูงสุดก่อน (จากมากไปน้อย)',
+      'จัดลำดับผลลัพธ์ตาม fines ต่ำสุดก่อน (จากน้อยไปมาก)',
+      'จำกัดผลลัพธ์ให้เหลือหนึ่ง document',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมคุณจึงควร sort ก่อนใช้ skip และ limit เสมอ?',
+    options: [
+      'sort จำเป็นทาง syntax',
+      'หากไม่มีลำดับที่เสถียร หน้าอาจซ้อนกันหรือ document หายไป',
+      'มันทำให้ skip ไม่มีต้นทุน',
+      'มันเปลี่ยนว่า field ไหนจะถูกส่งกลับ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม skip(n) ขนาดใหญ่จึงช้า?',
+    options: [
+      'มันโหลด collection ทั้งก้อนเข้า memory',
+      'เซิร์ฟเวอร์ต้องเดินผ่าน n ตัวแรกที่ตรงก่อนจึงจะส่งอะไรกลับได้',
+      'skip ปิดการ sort',
+      'มันสแกนทุก collection ในฐานข้อมูลเสมอ',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="querying/projection-sort-pagination" questions={quizPagination} />
+
+<ProgressTracker client:visible id="querying/projection-sort-pagination" />

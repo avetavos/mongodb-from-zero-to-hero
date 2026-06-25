@@ -1,0 +1,381 @@
+---
+title: $facet และ bucket
+description: รันหลาย sub-pipeline ในการประมวลผลครั้งเดียวด้วย $facet และจัดกลุ่มค่าเข้าช่วงแบบฮิสโทแกรมด้วย $bucket และ $bucketAuto
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+สอง stage สุดท้ายในโมดูลนี้ตอบคำถามที่ต้องการสรุป *หลายอย่าง* พร้อมกัน `$facet` รัน sub-pipeline หลายอันเคียงข้างกันบนอินพุตเดียวกัน คุณจึงได้หน้าผลลัพธ์ จำนวนนับรวม และการแยกย่อยในการเดินทางครั้งเดียว `$bucket` และ `$bucketAuto` จัดกลุ่มเอกสารเข้าช่วง เหมือนที่ฮิสโทแกรมจัดเรียงค่าเข้าถัง เมื่อรวมกันแล้วมันขับเคลื่อนเคียวรีสไตล์ "dashboard": หนึ่งคำขอ หลายแผง
+
+เรากลับมาที่คอลเลกชัน `sales` แบบแบนราบ ที่แต่ละเอกสารคือออเดอร์เดียวที่มี `price`, `quantity` และ `genre`
+
+## $facet รัน sub-pipeline แบบขนาน
+
+`$facet` รับออบเจกต์ที่คีย์เป็นชื่อที่คุณเลือก และค่าเป็น **sub-pipeline** แต่ละ sub-pipeline เห็นเอกสารอินพุต **เดียวกัน** — อันที่ไปถึง stage `$facet` — และผลิต array ผลลัพธ์ของตัวเอง ผลลัพธ์คือหนึ่งเอกสารที่มีฟิลด์ต่อหนึ่ง facet การใช้งานคลาสสิกคือ "ผลลัพธ์บวกจำนวนนับรวม" สำหรับรายการแบบแบ่งหน้า:
+
+export const facetFlow = `flowchart LR
+  In["sales documents"] --> F["$facet"]
+  F --> A["pageResults sub-pipeline"]
+  F --> B["totalCount sub-pipeline"]
+  F --> C["byGenre sub-pipeline"]
+  A --> Out["one document with three fields"]
+  B --> Out
+  C --> Out`
+
+<Mermaid code={facetFlow} title="หนึ่ง stage หลาย sub-pipeline บนอินพุตเดียวกัน รวมเข้าเป็นหนึ่งเอกสารผลลัพธ์" />
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $facet: {
+          topOrders: [
+            { $sort: { price: -1 } },
+            { $limit: 2 },
+            { $project: { _id: 0, title: 1, price: 1 } }
+          ],
+          totalCount: [
+            { $count: "orders" }
+          ],
+          byGenre: [
+            { $group: { _id: "$genre", count: { $sum: 1 } } }
+          ]
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $facet: {
+          topOrders: [
+            { $sort: { price: -1 } },
+            { $limit: 2 },
+            { $project: { _id: 0, title: 1, price: 1 } },
+          ],
+          totalCount: [
+            { $count: "orders" },
+          ],
+          byGenre: [
+            { $group: { _id: "$genre", count: { $sum: 1 } } },
+          ],
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$facet": {
+            "topOrders": [
+                {"$sort": {"price": -1}},
+                {"$limit": 2},
+                {"$project": {"_id": 0, "title": 1, "price": 1}},
+            ],
+            "totalCount": [
+                {"$count": "orders"},
+            ],
+            "byGenre": [
+                {"$group": {"_id": "$genre", "count": {"$sum": 1}}},
+            ],
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$facet", bson.D{
+            {"topOrders", bson.A{
+                bson.D{{"$sort", bson.D{{"price", -1}}}},
+                bson.D{{"$limit", 2}},
+                bson.D{{"$project", bson.D{{"_id", 0}, {"title", 1}, {"price", 1}}}},
+            }},
+            {"totalCount", bson.A{
+                bson.D{{"$count", "orders"}},
+            }},
+            {"byGenre", bson.A{
+                bson.D{{"$group", bson.D{{"_id", "$genre"}, {"count", bson.D{{"$sum", 1}}}}}},
+            }},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$facet": {
+            "topOrders": [
+                { "$sort": { "price": -1 } },
+                { "$limit": 2 },
+                { "$project": { "_id": 0, "title": 1, "price": 1 } }
+            ],
+            "totalCount": [
+                { "$count": "orders" }
+            ],
+            "byGenre": [
+                { "$group": { "_id": "$genre", "count": { "$sum": 1 } } }
+            ]
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+หนึ่งเอกสารกลับมา แต่ละ facet อยู่ใต้คีย์ของตัวเอง:
+
+```json
+[
+  {
+    "topOrders": [
+      { "title": "Cosmos", "price": 22 },
+      { "title": "Foundation", "price": 15 }
+    ],
+    "totalCount": [ { "orders": 6 } ],
+    "byGenre": [
+      { "_id": "fiction", "count": 4 },
+      { "_id": "science", "count": 2 }
+    ]
+  }
+]
+```
+
+**ใน Compass:** `$facet` มีให้ใช้ในแท็บ **Aggregations** และแต่ละ sub-pipeline สามารถสร้างและดูตัวอย่างได้ก่อนที่คุณจะรวมพวกมัน มันเป็นวิธีธรรมชาติในการประกอบเคียวรีแบบผลลัพธ์บวกจำนวนนับสำหรับหน้าจอที่แบ่งหน้า
+
+## $bucket จัดกลุ่มเข้าช่วงที่ระบุชัดเจน
+
+`$bucket` จัดเรียงเอกสารเข้าถังที่คุณนิยามด้วย **ขอบเขต** ของมัน คุณให้ expression `groupBy` array ของ `boundaries` ที่เรียงจากน้อยไปมาก ถัง `default` สำหรับค่าที่ตกนอกช่วง และ `output` ของ accumulator ต่อถัง ที่นี่เราจัดออเดอร์เข้าถังตามราคาเป็นแถบ "cheap" "mid" และ "premium":
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $bucket: {
+          groupBy: "$price",
+          boundaries: [0, 10, 20, 100],
+          default: "other",
+          output: {
+            count: { $sum: 1 },
+            titles: { $push: "$title" }
+          }
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $bucket: {
+          groupBy: "$price",
+          boundaries: [0, 10, 20, 100],
+          default: "other",
+          output: {
+            count: { $sum: 1 },
+            titles: { $push: "$title" },
+          },
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$bucket": {
+            "groupBy": "$price",
+            "boundaries": [0, 10, 20, 100],
+            "default": "other",
+            "output": {
+                "count": {"$sum": 1},
+                "titles": {"$push": "$title"},
+            },
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$bucket", bson.D{
+            {"groupBy", "$price"},
+            {"boundaries", bson.A{0, 10, 20, 100}},
+            {"default", "other"},
+            {"output", bson.D{
+                {"count", bson.D{{"$sum", 1}}},
+                {"titles", bson.D{{"$push", "$title"}}},
+            }},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$bucket": {
+            "groupBy": "$price",
+            "boundaries": [0, 10, 20, 100],
+            "default": "other",
+            "output": {
+                "count": { "$sum": 1 },
+                "titles": { "$push": "$title" }
+            }
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+`_id` ของแต่ละถังคือขอบเขตล่างของมัน และ accumulator สรุปออเดอร์ที่ตกลงตรงนั้น:
+
+```json
+[
+  { "_id": 0, "count": 2, "titles": ["Cheap Reads", "Pocket Atlas"] },
+  { "_id": 10, "count": 3, "titles": ["Dune", "Foundation", "Neuromancer"] },
+  { "_id": 20, "count": 1, "titles": ["Cosmos"] }
+]
+```
+
+## $bucketAuto เลือกขอบเขตให้คุณ
+
+เมื่อคุณไม่รู้ขอบเขตที่ดีล่วงหน้า `$bucketAuto` จะเลือกมันเองเพื่อให้เอกสารกระจายไปตามจำนวนถังเป้าหมายได้เท่ากันที่สุดเท่าที่ทำได้ คุณให้ `groupBy` และจำนวน `buckets` มันจะคืน `min` และ `max` ของแต่ละถังไว้ภายใน `_id`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $bucketAuto: {
+          groupBy: "$price",
+          buckets: 3
+      } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const rows = await db.collection("sales").aggregate([
+      { $bucketAuto: {
+          groupBy: "$price",
+          buckets: 3,
+      } },
+    ]).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$bucketAuto": {
+            "groupBy": "$price",
+            "buckets": 3,
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$bucketAuto", bson.D{
+            {"groupBy", "$price"},
+            {"buckets", 3},
+        }}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$bucketAuto": {
+            "groupBy": "$price",
+            "buckets": 3
+        } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ขอบเขตถูกคำนวณให้คุณ แต่ละถังพาช่วงและจำนวนนับของมัน:
+
+```json
+[
+  { "_id": { "min": 8, "max": 12 }, "count": 2 },
+  { "_id": { "min": 12, "max": 18 }, "count": 2 },
+  { "_id": { "min": 18, "max": 22 }, "count": 2 }
+]
+```
+
+## ทิปและกับดัก
+
+- แต่ละ sub-pipeline ของ `$facet` เริ่มจากอินพุต **เดียวกัน** ฟิลเตอร์ *ก่อน* `$facet` ถ้าคุณต้องการให้ทุก facet ใช้เซตที่แคบลงร่วมกัน แทนที่จะทำ `$match` ซ้ำในแต่ละอัน
+- `$facet` ไม่สามารถใช้ index บน sub-pipeline ของมันได้ เพราะมันรันบนเอกสารที่ถูกสตรีมมาแล้ว ทำให้อินพุตเล็กไว้ด้วยการ match ตั้งแต่เนิ่น ๆ
+- `$bucket` ต้องการ `boundaries` ที่เรียงจากน้อยไปมาก ค่าที่ต่ำกว่าขอบเขตแรกหรือสูงกว่าขอบเขตสุดท้ายจะไปยัง `default` และหากไม่มี `default` ค่าเช่นนั้นจะทำให้เกิดข้อผิดพลาด
+- `$bucketAuto` มุ่งให้ขนาดถังเท่ากันแต่จะไม่แยกค่าที่เหมือนกันออกข้ามถัง ดังนั้นจำนวนนับอาจออกมาไม่เท่ากันเมื่อเอกสารจำนวนมากมีค่าร่วมกัน
+
+<Callout title="หลายคำตอบในครั้งเดียว หรือค่าเข้าถัง">
+$facet คำนวณหลาย sub-pipeline บนอินพุตเดียวกันและคืนมันเป็นฟิลด์ของหนึ่งเอกสาร — เหมาะสำหรับผลลัพธ์บวกจำนวนนับ $bucket และ $bucketAuto จัดกลุ่ม expression ตัวเลขเข้าช่วง: คุณให้ขอบเขตสำหรับ $bucket ส่วน $bucketAuto เลือกมันเองเพื่อปรับสมดุลถัง
+</Callout>
+
+export const quizFacets = [
+  {
+    q: 'แต่ละ sub-pipeline ของ stage $facet รับอินพุตอะไร?',
+    options: [
+      'ผลลัพธ์ของ sub-pipeline ที่ระบุไว้ก่อนหน้ามัน',
+      'เซตของเอกสารเดียวกันที่ไปถึง stage $facet',
+      'สับเซตสุ่มของคอลเลกชัน',
+      'เฉพาะเอกสารที่ตรงกับ facet แรก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การใช้งานทั่วไปของ $facet คือการคืนผลลัพธ์แบบแบ่งหน้าพร้อมกับสิ่งใดในเคียวรีเดียว?',
+    options: [
+      'สำเนาคอลเลกชันชุดที่สอง',
+      'จำนวนนับรวมของเอกสารที่ตรงกัน',
+      'ล็อกของเซิร์ฟเวอร์ฐานข้อมูล',
+      'ลิสต์ของ index',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน $bucket, ค่าที่ตกนอกขอบเขตทั้งหมดไปที่ไหน?',
+    options: [
+      'เข้าถังแรก',
+      'เข้าถังสุดท้าย',
+      'เข้าถัง default (หรือเกิดข้อผิดพลาดถ้าไม่ได้ตั้งไว้)',
+      'มันถูกทิ้งเงียบ ๆ',
+    ],
+    answer: 2,
+  },
+  {
+    q: '$bucketAuto ต่างจาก $bucket อย่างไร?',
+    options: [
+      'มันบังคับให้คุณระบุขอบเขตอย่างชัดเจน',
+      'มันเลือกขอบเขตเองเพื่อกระจายเอกสารไปตามจำนวนถังเป้าหมาย',
+      'มันจัดถังได้เฉพาะสตริง',
+      'มันคืนเอกสารยอดรวมทั้งหมดเพียงอันเดียว',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/facets-and-buckets" questions={quizFacets} />
+
+<ProgressTracker client:visible id="aggregation/facets-and-buckets" />

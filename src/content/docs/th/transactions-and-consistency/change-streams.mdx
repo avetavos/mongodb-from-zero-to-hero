@@ -1,0 +1,196 @@
+---
+title: Change streams
+description: subscribe ฟีดสด ๆ ของ insert, update และ delete ด้วย watch() ที่สร้างบน oplog เพื่อขับเคลื่อนแอปพลิเคชันแบบ event-driven และ resume ได้อย่างเชื่อถือได้ด้วย resume token
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+จนถึงตอนนี้เราเปลี่ยนแปลงข้อมูลและอ่านมันกลับมาด้วยตัวเอง แต่แอปพลิเคชันจำนวนมากต้อง **ตอบสนอง** ต่อการเปลี่ยนแปลงที่ส่วนอื่น ๆ ของระบบทำ — ส่งอีเมลเมื่อเพิ่มสมาชิก รีเฟรช cache เมื่อเรคคอร์ดเปลี่ยน push การอัปเดตไปยังแดชบอร์ดทันทีที่มีการจ่ายค่าปรับ การ polling คอลเลกชันซ้ำแล้วซ้ำเล่าเพื่อจับการเปลี่ยนแปลงนั้นสิ้นเปลืองและช้า **change stream** แก้ปัญหานี้ได้โดยตรง: คุณเปิด stream ด้วย `watch()` แล้วฐานข้อมูลจะส่ง insert, update และ delete แต่ละรายการมาให้คุณตามที่มันเกิดขึ้น ตามลำดับ เป็นฟีดสด ๆ
+
+change stream สร้างขึ้นบน **oplog** ซึ่งเป็น log ภายในตัวเดียวกับที่ replica set ใช้คัดลอกการเขียนจาก primary ไปยัง secondary ของมัน เพราะ oplog บันทึกทุกการเปลี่ยนแปลงตามลำดับอยู่แล้ว change stream จึงเป็นเพียง reader ที่ประพฤติดีของ log นั้น ซึ่งเป็นเหตุผลที่ change stream — เช่นเดียวกับ transaction — ต้องใช้ **replica set** เพื่อรัน
+
+## การเปิด stream บนคอลเลกชัน
+
+ตรงนี้เรา watch คอลเลกชัน `members` และตอบสนองต่อทุกการเปลี่ยนแปลง แต่ละ event ที่ stream ส่งออกมาคือเอกสารที่อธิบายสิ่งที่เกิดขึ้น: `operationType` ของมัน (เช่น `insert` หรือ `update`) document key และสำหรับ update คือคำอธิบายว่าฟิลด์ใดเปลี่ยนไป loop ด้านล่างเพียงพิมพ์แต่ละ event ตามที่มันมาถึงและฟังต่อไป:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const stream = db.members.watch();
+    while (stream.hasNext()) {
+      const event = stream.next();
+      print(event.operationType, JSON.stringify(event.documentKey));
+    }
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const stream = db.collection("members").watch();
+    for await (const event of stream) {
+      console.log(event.operationType, event.documentKey);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with db.members.watch() as stream:
+        for event in stream:
+            print(event["operationType"], event["documentKey"])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    stream, err := coll.Watch(ctx, mongo.Pipeline{})
+    if err != nil {
+        return err
+    }
+    defer stream.Close(ctx)
+
+    for stream.Next(ctx) {
+        var event bson.M
+        if err := stream.Decode(&event); err != nil {
+            return err
+        }
+        fmt.Println(event["operationType"], event["documentKey"])
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut stream = coll.watch().await?;
+    while let Some(event) = stream.next().await.transpose()? {
+        println!("{:?} {:?}", event.operation_type, event.document_key);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+เมื่อมีคน insert สมาชิกใหม่ที่อื่น event แบบนี้จะปรากฏบน stream ฟิลด์ `_id` คือ **resume token** สำหรับ event นี้ — อ่านต่อเพื่อดูว่าทำไมมันถึงสำคัญ:
+
+```json
+{
+  "_id": { "_data": "8265F0B3D4000000012B0229" },
+  "operationType": "insert",
+  "documentKey": { "_id": "65f0b3d4e4b0a1c2e4b0a1f0" },
+  "fullDocument": { "_id": "65f0b3d4e4b0a1c2e4b0a1f0", "name": "Katherine", "fines": 0 }
+}
+```
+
+## ฟีดไหลอย่างไร
+
+การเขียนไปยัง primary ถูกบันทึกใน oplog และจากตรงนั้น change stream หยิบมันขึ้นมาและส่งมอบให้ผู้บริโภคทุกตัวที่กำลัง watch อยู่ การเขียนครั้งเดียวสามารถกระจายออกไปยัง listener อิสระจำนวนมาก แต่ละตัวประมวลผลมันเพื่อจุดประสงค์ของตัวเอง:
+
+export const streamFlow = `flowchart LR
+  W["A write on the primary"] --> O["Oplog records the change in order"]
+  O --> CS["Change stream reads the oplog"]
+  CS --> C1["Consumer: send a welcome email"]
+  CS --> C2["Consumer: refresh a cache"]
+  CS --> C3["Consumer: update a dashboard"]`
+
+<Mermaid code={streamFlow} title="การเขียนลงใน oplog change stream อ่านมัน และกระจาย event ออกไปยังผู้บริโภคทุกตัวที่กำลัง watch อยู่" />
+
+## การ resume จากจุดที่คุณค้างไว้
+
+เครือข่ายหลุดและโปรเซส restart และระบบแบบ event-driven ไม่อาจยอมพลาดการเปลี่ยนแปลงที่เกิดขึ้นขณะที่มันไม่อยู่ได้ ทุก event พก **resume token** ไว้ใน `_id` ของมัน ถ้าคุณเก็บ token ของ event สุดท้ายที่คุณจัดการสำเร็จไว้ คุณสามารถเปิด stream ใหม่จากจุดนั้นเป๊ะ ๆ และรับทุกการเปลี่ยนแปลงตั้งแต่นั้นเป็นต้นมา โดยไม่มีรายการใดถูกข้ามและไม่มีรายการใดซ้ำ ตรงนี้เรา resume หลังจาก token ที่รู้จัก:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    const stream = db.members.watch([], { resumeAfter: savedToken });
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const stream = db.collection("members").watch([], { resumeAfter: savedToken });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    stream = db.members.watch(resume_after=saved_token)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    opts := options.ChangeStream().SetResumeAfter(savedToken)
+    stream, err := coll.Watch(ctx, mongo.Pipeline{}, opts)
+    if err != nil {
+        return err
+    }
+    defer stream.Close(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let stream = coll
+        .watch()
+        .resume_after(saved_token)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน Compass:** ไม่มีมุมมอง change-stream โดยเฉพาะ แต่คุณสามารถรัน loop `watch()` ในแท็บ **mongosh** ที่ฝังอยู่ แล้วทำการแก้ไขในแท็บ Documents ในอีกหน้าต่างหนึ่ง เพื่อดู event ปรากฏขึ้นแบบสด ๆ
+
+## เคล็ดลับและข้อควรระวัง
+
+- **change stream ต้องใช้ replica set** ด้วยเหตุผลเดียวกับ transaction: มันอ่านจาก oplog ซึ่งมีอยู่เฉพาะบน replica set เท่านั้น
+- **กรองที่ต้นทางด้วย pipeline** คุณสามารถส่ง aggregation pipeline ให้ `watch()` ได้ — ตัวอย่างเช่น `$match` บน `operationType` หรือบนฟิลด์ — เพื่อให้เซิร์ฟเวอร์ส่งมาเฉพาะ event ที่คุณสนใจ แทนที่จะกรองมันในแอปพลิเคชันของคุณ
+- **เก็บ resume token ไว้อย่างถาวร** การเก็บ token ที่จัดการล่าสุดไว้อย่างทนทานคือสิ่งที่ทำให้ผู้บริโภคปลอดภัยต่อการ crash หากไม่มีมัน การ restart จะพลาด event หรือต้องประมวลผลใหม่ตั้งแต่ต้น
+- **token หมดอายุไปพร้อม oplog** ถ้าผู้บริโภคออฟไลน์นานจนจุด resume ของมันหลุดออกไปจากปลาย oplog แล้ว stream จะไม่สามารถ resume จากตรงนั้นได้ และคุณต้องกระทบยอดด้วยวิธีอื่น
+
+<Callout title="watch อย่า poll">
+เมื่อแอปพลิเคชันของคุณต้องตอบสนองต่อการเปลี่ยนแปลงข้อมูล ให้เปิด change stream แทนการ polling คอลเลกชันด้วย timer คุณจะได้รับการเปลี่ยนแปลงตามลำดับ ทันทีที่มันเกิดขึ้น และได้ resume token เพื่อหยิบงานต่อจากจุดที่คุณค้างไว้เป๊ะ ๆ หลังจากการขัดจังหวะใด ๆ
+</Callout>
+
+export const quizStreams = [
+  {
+    q: 'change stream สร้างขึ้นบนโครงสร้างภายในใด?',
+    options: [
+      'B-tree ของ index',
+      'oplog ที่บันทึกทุกการเขียนตามลำดับ',
+      'คอลเลกชัน change แยกต่างหากที่คุณสร้างเอง',
+      'query plan cache',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'resume token ใช้ทำอะไร?',
+    options: [
+      'ยืนยันตัวตนต่อฐานข้อมูล',
+      'เปิด stream ใหม่จากจุดที่คุณค้างไว้ล่าสุดเป๊ะ ๆ',
+      'ตั้ง write concern ของ stream',
+      'จำกัดจำนวน event ที่ส่งคืน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณจะรับเฉพาะ event ที่คุณสนใจได้อย่างไร?',
+    options: [
+      'กรองมันในแอปพลิเคชันของคุณหลังจากรับมาทั้งหมด',
+      'ส่ง aggregation pipeline เช่น $match ให้ watch()',
+      'เปิดหนึ่ง stream ต่อหนึ่งเอกสาร',
+      'ตั้ง read concern เป็น linearizable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'change stream ต้องการการ deploy แบบใด?',
+    options: [
+      'standalone server',
+      'replica set',
+      'sharded cluster เท่านั้น',
+      'ไม่ต้องการการ deploy พิเศษ',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/change-streams" questions={quizStreams} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/change-streams" />

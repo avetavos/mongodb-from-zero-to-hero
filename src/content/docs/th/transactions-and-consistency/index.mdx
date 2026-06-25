@@ -1,0 +1,79 @@
+---
+title: ความสอดคล้องของข้อมูลใน MongoDB
+description: ทำไมการเขียนข้อมูลแบบ single-document ถึงเป็น atomic อยู่แล้ว ทำไม multi-document transaction จึงเป็นทางเลือกสุดท้าย และ read กับ write concern ช่วยให้คุณปรับ durability และ visibility ได้อย่างไร
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+คนที่มาจากโลกของฐานข้อมูลเชิงสัมพันธ์มักจะคว้า transaction ทันทีที่ต้องเปลี่ยนแปลงข้อมูลมากกว่าหนึ่งอย่าง แต่ใน MongoDB สัญชาตญาณนั้นมักจะพาคุณหลงทาง ฐานข้อมูลให้การรับประกันที่แข็งแกร่งกับคุณฟรี ๆ และการเอื้อมข้ามมันไปหา multi-document transaction เป็นสิ่งที่คุณทำได้ยาก ๆ และอย่างจงใจ ไม่ใช่ทำเป็นค่าเริ่มต้น โมดูลนี้พูดถึงการเข้าใจอย่างชัดเจนว่าคุณมีอะไรอยู่แล้ว สิ่งที่คุณขอเพิ่มได้เมื่อจำเป็นจริง ๆ และวิธีปรับ durability และ visibility ของทุกการดำเนินการขึ้นหรือลง
+
+ข้อเท็จจริงเดียวที่ทุกอย่างที่เหลือยึดเกาะอยู่คือ การเขียนไปยัง **เอกสารหนึ่งฉบับ** เป็น **atomic** เมื่อคุณอัปเดตเรคคอร์ดของสมาชิกคนหนึ่ง MongoDB จะนำการเปลี่ยนแปลงทั้งหมดไปใช้ — แม้ว่ามันจะแตะ nested object หลายฟิลด์ และ array ทั้งหมดในคราวเดียว — เป็นขั้นตอนเดียวที่แบ่งแยกไม่ได้ ไม่มี reader คนอื่นเห็นเอกสารในสภาพที่เปลี่ยนไปครึ่งหนึ่ง และถ้าการเขียนล้มเหลว เอกสารจะถูกทิ้งไว้ในสภาพเดิมเป๊ะ คุณไม่ต้องเปิดอะไร ไม่ต้อง commit อะไร และไม่ต้องจ่ายต้นทุนเพิ่มใด ๆ atomicity เป็นเพียงวิธีที่การเขียนเอกสารทำงาน
+
+## รูปร่างของความสอดคล้องตรงนี้
+
+เพราะหนึ่งเอกสารคือหน่วยของ atomicity วิธีที่คุณ **ออกแบบโมเดล** ข้อมูลจึงเป็นตัวกำหนดว่าความสอดคล้องของคุณจะมาฟรีมากแค่ไหน ข้อมูลที่เปลี่ยนแปลงไปด้วยกันและอยู่ด้วยกันควรอยู่ในเอกสารเดียวกัน เพื่อให้การเขียนครั้งเดียวรักษามันให้สอดคล้องกัน เมื่อข้อมูลที่เกี่ยวข้องกันกระจายอยู่ในหลายเอกสารหรือหลายคอลเลกชันจริง ๆ และต้องเปลี่ยนแปลงเป็นหน่วยเดียวกัน MongoDB มี **multi-document transaction** ให้ — transaction แบบ ACID จริง ๆ ข้าม session มันใช้งานได้ แต่มีต้นทุนสูงกว่าและต้องใช้ replica set จึงอยู่ก้นกล่องเครื่องมือมากกว่าจะอยู่บนสุด
+
+ที่ซ้อนทับอยู่บนทั้งสองอย่างคือปุ่มปรับคู่หนึ่งที่ใช้กับทุกการดำเนินการ **write concern** ควบคุมว่าสมาชิกของ replica set กี่ตัวต้องตอบรับการเขียน และว่ามันต้องถูก flush ลง on-disk journal หรือไม่ ก่อนที่ driver จะถือว่าการเขียนเสร็จสิ้น — นี่คือปุ่ม durability ส่วน **read concern** ควบคุมว่าข้อมูลที่คุณอ่านต้องสด และ commit แล้วมากแค่ไหน — นี่คือปุ่ม visibility ทั้งสองอย่างรวมกันช่วยให้คุณแลก latency กับความปลอดภัยได้ทีละการดำเนินการ
+
+export const overview = `flowchart TD
+  W["A write request"] --> Q{"How many documents?"}
+  Q -->|"One document"| A["Atomic automatically — no transaction needed"]
+  Q -->|"Many documents as a unit"| T["Multi-document transaction in a session"]
+  A --> WC["Write concern tunes durability"]
+  T --> WC
+  WC --> RC["Read concern tunes what readers see"]`
+
+<Mermaid code={overview} title="เส้นทางการตัดสินใจ: single-document atomicity เป็นค่าเริ่มต้น ใช้ transaction เฉพาะเมื่อหลายเอกสารต้องเปลี่ยนเป็นหน่วยเดียว โดยมี concern ปรับ durability และ visibility" />
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+- **Single-document atomicity** — ทำไมการเปลี่ยนแปลงใด ๆ ในหนึ่งเอกสาร ลึกแค่ไหนก็ตาม จึงเป็นแบบ all-or-nothing และวิธีออกแบบโมเดลข้อมูลให้สิ่งนี้ครอบคลุมความต้องการส่วนใหญ่ของคุณ
+- **Multi-document transactions** — การเปิด session การรันหลายการดำเนินการเป็นหน่วย ACID เดียว และการ commit หรือ abort พร้อมตัวอย่างคลาสสิกของการโอนเงินระหว่างบัญชี
+- **Read and write concerns** — การตั้งค่า `w`, `j` และ `wtimeout` สำหรับการเขียน ระดับ `local`, `majority` และ `linearizable` สำหรับการอ่าน และ read preference สำหรับเลือกว่าสมาชิกตัวไหนเป็นผู้ตอบ
+- **Change streams** — การ subscribe ฟีดสด ๆ ของ insert, update และ delete เพื่อให้แอปพลิเคชันของคุณตอบสนองต่อการเปลี่ยนแปลงข้อมูลได้ทันทีที่มันเกิดขึ้น
+
+<Callout title="คว้าการออกแบบก่อนจะคว้า transaction">
+ความผิดพลาดเรื่องความสอดคล้องที่พบบ่อยที่สุดคือการคว้า multi-document transaction ทั้งที่การออกแบบเอกสารที่ดีกว่าจะทำให้การเขียน atomic ครั้งเดียวก็เพียงพอแล้ว ให้ถามก่อนเสมอว่าข้อมูลที่ต้องเปลี่ยนแปลงไปด้วยกันสามารถอยู่ด้วยกันได้หรือไม่
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'หน่วยของ atomicity ใน MongoDB โดยค่าเริ่มต้นคืออะไร?',
+    options: [
+      'คอลเลกชันทั้งหมด',
+      'เอกสารหนึ่งฉบับ ไม่ว่าจะ nested ลึกแค่ไหน',
+      'ชุดเอกสารไม่เกิน 100 ฉบับ',
+      'ฐานข้อมูลทั้งหมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณควรคว้า multi-document transaction เมื่อไหร่?',
+    options: [
+      'สำหรับทุกการเขียน เป็นนิสัยเพื่อความปลอดภัย',
+      'เฉพาะเมื่อหลายเอกสารหรือหลายคอลเลกชันต้องเปลี่ยนแปลงเป็นหน่วยเดียว',
+      'ทุกครั้งที่คุณอัปเดต nested array',
+      'ไม่เคย เพราะ MongoDB ไม่รองรับมัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'write concern ควบคุมอะไร?',
+    options: [
+      'ฟิลด์ใดบ้างที่จะถูกส่งคืนให้ reader',
+      'สมาชิกกี่ตัวต้องตอบรับการเขียน และ journal durability',
+      'ลำดับของเอกสารในคอลเลกชัน',
+      'ว่ามีการใช้ index หรือไม่',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="transactions-and-consistency/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="transactions-and-consistency/index" />

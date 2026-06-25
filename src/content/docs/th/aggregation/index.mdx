@@ -1,0 +1,166 @@
+---
+title: aggregation pipeline
+description: เอกสารไหลผ่านชุดของ stage ที่เรียงลำดับกันอย่างไร โดยแต่ละ stage แปลงสตรีมของข้อมูล และต่างจาก find ธรรมดาอย่างไร
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การเรียก `find` ตอบคำถามได้แบบเดียว: "คืนเอกสารที่ตรงกับฟิลเตอร์นี้กลับมาให้ฉัน" ซึ่งเพียงพอสำหรับการอ่านข้อมูล แต่มันไม่สามารถ *สรุป* ข้อมูลเหล่านั้นได้ มันบอกคุณไม่ได้ว่าค่าเฉลี่ย rating ต่อ genre เป็นเท่าไร ลูกค้าแต่ละคนสั่งซื้อกี่ครั้ง หรือหนังสือสามอันดับขายดีที่สุดเมื่อเดือนที่แล้วคืออะไร สำหรับคำถามที่ต้องยุบเอกสารจำนวนมากให้กลายเป็นคำตอบที่เล็กลงและถูกจัดรูปใหม่ MongoDB มอบ **aggregation pipeline** ให้คุณ
+
+pipeline เป็นแนวคิดที่ทรงพลังที่สุดใน MongoDB รองจากตัวเอกสารเอง ลองนึกภาพสายพานลำเลียง: เอกสารของคุณเข้ามาทางปลายด้านหนึ่ง ไหลผ่านชุดของ **stage** แล้วสตรีมที่ถูกแปลงแล้วออกมาทางปลายอีกด้าน แต่ละ stage รับเอกสารที่ส่งมาให้ ทำงานหนึ่งอย่างที่นิยามไว้ชัดเจน แล้วส่งผลลัพธ์ต่อไปยัง stage ถัดไป ลำดับเป็นสิ่งที่คุณเลือกได้ และลำดับนั้นสำคัญ — stage หนึ่งจะเห็นเฉพาะสิ่งที่ stage ก่อนหน้ามันผลิตออกมาเท่านั้น
+
+เราจะทำงานกับชุดข้อมูลเล็ก ๆ ที่สมมติขึ้นตลอดทั้งโมดูลนี้: คอลเลกชัน `sales` ของออเดอร์หนังสือในร้านในจินตนาการ การทำให้ข้อมูลมีขนาดเล็กช่วยให้ *รูปร่าง* ของการแปลงแต่ละครั้งโดดเด่นชัดเจน
+
+## pipeline คือลิสต์ของ stage
+
+คุณส่ง **array** ของออบเจกต์ stage ให้กับ aggregation แต่ละ stage ถูกตั้งชื่อด้วยคีย์ที่นำหน้าด้วย `$` — `$match`, `$group`, `$sort` เป็นต้น นี่คือรูปแบบมาตรฐาน: ฟิลเตอร์สตรีม ยุบมันเข้ากลุ่ม แล้วเรียงลำดับผลลัพธ์
+
+export const pipelineFlow = `flowchart LR
+  In["sales documents"] --> M["$match: filter the stream"]
+  M --> G["$group: fold into groups"]
+  G --> S["$sort: order the groups"]
+  S --> Out["result documents"]`
+
+<Mermaid code={pipelineFlow} title="เอกสารไหลจากซ้ายไปขวา แต่ละ stage แปลงสตรีมและป้อนต่อไปยัง stage ถัดไป" />
+
+array ของ stage ชุดเดียวกันนี้คือสิ่งที่คุณส่งเข้าไปในทุกภาษา สังเกตว่าการเรียกคือ `aggregate` และอาร์กิวเมนต์คือ pipeline:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.sales.aggregate([
+      { $match: { genre: "fiction" } },
+      { $group: { _id: "$title", copies: { $sum: "$quantity" } } },
+      { $sort: { copies: -1 } }
+    ])
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const cursor = db.collection("sales").aggregate([
+      { $match: { genre: "fiction" } },
+      { $group: { _id: "$title", copies: { $sum: "$quantity" } } },
+      { $sort: { copies: -1 } },
+    ]);
+    const rows = await cursor.toArray();
+    console.log(rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.sales.aggregate([
+        {"$match": {"genre": "fiction"}},
+        {"$group": {"_id": "$title", "copies": {"$sum": "$quantity"}}},
+        {"$sort": {"copies": -1}},
+    ]))
+    print(rows)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{"$match", bson.D{{"genre", "fiction"}}}},
+        {{"$group", bson.D{{"_id", "$title"}, {"copies", bson.D{{"$sum", "$quantity"}}}}}},
+        {{"$sort", bson.D{{"copies", -1}}}},
+    }
+    cursor, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cursor.All(ctx, &rows); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pipeline = vec![
+        doc! { "$match": { "genre": "fiction" } },
+        doc! { "$group": { "_id": "$title", "copies": { "$sum": "$quantity" } } },
+        doc! { "$sort": { "copies": -1 } },
+    ];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    while let Some(doc) = cursor.try_next().await? {
+        println!("{:?}", doc);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+จากออเดอร์ fiction ไม่กี่รายการ pipeline จะคืนหนึ่งเอกสารต่อหนึ่งชื่อเรื่อง พร้อมผลรวมจำนวนเล่ม และชื่อเรื่องที่ขายดีที่สุดอยู่ก่อน:
+
+```json
+[
+  { "_id": "Dune", "copies": 7 },
+  { "_id": "Neuromancer", "copies": 4 },
+  { "_id": "Foundation", "copies": 2 }
+]
+```
+
+**ใน Compass:** เปิดคอลเลกชันแล้วคลิกแท็บ **Aggregations** ตัวสร้าง pipeline ให้คุณเพิ่มทีละ stage จาก dropdown แก้ไขเนื้อหาของมัน และดูตัวอย่างเอกสารที่ไหลออกจากแต่ละ stage แบบสดในตัวอย่างข้อมูล — นี่เป็นวิธีที่ดีที่สุดในการ *เฝ้าดู* สายพานลำเลียงทำงาน
+
+## ต่างจาก find อย่างไร
+
+`find` ฟิลเตอร์และ project แต่มันจะคืนสับเซตของเอกสาร *ต้นฉบับ* ของคุณเสมอ aggregation ทำแบบนั้นได้เช่นกัน แต่มันยังสามารถสร้างเอกสารใหม่ทั้งหมดขึ้นมาได้ด้วย: จำนวนนับ ค่าเฉลี่ย ระเบียนที่ join แล้ว อาร์เรย์ที่แบนราบ อะไรก็ตามที่ `find` ทำได้ aggregation ก็ทำได้ด้วย `$match` และ `$project` แต่ในทางกลับกันไม่จริง
+
+- `find` อ่านเอกสารออกมา; aggregation **จัดรูปสตรีม** ของเอกสารใหม่
+- `find` คืนเอกสารที่มีอยู่แล้ว; aggregation สามารถ **สังเคราะห์** เอกสารใหม่ขึ้นมาได้
+- pipeline เป็นสิ่งที่ **เรียงลำดับและประกอบกันได้** — คุณเรียงซ้อน stage เหมือนต่อ Lego และเพิ่มได้เรื่อย ๆ
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+บทเรียนข้างหน้าจะแนะนำ stage ที่คุณจะหยิบมาใช้บ่อยที่สุด ทีละแนวคิด:
+
+1. **Pipeline basics** — `$match` เพื่อฟิลเตอร์ตั้งแต่เนิ่น ๆ และ `$project` เพื่อจัดรูปใหม่ และทำไมลำดับของ stage จึงเปลี่ยนทั้งความถูกต้องและความเร็ว
+2. **Group and accumulators** — `$group` พร้อม `$sum`, `$avg`, `$min`, `$max`, `$push` และพวกพ้อง บวกกับยอดรวมทั้งหมด
+3. **Lookup joins** — `$lookup` เพื่อดึงเอกสารที่เกี่ยวข้องจากคอลเลกชันอื่น
+4. **Unwind arrays** — `$unwind` เพื่อเปลี่ยนหนึ่งเอกสารที่มีอาร์เรย์ให้กลายเป็นหลายเอกสาร
+5. **Facets and buckets** — `$facet` สำหรับหลายคำตอบในการประมวลผลครั้งเดียว และ `$bucket` สำหรับการจัดกลุ่มแบบฮิสโทแกรม
+
+<Callout title="แบบจำลองความคิด">
+aggregation pipeline คือ array ของ stage เอกสารเข้ามา แต่ละ stage แปลงสตรีมและส่งต่อ และผลลัพธ์ของ stage สุดท้ายคือผลลัพธ์ของคุณ ลองคิดถึงมันเหมือนสายพานลำเลียง ไม่ใช่เคียวรีเดี่ยว ๆ
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'stage เดียวของ aggregation รับอะไรเป็นอินพุต?',
+    options: [
+      'คอลเลกชันต้นฉบับ ทุกครั้ง',
+      'เอกสารผลลัพธ์ที่ผลิตโดย stage ก่อนหน้ามัน',
+      'ตัวอย่างสุ่มของคอลเลกชัน',
+      'เฉพาะเอกสารที่ตรงกับ stage สุดท้าย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'aggregation มีความสามารถใดที่ find ธรรมดาไม่มี?',
+    options: [
+      'การฟิลเตอร์เอกสารด้วยค่าของฟิลด์',
+      'การคืนสับเซตของฟิลด์',
+      'การสรุปเอกสารจำนวนมากให้เป็นเอกสารใหม่ที่คำนวณขึ้น',
+      'การเรียงลำดับผลลัพธ์',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'คุณแสดง pipeline อย่างไรเมื่อเรียก aggregate?',
+    options: [
+      'เป็นเอกสารเดียวที่มีหนึ่ง operator',
+      'เป็น array ของออบเจกต์ stage ที่เรียงลำดับ',
+      'เป็นสตริงของชื่อ stage คั่นด้วยคอมมา',
+      'เป็นออบเจกต์ฟิลเตอร์ที่ซ้อนกัน',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="aggregation/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="aggregation/index" />

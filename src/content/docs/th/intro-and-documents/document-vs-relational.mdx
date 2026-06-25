@@ -1,0 +1,129 @@
+---
+title: Document เทียบกับ relational
+description: การ map คำศัพท์ relational ไปยัง MongoDB — table เป็น collection, row เป็น document, JOIN เป็น embedding หรือ $lookup — และเมื่อไรควร embed เทียบกับเก็บแยก
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ถ้าคุณรู้จัก relational database อยู่แล้ว วิธีที่เร็วที่สุดในการคล่อง MongoDB คือการแปลคำที่คุณรู้ให้เป็นคำที่ MongoDB ใช้ แนวคิดส่วนใหญ่เรียงตรงกัน มีสองสามอันที่ต่างออกไปในแบบที่เป็นแก่นของโมเดล document บทเรียนนี้คือตารางแปลนั้น บวกกับการมองครั้งแรกไปที่คำถามที่โมดูล Data Modeling ตอบไว้อย่างครบถ้วน: เมื่อไรควร **embed** ข้อมูลที่เกี่ยวข้อง และเมื่อไรควรเก็บไว้ใน collection **แยกต่างหาก**
+
+## คำศัพท์ที่ map แล้ว
+
+นี่คือโลก relational ทางซ้ายและคู่ของมันใน MongoDB ทางขวา:
+
+- **Database → Database** อันนี้คำเดียวกันและแนวคิดเดียวกัน: ภาชนะที่มีชื่อสำหรับบรรจุ collection
+- **Table → Collection** collection เก็บ document แบบเดียวกับที่ table เก็บ row แต่มันไม่ตรึงทุก document ให้มี column เหมือนกันเป๊ะ
+- **Row → Document** document คือหนึ่งระเบียน ต่างจาก row ตรงที่มันสามารถซ้อน array และ sub-object ได้แทนที่จะเป็นรายการ cell แบนราบ
+- **Column → Field** field คือคู่ key-value ภายใน document field เป็นแบบต่อ document ดังนั้นสอง document ใน collection ไม่จำเป็นต้องมี field ชุดเดียวกัน
+- **JOIN → Embedding หรือ `$lookup`** ความสัมพันธ์ถูกจัดการด้วยการ **embed** ข้อมูลที่เกี่ยวข้องไว้ภายใน document เดียว หรือด้วยการลิงก์ document แล้วรวมพวกมันตอนอ่านด้วย aggregation stage `$lookup`
+- **Schema → Flexible schema (พร้อม validation ที่เป็น optional)** รูปร่างของข้อมูลคุณยืดหยุ่นโดยค่าเริ่มต้น และคุณสามารถเพิ่มกฎ validation เมื่อต้องการให้ database บังคับโครงสร้าง
+- **Primary key → `_id`** ทุก document มี `_id` ที่ไม่ซ้ำกัน บทบาทเดียวกับที่ primary key เล่นให้กับ row
+
+export const mappingDiagram = `flowchart LR
+  subgraph SQL["Relational"]
+    direction TB
+    R1["Database"]
+    R2["Table"]
+    R3["Row"]
+    R4["Column"]
+    R5["JOIN"]
+  end
+  subgraph MDB["MongoDB"]
+    direction TB
+    M1["Database"]
+    M2["Collection"]
+    M3["Document"]
+    M4["Field"]
+    M5["Embedding or lookup"]
+  end
+  R1 --> M1
+  R2 --> M2
+  R3 --> M3
+  R4 --> M4
+  R5 --> M5`
+
+<Mermaid code={mappingDiagram} title="แนวคิด relational และคู่ของมันใน MongoDB เทียบเคียงกัน" />
+
+## ความแตกต่างใหญ่: ความสัมพันธ์
+
+ใน relational database คุณเกือบจะ **normalise** เสมอ: สมาชิกอยู่ในตาราง `members` และการยืมของพวกเขาอยู่ในตาราง `loans` ที่ join กันด้วย key คุณประกอบภาพเต็มด้วย `JOIN` ทุกครั้งที่ query
+
+MongoDB ให้ทางเลือกแก่คุณ คุณสามารถ **embed** ข้อมูลที่เกี่ยวข้องไว้ภายใน document พ่อแม่โดยตรง ดังนั้นการอ่านครั้งเดียวจึงคืนทุกอย่าง:
+
+```json
+{
+  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
+  "name": "Ada",
+  "borrowed": [
+    { "title": "Compilers", "due": "2026-07-01" },
+    { "title": "Algorithms", "due": "2026-07-15" }
+  ]
+}
+```
+
+หรือคุณสามารถเก็บข้อมูลไว้ใน **collection แยกต่างหาก** แล้วลิงก์ด้วย id จากนั้นรวมพวกมันตอน query โดยใช้ `$lookup` — การ join ตอนอ่านของ MongoDB:
+
+```json
+{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Ada" }
+```
+
+```json
+{ "_id": "a1", "member_id": "65f0b3d4e4b0a1c2e4b0a1d1", "title": "Compilers", "due": "2026-07-01" }
+```
+
+## เมื่อไรควร embed เทียบกับเก็บแยก
+
+การลงรายละเอียดเต็มคือโมดูล Data Modeling แต่สัญชาตญาณที่ต้องสร้างตอนนี้คือ:
+
+- **Embed เมื่อ** ข้อมูลที่เกี่ยวข้องเป็นของพ่อแม่อันเดียว ถูกอ่านพร้อมกับมัน และไม่เติบโตอย่างไร้ขีดจำกัด หนังสือที่สมาชิกยืม, รายการสินค้าในออเดอร์, ความคิดเห็นล่าสุดของโพสต์ — เหล่านี้อ่านเป็น document เดียวในการเดินทางครั้งเดียว
+- **เก็บแยกเมื่อ** ข้อมูลถูกแชร์ระหว่างพ่อแม่หลายตัว ถูกอ้างอิงอย่างอิสระ หรือเติบโตใหญ่ แคตตาล็อกหนังสือที่สมาชิกหลายคนยืมควรเป็น collection ของตัวเอง อ้างอิงด้วย id ไม่ใช่คัดลอกเข้าไปในทุกสมาชิก
+
+คำถามนำทางคือ *ฉันอ่านข้อมูลนี้อย่างไร?* ถ้าคุณเกือบจะต้องการพ่อแม่และลูกพร้อมกันเสมอ การ embed ก็คุ้มค่า ถ้าลูกมีชีวิตเป็นของตัวเอง ก็ลิงก์พวกมัน
+
+## เคล็ดลับและข้อควรระวัง
+
+- **อย่า normalise โดยอัตโนมัติ** เมื่อมาจาก SQL แรงกระตุ้นคือการแยกทุกอย่างออกเป็น collection ที่ต่างกัน ใน MongoDB ข้อมูลที่ถูกอ่านพร้อมกันมักจะควรอยู่ด้วยกัน ใน document เดียว
+- **collection ไม่ใช่ table** มันไม่บังคับชุด column ที่ตายตัว สอง document สามารถพก field ต่างกันได้ และนั่นเป็นสิ่งที่ออกแบบให้อนุญาต
+- **`$lookup` มีอยู่ แต่มันไม่ใช่ join ฟรี** การ embed โดยทั่วไปเร็วกว่าสำหรับข้อมูลที่คุณอ่านพร้อมกัน; เอื้อมไปหา `$lookup` เมื่อข้อมูลควรอยู่ใน collection แยกต่างหากจริง ๆ
+- **`_id` คือ primary key ของคุณแบบฟรี ๆ** คุณได้ identifier ที่ไม่ซ้ำและถูก index บนทุก document โดยไม่ต้องประกาศ
+
+<Callout title="แปล แล้วเลิกนิสัยหนึ่งอย่าง">
+คำศัพท์ relational ส่วนใหญ่ map ตรงเข้ากับ MongoDB — table เป็น collection, row เป็น document, column เป็น field นิสัยอย่างเดียวที่ต้องเลิกคือการ normalise โดยอัตโนมัติ: ใน document database ข้อมูลที่คุณอ่านพร้อมกันมักจะควรอยู่ด้วยกัน
+</Callout>
+
+export const quizMap = [
+  {
+    q: 'What is the MongoDB counterpart of a relational table?',
+    options: ['document', 'collection', 'field', 'index'],
+    answer: 1,
+  },
+  {
+    q: 'In MongoDB, how are relationships between records handled?',
+    options: [
+      'ด้วย foreign-key constraint เท่านั้น',
+      'ด้วย JOIN ที่บังคับเท่านั้น',
+      'ด้วยการ embed ข้อมูลที่เกี่ยวข้อง หรือลิงก์ document แล้วรวมพวกมันด้วย $lookup',
+      'ไม่สามารถแทนค่าได้เลย',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'When is embedding usually the better choice over separate collections?',
+    options: [
+      'เมื่อข้อมูลถูกแชร์โดยพ่อแม่หลายตัวและเติบโตอย่างไร้ขีดจำกัด',
+      'เมื่อข้อมูลที่เกี่ยวข้องเป็นของพ่อแม่อันเดียวและถูกอ่านพร้อมกับมัน',
+      'เมื่อใดก็ตามที่คุณมาจากพื้นเพ relational',
+      'เฉพาะเมื่อพ่อแม่ไม่มี _id',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="intro-and-documents/document-vs-relational" questions={quizMap} />
+
+<ProgressTracker client:visible id="intro-and-documents/document-vs-relational" />

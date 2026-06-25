@@ -1,0 +1,204 @@
+---
+title: single และ compound indexes
+description: สร้าง index บนฟิลด์เดียวหรือหลายฟิลด์ เลือกลำดับจากน้อยไปมากหรือจากมากไปน้อย และเรียนรู้ prefix rule ที่ตัดสินว่า compound index ให้บริการ query ใดบ้าง
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+index ที่ง่ายที่สุดครอบคลุมฟิลด์เดียว เมื่อใดที่ query ของคุณกรองหรือเรียงบนสองฟิลด์พร้อมกัน คุณก็จะเอื้อมไปหา **compound index** — index อันเดียวที่เรียงเอกสารตามหลายฟิลด์พร้อมกัน compound index คือที่ที่พลังจริงส่วนใหญ่อยู่ และเป็นที่ที่ความสับสนส่วนใหญ่อยู่ด้วย เพราะ compound index ไม่ได้ช่วยทุก query ที่เอ่ยถึงฟิลด์ของมัน กฎที่ควบคุมว่ามันให้บริการ query ใดคือ **prefix rule** และมันคือแนวคิดที่สำคัญที่สุดในบทเรียนนี้
+
+ตลอดทั้งบทเรานี้เรายังคงใช้ collection `members` ของห้องสมุด แต่ละเอกสารถือ `name`, ปี `joined`, `city` และจำนวน `fines`
+
+## single-field index
+
+คุณได้พบ `createIndex` ในบทเรียนก่อนแล้ว ทิศทาง — `1` สำหรับจากน้อยไปมาก, `-1` สำหรับจากมากไปน้อย — ควบคุมลำดับการเรียงที่เก็บไว้ใน index สำหรับ single-field index ทิศทางแทบไม่สำคัญสำหรับการกรอง เพราะ MongoDB เดิน index ได้ทั้งสองทิศทาง แต่มันสำคัญสำหรับการเรียง ตรงนี้เราทำ index `fines` จากน้อยไปมาก:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ fines: 1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ fines: 1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("fines", 1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{Keys: bson.D{{Key: "fines", Value: 1}}},
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder().keys(doc! { "fines": 1 }).build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เซิร์ฟเวอร์ยืนยัน index ด้วยชื่อ:
+
+```json
+{ "createdIndexes": ["fines_1"], "ok": 1 }
+```
+
+## compound index ครอบหลายฟิลด์
+
+compound index ระบุมากกว่าหนึ่งฟิลด์ แต่ละฟิลด์มีทิศทางของตัวเอง ลำดับของฟิลด์ใน index ไม่ใช่เรื่องประดับ — มันนิยามลำดับการเรียง โดยเรียงตามฟิลด์แรกก่อน แล้วตามฟิลด์ที่สองภายในแต่ละกลุ่มที่ค่าฟิลด์แรกเท่ากัน เป็นต้น ตรงนี้เราทำ index `city` จากน้อยไปมาก แล้วตามด้วย `joined` จากมากไปน้อย เพื่อให้สมาชิกจัดกลุ่มตาม city และภายในแต่ละ city เรียงให้ใหม่สุดมาก่อน:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.createIndex({ city: 1, joined: -1 })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").createIndex({ city: 1, joined: -1 });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.members.create_index([("city", 1), ("joined", -1)])
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.Indexes().CreateOne(
+        ctx,
+        mongo.IndexModel{
+            Keys: bson.D{{Key: "city", Value: 1}, {Key: "joined", Value: -1}},
+        },
+    )
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "city": 1, "joined": -1 })
+            .build(),
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ชื่อที่ถูกสร้างขึ้นร้อยฟิลด์และทิศทางเข้าด้วยกัน:
+
+```json
+{ "createdIndexes": ["city_1_joined_-1"], "ok": 1 }
+```
+
+## prefix rule
+
+compound index ให้บริการ query ได้ก็ต่อเมื่อ query นั้นใช้ **left-prefix** ของฟิลด์ใน index — ฟิลด์แรก, หรือสองฟิลด์แรก, หรือสามฟิลด์แรก เป็นต้น เริ่มจากซ้ายเสมอและไม่กระโดดข้าม index `city_1_joined_-1` ของเรามี prefix ที่ใช้ได้สองชุด: `city` อย่างเดียว และ `city` รวมกับ `joined`
+
+ดังนั้น index นี้ช่วย query ที่กรองบน `city` อย่างเดียว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    db.members.find({ city: "Berlin" })
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await db.collection("members").find({ city: "Berlin" }).toArray();
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    list(db.members.find({"city": "Berlin"}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    cur, err := coll.Find(ctx, bson.M{"city": "Berlin"})
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let cur = coll.find(doc! { "city": "Berlin" }).await?;
+    ```
+  </TabItem>
+</Tabs>
+
+และมันช่วย query บน `city` และ `joined` พร้อมกัน แต่มัน**ไม่**ช่วย query ที่กรองบน `joined` อย่างเดียว เพราะ `joined` ไม่ใช่ left-prefix — index ถูกเรียงตาม `city` ก่อน ดังนั้นปีที่เข้าร่วมจึงกระจัดกระจายไปทั่วทั้งโครงสร้าง โดยไม่มีทาง seek ตรงไปหามันได้ query บน `joined` อย่างเดียวจะต้องมี index ของตัวเอง หรือ compound index ที่เริ่มต้นด้วย `joined`
+
+คุณดูใน `explain` ได้ว่า query ตรงกับ prefix ใด ซึ่งเป็นหัวข้อของบทเรียนถัดไป สำหรับตอนนี้ สิ่งที่ได้คือเรื่องโครงสร้าง: อ่าน compound index จากซ้ายไปขวา และ query จะไต่ไปกับมันได้ไกลเท่าที่ช่วงต่อเนื่องของฟิลด์นำหน้าที่มันแตะถึงเท่านั้น
+
+**ใน Compass:** แท็บ **Indexes** ลิสต์แต่ละ index พร้อมฟิลด์และทิศทางตามลำดับ คุณจึงอ่าน prefix ที่ใช้ได้ออกในชั่วพริบตา และมันรายงานขนาดบนดิสก์ของแต่ละ index เพื่อช่วยคุณตัดสินว่ามันคุ้มค่ากับที่กินพื้นที่หรือไม่
+
+## เคล็ดลับและจุดพลาด
+
+- compound index ที่เลือกมาดีอันเดียวแทน single-field index หลายอันได้ index บน `{ city: 1, joined: -1 }` ครอบ query บน `city` อย่างเดียวอยู่แล้ว ดังนั้น index `{ city: 1 }` แยกต่างหากจะซ้ำซ้อน
+- ลำดับฟิลด์ใน compound index เป็นการตัดสินใจเชิงออกแบบ ไม่ใช่รายละเอียด การสลับมันเปลี่ยนว่า index ให้บริการ query ใดได้บ้าง
+- ทิศทางสำคัญสำหรับการเรียง ไม่ใช่สำหรับการจับคู่แบบ equality ธรรมดา index อ่านได้ทั้งไปข้างหน้าและถอยหลัง ดังนั้น `{ joined: 1 }` และ `{ joined: -1 }` ต่างก็ให้บริการตัวกรอง equality ธรรมดาบน `joined` ได้ดีพอกัน ความต่างจะปรากฏเมื่อคุณเรียง
+- การข้ามฟิลด์นำหน้าทำให้ prefix แตก query บนฟิลด์ที่สองอย่างเดียวใช้ index ไม่ได้ ไม่ว่าฟิลด์นั้นจะเลือกได้เฉพาะเจาะจงแค่ไหน
+
+<Callout title="อ่าน compound index จากซ้ายไปขวา">
+compound index ให้บริการทุก query ที่ใช้ช่วงต่อเนื่องของฟิลด์นำหน้า เริ่มจากฟิลด์แรก เมื่อใดที่ query ข้ามฟิลด์ซ้ายสุด index ก็ไม่สามารถ seek ให้มันได้อีกต่อไป
+</Callout>
+
+export const quizCompound = [
+  {
+    q: 'คุณมี compound index บน { city: 1, joined: -1 } query ใดที่มันให้บริการด้วยการ seek ได้?',
+    options: [
+      'query ที่กรองบน joined อย่างเดียว',
+      'query ที่กรองบน city อย่างเดียว',
+      'query ที่กรองบน fines อย่างเดียว',
+      'ไม่มี query ใด เพราะ compound index ต้องการทุกฟิลด์',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'prefix rule พูดถึงอะไรเกี่ยวกับ compound index?',
+    options: [
+      'มันให้บริการ query ที่ใช้ชุดย่อยใดก็ได้ของฟิลด์',
+      'มันให้บริการ query ที่ใช้ left-prefix ของฟิลด์ เริ่มจากฟิลด์แรก',
+      'มันให้บริการเฉพาะ query ที่ใช้ทุกฟิลด์พร้อมกัน',
+      'มันให้บริการ query ที่ใช้ฟิลด์สุดท้ายก่อน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมลำดับฟิลด์จึงสำคัญใน compound index?',
+    options: [
+      'มันเปลี่ยนแค่ชื่อ index เท่านั้น',
+      'มันนิยามลำดับการเรียง และจึงตัดสินว่า prefix ของ query ใดที่ index ให้บริการได้',
+      'มันไม่มีผล MongoDB จัดเรียงฟิลด์ใหม่อัตโนมัติ',
+      'มันมีผลแค่ต่อวิธีที่ index แสดงใน Compass',
+    ],
+    answer: 1,
+  },
+]
+
+<Quiz client:visible id="indexes/single-and-compound-indexes" questions={quizCompound} />
+
+<ProgressTracker client:visible id="indexes/single-and-compound-indexes" />
