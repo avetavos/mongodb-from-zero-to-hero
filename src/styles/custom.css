@@ -58,3 +58,26 @@ html.read-mode .sl-markdown-content { max-width: 50rem; margin-inline: auto; }
 
 /* Runner toolbar buttons: cancel Starlight flow margin so buttons stay aligned */
 .sl-markdown-content :is([class*="__run"],[class*="__open"],[class*="__copy"],[class*="__btn"],[class*="__fork"]) { margin-top: 0; }
+
+/* ---- Collapsible sidebar (whole-sidebar toggle) ---- */
+.sidebar-collapse-toggle { display: none; }
+@media (min-width: 50rem) {
+  .sidebar-collapse-toggle {
+    position: fixed; top: 50%; left: var(--sl-sidebar-width, 18.75rem);
+    transform: translate(-50%, -50%); z-index: 90;
+    width: 1.85rem; height: 1.85rem; padding: 0; border-radius: 999px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; line-height: 1; cursor: pointer;
+    border: 1px solid var(--sl-color-gray-5);
+    background: var(--sl-color-bg-nav, var(--sl-color-bg));
+    color: var(--sl-color-text);
+    box-shadow: 0 2px 10px rgba(0,0,0,.28);
+    transition: left .16s ease, color .16s ease, border-color .16s ease;
+  }
+  .sidebar-collapse-toggle:hover { border-color: var(--sl-color-accent); color: var(--sl-color-accent-high); }
+  html.sidebar-collapsed .sidebar-collapse-toggle { left: 0.6rem; transform: translateY(-50%); }
+  html.sidebar-collapsed .sidebar,
+  html.sidebar-collapsed .sidebar-pane { display: none !important; }
+  html.sidebar-collapsed .main-frame { padding-inline-start: 0 !important; }
+}
+html.read-mode .sidebar-collapse-toggle { display: none !important; }

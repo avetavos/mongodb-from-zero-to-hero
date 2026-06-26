@@ -60,3 +60,33 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();
+
+;(() => {
+  if (window.__sidebarCollapse) return;
+  window.__sidebarCollapse = true;
+  const KEY = 'sidebar-collapsed';
+  const root = document.documentElement;
+  function set(on) { root.classList.toggle('sidebar-collapsed', on); }
+  function init() {
+    set(localStorage.getItem(KEY) === '1');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sidebar-collapse-toggle';
+    function sync() {
+      const on = root.classList.contains('sidebar-collapsed');
+      btn.innerHTML = on ? '&rsaquo;' : '&lsaquo;';
+      btn.title = on ? 'Expand sidebar' : 'Collapse sidebar';
+      btn.setAttribute('aria-label', btn.title);
+      btn.setAttribute('aria-pressed', String(on));
+    }
+    sync();
+    btn.addEventListener('click', () => {
+      set(!root.classList.contains('sidebar-collapsed'));
+      try { localStorage.setItem(KEY, root.classList.contains('sidebar-collapsed') ? '1' : '0'); } catch (e) {}
+      sync();
+    });
+    document.body.appendChild(btn);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
