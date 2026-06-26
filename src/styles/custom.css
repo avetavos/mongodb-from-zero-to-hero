@@ -81,3 +81,8 @@ html.read-mode .sl-markdown-content { max-width: 50rem; margin-inline: auto; }
   html.sidebar-collapsed .main-frame { padding-inline-start: 0 !important; }
 }
 html.read-mode .sidebar-collapse-toggle { display: none !important; }
+
+/* PWA-IPAD-TOC-FIX */
+@media (min-width: 50rem) {
+  mobile-starlight-toc { display: none !important; }
+}

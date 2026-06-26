@@ -68,6 +68,7 @@
   const root = document.documentElement;
   function set(on) { root.classList.toggle('sidebar-collapsed', on); }
   function init() {
+    if (!document.querySelector('.sidebar-pane, .sidebar')) return;
     set(localStorage.getItem(KEY) === '1');
     const btn = document.createElement('button');
     btn.type = 'button';
