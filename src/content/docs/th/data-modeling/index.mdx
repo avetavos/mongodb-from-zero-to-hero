@@ -76,6 +76,26 @@ document หนึ่งนั้นคือทุกอย่างที่�
 ปฏิกิริยาตอบสนองเชิงสัมพันธ์ถามว่า "ข้อมูลนี้ควรอยู่ที่ไหนเพื่อที่ฉันจะไม่ต้องเก็บซ้ำ" ส่วนปฏิกิริยาตอบสนองแบบ document ถามว่า "แอปพลิเคชันของฉันอ่านอะไรร่วมกัน เพื่อจะได้อ่านมันในครั้งเดียว" เริ่มทุก schema จาก query แล้วการตัดสินใจ embed-หรือ-reference จะตามมาเองโดยธรรมชาติ
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Embedding | อ่านครั้งเดียวได้ทุกอย่าง ไม่มี join, เขียนแบบ atomic | document โตได้ไม่มีขอบเขตถ้าไม่ระวัง เสี่ยงชนเพดาน 16 MB และมีข้อมูลซ้ำซ้อน |
+| Referencing | document เล็กและคงที่ ไม่มีข้อมูลซ้ำซ้อน แชร์ข้าม parent ได้หลายตัว | ต้อง query เพิ่มหรือ `$lookup` เพื่อ resolve ข้อมูล เพิ่ม latency ในการอ่าน |
+| Bucket pattern (สำหรับข้อมูลปริมาณสูงแบบ time-series) | ลดจำนวน document ต่อหน่วยเวลา ลด overhead ของ index | ต้องออกแบบขนาด bucket ล่วงหน้า เพิ่ม logic การจัดกลุ่มข้อมูล |
+
+## Common Mistakes
+
+- **คิดว่า MongoDB ไม่มี schema เลย** — ทุก document มี shape โดยธรรมชาติจากวิธีที่แอปพลิเคชันเขียนมันอยู่แล้ว ต่างกันแค่ database ไม่บังคับ shape นั้นให้คุณ เว้นแต่คุณเพิ่ม validation เข้าไปเอง
+- **คิดว่ามี "schema ที่ถูกต้องหนึ่งเดียว" สำหรับ entity หนึ่ง** — schema ที่ดีขึ้นกับ access pattern ของแอปพลิเคชันนั้น ๆ entity เดียวกันอาจถูก model ต่างกันโดยสิ้นเชิงในสองโปรเจกต์
+- **คิดว่าเปลี่ยน schema ทีหลังไม่ได้เพราะ MongoDB ไม่มี migration tool built-in** — เปลี่ยนได้เสมอ เพียงแต่ต้องเขียน migration script เอง และวางแผน rollout ด้วย `validationLevel` ที่เหมาะสม
+
+> 💡 Real World Example
+>
+> **Bosch** — แพลตฟอร์ม IoT ของ Bosch เก็บข้อมูล sensor จากอุปกรณ์นับล้านชิ้นด้วย Bucket pattern แทนที่จะสร้างหนึ่ง document ต่อหนึ่ง reading เพื่อจำกัดการเติบโตของ document และลด overhead ของ index
+>
+> **ADEO** (กลุ่มค้าปลีกที่เป็นเจ้าของ Leroy Merlin) — ใช้ MongoDB จัดการ product catalog ขนาดใหญ่ ที่ต้องตัดสินใจในทุกความสัมพันธ์ว่าจะ embed field ที่แสดงบ่อย หรือ reference ไปยัง source ที่เปลี่ยนแปลงบ่อยกว่า
+
 export const quizIndex = [
   {
     q: 'คำถามหลักที่ขับเคลื่อนการ data modeling ของ MongoDB คืออะไร?',

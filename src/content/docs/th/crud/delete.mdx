@@ -193,6 +193,25 @@ document ยังคงอยู่ตรงนั้น เพียงแค�
 รัน filter การลบของคุณผ่าน find ก่อน ถ้า document ที่มันคืนกลับมาคือรายการที่คุณตั้งใจจะลบเป๊ะ ๆ ก็สลับ find เป็น deleteMany ถ้าไม่ใช่ ก็แก้ filter — ไม่มี undo สำหรับการลบแบบถาวร
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| hard delete (`deleteOne`/`deleteMany`) | คืนพื้นที่จัดเก็บทันที ไม่มีขยะตกค้าง เรียบง่ายที่สุด | ลบถาวร ไม่มี audit trail ไม่มี undo |
+| soft delete (update flag เช่น `deleted: true`) | กู้คืนได้ เก็บ audit trail และ historical data ไว้ครบ | ต้องกรอง flag ใน query ทุกจุดที่อ่านข้อมูล ไม่งั้น document ที่ "ลบ" แล้วโผล่มาอีก และ collection โตขึ้นเรื่อย ๆ |
+
+## Common Mistakes
+
+- **ใช้ `deleteOne` เมื่อจริง ๆ ต้องการลบทุกรายการที่ตรง filter** — เผลอใช้ `deleteOne` คิดว่าลบหมดแล้ว ทั้งที่มันหยุดแค่ document แรก เหลือ document อื่นที่ตรง filter เดิมค้างอยู่ใน collection
+- **ไม่ตรวจ `deletedCount` หลังลบ** — สมมติว่าลบสำเร็จเพราะไม่มี error โยนขึ้นมา ทั้งที่ `deletedCount` อาจเป็น 0 เพราะ filter สะกดผิดหรือพิมพ์ field ผิด
+- **ทำ soft delete แล้วลืมปรับ query ปกติให้กัน document ที่ถูกทำเครื่องหมายออก** — เขียน find ปกติโดยไม่เติมเงื่อนไข `deleted: { $ne: true }` ทำให้ข้อมูลที่ "ลบ" ไปแล้วโผล่กลับมาในผลการค้นหาให้ผู้ใช้เห็น
+
+> 💡 Real World Example
+>
+> **ตะกร้าสินค้าที่ค้างอยู่ (abandoned cart)** — job รายวันเรียก `deleteMany({ status: "cart", updatedAt: { $lt: thirtyDaysAgo } })` กวาดตะกร้าที่ไม่มีการเคลื่อนไหวเกิน 30 วันทิ้ง เพื่อไม่ให้ collection บวมด้วยข้อมูลที่ไม่มีใครจะ checkout แล้ว
+>
+> **บัญชีผู้ใช้ (user account)** — เมื่อผู้ใช้กด "ลบบัญชี" ระบบไม่เรียก `deleteOne` ทันที แต่ทำ soft delete ด้วย `updateOne` ตั้ง `deleted: true` และ `deletedAt` เพื่อให้มีช่วงเวลากู้คืนได้ (เช่น 30 วัน) ก่อนที่ job เบื้องหลังจะ `deleteOne` จริงเมื่อพ้นกำหนด
+
 export const quizDelete = [
   {
     q: 'deleteMany ด้วย filter ที่ว่างเปล่าทำอะไร?',

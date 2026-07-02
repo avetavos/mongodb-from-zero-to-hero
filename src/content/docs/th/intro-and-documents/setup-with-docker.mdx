@@ -122,6 +122,25 @@ mongosh "mongodb://localhost:27017"
 Docker เปลี่ยน "ติดตั้งและตั้งค่า database" ให้เป็น "รัน image" เก็บข้อมูลของคุณใน named volume ปักหมุด version tag แล้วคุณจะได้ MongoDB ที่ทิ้งได้แต่ก็คงทน ซึ่งคุณล้างและสร้างใหม่ได้ตามใจ
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| รัน MongoDB ผ่าน Docker | ล้างและสร้างใหม่ได้เร็ว ไม่ทิ้งอะไรถาวรบนเครื่อง และ environment ใกล้เคียง production ที่มักรัน container เหมือนกันในทีม | ต้องมี Docker engine ทำงานอยู่ตลอด และมี overhead เล็กน้อยของ container เทียบกับการรันตรง ๆ บน host |
+| ติดตั้ง MongoDB บนเครื่องโดยตรง | ไม่มี layer ของ container คั่นกลาง เชื่อมต่อผ่าน `localhost` ตรง ๆ | reset หรือปรับเวอร์ชันยากกว่า และแต่ละเครื่องในทีมอาจลง version หรือ config ไม่ตรงกัน |
+
+## Common Mistakes
+
+- **ลืมปักหมุด image tag แล้วใช้ `mongo:latest`** — เวลา pull image ใหม่ เวอร์ชันเซิร์ฟเวอร์อาจเปลี่ยนแบบไม่ตั้งใจและพัง config หรือ behavior ที่เคยพึ่งพา ควรปักหมุดเวอร์ชันหลักอย่าง `mongo:7` เสมอ
+- **ลบ container ด้วย `docker rm` แล้วคิดว่าข้อมูลหายไปด้วย** — ถ้า data อยู่ใน named volume การลบ container ไม่กระทบข้อมูล; กลับกัน คนที่ไม่ mount volume เลยแล้วแปลกใจว่าทำไม data หายทุกครั้งที่ restart container
+- **เปิดพอร์ต `27017` แบบไม่ตั้ง password แล้วเข้าใจว่าเครื่อง dev "ไม่มีใครมาแตะอยู่แล้ว"** — ถ้าเครื่องมีการ expose พอร์ตออก network ภายนอกโดยไม่ตั้งใจ (เช่น cloud VM) การไม่ตั้ง authentication เปิดช่องให้คนนอกต่อเข้ามาได้ตรง ๆ
+
+> 💡 Real World Example
+>
+> **CI pipeline ของหลายทีม** — สร้างและทำลาย container `mongo` ใหม่ทุกครั้งที่รัน integration test แต่ละรอบ เพื่อให้ทุก test เริ่มจาก database ที่ว่างเปล่าเหมือนกันทุกครั้ง ไม่มี state ค้างข้ามรอบ
+>
+> **ทีม backend ที่ทำงานข้ามเครื่อง** — commit ไฟล์ `docker-compose.yml` ไว้ในโปรเจกต์ เพื่อให้ทุกคนในทีม (และ CI) ได้ MongoDB เวอร์ชันเดียวกันเป๊ะด้วยคำสั่งเดียว แทนที่จะให้แต่ละคนติดตั้งเองแล้วเวอร์ชันไม่ตรงกัน
+
 export const quizDocker = [
   {
     q: 'Why mount a named volume at /data/db when running the mongo container?',

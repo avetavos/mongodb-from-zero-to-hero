@@ -96,6 +96,25 @@ MongoDB ให้ทางเลือกแก่คุณ คุณสาม�
 คำศัพท์ relational ส่วนใหญ่ map ตรงเข้ากับ MongoDB — table เป็น collection, row เป็น document, column เป็น field นิสัยอย่างเดียวที่ต้องเลิกคือการ normalise โดยอัตโนมัติ: ใน document database ข้อมูลที่คุณอ่านพร้อมกันมักจะควรอยู่ด้วยกัน
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Denormalized document model (embed) | อ่าน document เดียวได้ข้อมูลครบ ไม่ต้อง join เร็วสำหรับ workload ที่อ่านพ่อแม่กับลูกพร้อมกันเสมอ | ข้อมูลที่ซ้ำกันในหลาย document ต้องอัปเดตหลายจุดถ้าเปลี่ยน และ document อาจโตจนถึงขีดจำกัดถ้า array ไม่มีขอบเขต |
+| Normalized relational model (foreign key) | ไม่มีข้อมูลซ้ำ แก้ที่เดียวจบ และ foreign key รับประกัน referential integrity ให้โดย database | ต้อง join หลายตารางแทบทุก query ซึ่งมีต้นทุนเพิ่มขึ้นตามจำนวนตารางที่เกี่ยวข้อง |
+
+## Common Mistakes
+
+- **สมมติว่า `$lookup` ให้การรับประกันเหมือน SQL JOIN ทุกอย่าง** — `$lookup` ไม่มี referential integrity แบบ foreign key constraint ถ้า document ที่ถูกอ้างอิงถูกลบไป `$lookup` จะแค่คืน array ว่างเปล่า ไม่มี error เตือน
+- **Embed ทุกอย่างเพราะเชื่อว่า embed เร็วกว่าเสมอ** — ถ้าข้อมูลลูกโตแบบไม่มีขอบเขต (เช่น log ของกิจกรรมที่เพิ่มไม่หยุด) การ embed ในที่สุดจะชน document size limit และทำให้ document แม่โตจนอ่าน/เขียนช้าลง ควรเก็บแยกตั้งแต่ต้น
+- **คิดว่าการเรียง collection ตาม `_id` เท่ากับการเรียงตาม field เวลาที่แน่นอน** — ObjectId เรียงตามเวลาสร้างแค่ระดับวินาที ไม่ใช่ timestamp ที่แม่นยำระดับมิลลิวินาทีหรือรับประกัน order เป๊ะข้ามหลาย process ถ้าต้องการลำดับที่แน่นอนต้องมี field เวลาของตัวเอง
+
+> 💡 Real World Example
+>
+> **MetLife** — รวมข้อมูลลูกค้าจากระบบ relational เดิมหลายสิบระบบเข้าเป็น document เดียวต่อลูกค้าหนึ่งคน (single customer view) แทนที่จะพยายาม join ข้าม database ที่แยกกันอยู่คนละระบบ
+>
+> **ระบบ e-commerce ทั่วไป** — มักจะ embed รายการสินค้าในออเดอร์ไว้ใน document ของออเดอร์เอง (denormalize) เพราะแทบทุกครั้งที่อ่านออเดอร์ต้องเห็นรายการสินค้าพร้อมกันเสมอ แต่เก็บแคตตาล็อกสินค้าไว้ใน collection แยกเพราะสินค้าหนึ่งตัวถูกอ้างอิงจากหลายออเดอร์
+
 export const quizMap = [
   {
     q: 'What is the MongoDB counterpart of a relational table?',

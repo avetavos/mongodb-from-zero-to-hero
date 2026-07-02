@@ -289,7 +289,7 @@ export const bulkDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-**ใน Compass:** ไม่มีแผง bulk-write แต่ upsert ปรากฏขึ้นเองอย่างเป็นธรรมชาติ — เมื่อคุณแก้ไข document การกระทำ **Update** จะมีช่อง checkbox **upsert** ให้ เพื่อให้ filter ที่ไม่ตรงกันทำการ insert แทน
+**ใน Compass:** ไม่มีแผง bulk-write แต่ upsert ปรากฏขึ้นเองอย่างเป็นธรรมชาติ — เมื่อคุณแก้ไข document การกระทำ **Update** จะมีช่อง checkbox **upsert** ให้ เพื่อให้ filter ที่ไม่ตรงกัน insert แทน
 
 ## เคล็ดลับและจุดที่ต้องระวัง
 
@@ -301,6 +301,26 @@ export const bulkDiagram = `flowchart LR
 <Callout title="การเดินทางไปกลับน้อยลง องค์ประกอบเดิม">
 upsert และ bulk write ไม่ได้เพิ่มภาษา query ใหม่ — พวกมันอัด insert, update และ delete ที่คุณรู้อยู่แล้วเข้าไปในการเดินทางไปยังเซิร์ฟเวอร์ครั้งเดียว นั่นคือสิ่งที่ "การทำให้ CRUD เร็ว" หมายถึงเป็นส่วนใหญ่ในทางปฏิบัติ
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `bulkWrite` | รวมหลาย operation เป็น round trip เดียว เร็วกว่าการเรียกแยกมาก | ผลลัพธ์รวมเป็นก้อนเดียว ต้องแกะ error ของแต่ละ operation เองเวลามีบางตัวล้มเหลว |
+| upsert | round trip เดียว จบทั้ง insert-ถ้าไม่มี และ update-ถ้ามี | ถ้ามีหลาย request แข่งกันด้วย filter เดียวกันพร้อมกัน (race condition) อาจเกิด document ซ้ำได้ถ้าไม่มี unique index รองรับ |
+| check-then-insert/update แบบ explicit (`findOne` ก่อน แล้วค่อย insert/update) | ควบคุมได้ละเอียด ตัดสินใจ logic เพิ่มเติมได้ก่อนเขียน | สอง round trip แทนที่จะเป็นหนึ่ง และยังมีช่องว่างระหว่าง find กับ write ที่ request อื่นแทรกเข้ามาได้ (race เช่นกัน แต่ควบคุมยากกว่า) |
+
+## Common Mistakes
+
+- **เชื่อว่า upsert ป้องกัน document ซ้ำได้เสมอ** — ถ้าไม่มี unique index ครอบ field ที่ใช้เป็น filter การยิง upsert พร้อมกันหลาย request ด้วย filter เดียวกันสามารถสร้าง document ซ้ำได้ เพราะ MongoDB ตรวจ "ไม่พบ" แล้ว insert แบบแยกกันในแต่ละ request ก่อนที่อีกฝั่งจะเห็นผลลัพธ์ของกันและกัน
+- **ใส่ operation หลายพันตัวลงใน `bulkWrite` เดียวโดยไม่แบ่ง batch** — payload ใหญ่เกินไปอาจชนลิมิตของ driver/เซิร์ฟเวอร์ ควรแบ่งเป็นชุดที่ขนาดพอเหมาะแล้วยิงหลายรอบ
+- **ใช้ ordered `bulkWrite` (ค่าเริ่มต้น) เมื่อ operation ต่าง ๆ ไม่เกี่ยวข้องกัน** — ถ้า operation ตัวที่ 3 ล้มเหลว operation ที่ 4-100 จะไม่ถูกรันเลย ทั้งที่ไม่มีอะไรเกี่ยวข้องกับตัวที่ล้มเหลว ทำให้งานที่ควรสำเร็จหายไปด้วย ควรใช้ unordered ถ้า operation เป็นอิสระต่อกันจริง ๆ
+
+> 💡 Real World Example
+>
+> **ระบบนับยอดสินค้าคงคลัง (inventory sync)** — เมื่อซิงก์สต็อกจากคลังสินค้าจริงเข้าระบบทุกคืน ใช้ `bulkWrite` แบบ unordered รวม `updateOne` หลายพันรายการ (แก้ยอด stock ต่อ SKU) เข้าเป็นการเดินทางไปกลับไม่กี่ครั้ง แทนที่จะยิง update ทีละ SKU
+>
+> **ระบบนับยอด page view / analytics counter** — ใช้ upsert กับ `updateOne({ page, date }, { $inc: { views: 1 } }, { upsert: true })` เพื่อสร้างแถวนับยอดของวันนั้นถ้ายังไม่มี หรือบวกเพิ่มถ้ามีอยู่แล้ว โดยมี unique compound index บน `(page, date)` กันไม่ให้เกิดแถวซ้ำเวลามี request มาพร้อมกันจำนวนมาก
 
 export const quizBulk = [
   {

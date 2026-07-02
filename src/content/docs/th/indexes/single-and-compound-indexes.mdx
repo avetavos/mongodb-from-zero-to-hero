@@ -10,9 +10,9 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-index ที่ง่ายที่สุดครอบคลุมฟิลด์เดียว เมื่อใดที่ query ของคุณกรองหรือเรียงบนสองฟิลด์พร้อมกัน คุณก็จะเอื้อมไปหา **compound index** — index อันเดียวที่เรียงเอกสารตามหลายฟิลด์พร้อมกัน compound index คือที่ที่พลังจริงส่วนใหญ่อยู่ และเป็นที่ที่ความสับสนส่วนใหญ่อยู่ด้วย เพราะ compound index ไม่ได้ช่วยทุก query ที่เอ่ยถึงฟิลด์ของมัน กฎที่ควบคุมว่ามันให้บริการ query ใดคือ **prefix rule** และมันคือแนวคิดที่สำคัญที่สุดในบทเรียนนี้
+index ที่ง่ายที่สุดครอบคลุมฟิลด์เดียว เมื่อใดที่ query ของคุณกรองหรือเรียงบนสองฟิลด์พร้อมกัน คุณก็จะเอื้อมไปหา **compound index** — index อันเดียวที่เรียง document ตามหลายฟิลด์พร้อมกัน compound index คือที่ที่พลังจริงส่วนใหญ่อยู่ และเป็นที่ที่ความสับสนส่วนใหญ่อยู่ด้วย เพราะ compound index ไม่ได้ช่วยทุก query ที่เอ่ยถึงฟิลด์ของมัน กฎที่ควบคุมว่ามันให้บริการ query ใดคือ **prefix rule** และมันคือแนวคิดที่สำคัญที่สุดในบทเรียนนี้
 
-ตลอดทั้งบทเรานี้เรายังคงใช้ collection `members` ของห้องสมุด แต่ละเอกสารถือ `name`, ปี `joined`, `city` และจำนวน `fines`
+ตลอดทั้งบทเรานี้เรายังคงใช้ collection `members` ของห้องสมุด แต่ละ document ถือ `name`, ปี `joined`, `city` และจำนวน `fines`
 
 ## single-field index
 
@@ -165,6 +165,25 @@ compound index ให้บริการ query ได้ก็ต่อเม�
 <Callout title="อ่าน compound index จากซ้ายไปขวา">
 compound index ให้บริการทุก query ที่ใช้ช่วงต่อเนื่องของฟิลด์นำหน้า เริ่มจากฟิลด์แรก เมื่อใดที่ query ข้ามฟิลด์ซ้ายสุด index ก็ไม่สามารถ seek ให้มันได้อีกต่อไป
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| single-field index | เรียบง่าย ครอบ query shape เดียวได้พอดี ดูแลง่าย | ครอบได้แค่ query ที่กรอง/เรียงบนฟิลด์นั้นฟิลด์เดียว |
+| compound index | ครอบได้หลาย query shape พร้อมกันถ้าลำดับฟิลด์ตรงกับ left-prefix | ใหญ่กว่า เขียนช้ากว่า และออกแบบผิดลำดับแล้วช่วยอะไรไม่ได้เลย |
+
+## Common Mistakes
+
+- **คิดว่า compound index ช่วย query ที่กรองบนฟิลด์ใดก็ได้ในนั้น** — compound index ให้บริการเฉพาะ left-prefix เท่านั้น query ที่กรองเฉพาะฟิลด์ที่สองโดยข้ามฟิลด์แรกไปจะไม่ seek เลย
+- **สร้าง single-field index ซ้ำซ้อนกับ prefix ของ compound index ที่มีอยู่แล้ว** — ถ้ามี `{ city: 1, joined: -1 }` อยู่แล้ว index `{ city: 1 }` แยกต่างหากซ้ำซ้อนโดยสิ้นเชิง เสียพื้นที่และ write cost ฟรีๆ
+- **สลับลำดับฟิลด์ใน compound index โดยไม่เช็คผลกับ query อื่นที่ใช้ index เดิม** — ลำดับฟิลด์เป็นการตัดสินใจเชิงออกแบบ เปลี่ยนแล้ว query shape ที่เคย seek ได้อาจกลายเป็น COLLSCAN ทันที
+
+> 💡 Real World Example
+>
+> **ระบบ booking อย่าง Airbnb-style** — ใช้ compound index บน `{ city: 1, checkIn: 1, price: 1 }` เพื่อรองรับทั้ง query กรองตามเมือง เรียงตามวันที่เข้าพัก และกรองช่วงราคา ด้วย index อันเดียว แทนที่จะสร้าง single-field index แยกสามอัน
+>
+> **ทีม analytics ที่ query หลาย shape บน collection เดียวกัน** — เจอปัญหาว่า compound index ที่ออกแบบไว้สำหรับ dashboard หนึ่งใช้กับ query ของอีกทีมไม่ได้เพราะลำดับฟิลด์ไม่ตรง left-prefix จึงต้องเพิ่ม index อีกตัวแทนที่จะพึ่ง index เดิม
 
 export const quizCompound = [
   {

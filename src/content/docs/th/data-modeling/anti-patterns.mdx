@@ -70,6 +70,24 @@ export const antiPatternDiagram = `flowchart LR
 anti-pattern ไม่ใช่ความผิดพลาดที่แปลกประหลาด มันคือการตัดสินใจธรรมดาที่ไม่รอดจากการเติบโต แนวป้องกันคือนิสัยจากทั้งโมดูลนี้: จำกัดขอบเขต array reference สิ่งที่แชร์และใหญ่ embed สิ่งที่ถูกอ่านด้วยกัน ให้แต่ละ entity มี collection ของมันเอง และใช้ collation — ไม่ใช่ regex — สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็ก
 </Callout>
 
+## Trade-offs
+
+| แนวทาง | Benefit | Cost |
+|---------|---------|------|
+| มีวินัยในการ modeling ตั้งแต่ต้น (จำกัดขอบเขต array, เลือก embed/reference ตาม access pattern) | anti-pattern น้อยลง แก้ปัญหาตอนสเกลง่ายกว่ามาก | ใช้เวลาออกแบบล่วงหน้ามากขึ้นก่อนเริ่มเขียนโค้ด |
+| model แบบรวดเร็วโดยไม่วางแผนล่วงหน้า | เริ่มต้นเร็ว ส่งของได้ไว | anti-pattern สะสมเงียบ ๆ แล้วเจ็บหนักตอนสเกล ต้อง migrate schema ทีหลังภายใต้แรงกดดัน |
+
+## Common Mistakes
+
+- **คิดว่า anti-pattern คือความผิดพลาดของมือใหม่เท่านั้น** — ส่วนใหญ่เป็นการตัดสินใจที่สมเหตุสมผลตอน design เริ่มต้น แล้วเสื่อมสภาพตามการเติบโตของข้อมูล ไม่ใช่ความประมาท
+- **แก้ anti-pattern โดยเปลี่ยน schema ทันทีโดยไม่มีแผน migration** — การย้ายจาก embedded array ไปเป็น reference บน collection ที่มีข้อมูล production อยู่แล้ว ต้องมี rollout ทีละขั้น (dual-write แล้วค่อย backfill) ไม่ใช่ deploy แล้วจบ
+
+> 💡 Real World Example
+>
+> **Wordnik** — กรณีศึกษาที่รู้จักกันดีเรื่อง unbounded array: เก็บทุก occurrence ของคำในประโยคตัวอย่างไว้ใน array เดียวของ document คำศัพท์ จนบาง document โตจนเป็นปัญหา ต้องย้ายไป reference แยก collection ภายหลัง
+>
+> **Parse** (แพลตฟอร์ม backend-as-a-service เดิมของ Facebook) — เจอปัญหา performance เสื่อมจาก document ที่อ้วนเกินและ query pattern ที่ over-reference ข้าม collection มากเกินไป จนต้อง refactor schema กลางคัน
+
 export const quizAntiPatterns = [
   {
     q: 'document embed array ที่โตโดยไม่มีขอบเขต วิธีแก้ที่แนะนำคืออะไร?',

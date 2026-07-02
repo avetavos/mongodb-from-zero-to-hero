@@ -1,6 +1,6 @@
 ---
 title: Multi-document transactions
-description: รันหลายการดำเนินการข้ามเอกสารและคอลเลกชันเป็นหน่วย ACID เดียวด้วย session, withTransaction, commit และ abort แสดงด้วยตัวอย่างคลาสสิกการโอนเงินระหว่างบัญชี
+description: รันหลาย operation ข้าม document และ collection เป็นหน่วย ACID เดียวด้วย session, withTransaction, commit และ abort แสดงด้วยตัวอย่างคลาสสิกการโอนเงินระหว่างบัญชี
 sidebar:
   order: 3
 ---
@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-บางครั้งการดำเนินการครั้งเดียวจำเป็นต้องเปลี่ยนแปลงหลายเอกสารจริง ๆ และต้องสำเร็จทั้งหมดหรือไม่สำเร็จเลยสักอย่าง กรณีในตำราเรียนคือการย้ายเงิน: หักจากบัญชีหนึ่งและเพิ่มให้อีกบัญชีหนึ่ง ถ้าการหักลงแต่การเพิ่มล้มเหลว เงินก็หายไป เมื่อเอกสารที่เกี่ยวข้องไม่สามารถรวมเป็นหนึ่งได้ — เพราะมันเป็นคนละบัญชี หรืออยู่คนละคอลเลกชัน — MongoDB มี **multi-document transaction** จริง ๆ ให้ มันให้การรับประกัน ACID เต็มรูปแบบข้ามทุกการดำเนินการภายในมัน: ทั้งหมด commit ด้วยกันหรือ roll back ด้วยกัน
+บางครั้ง operation ครั้งเดียวจำเป็นต้องเปลี่ยนแปลงหลาย document จริง ๆ และต้องสำเร็จทั้งหมดหรือไม่สำเร็จเลยสักอย่าง กรณีในตำราเรียนคือการย้ายเงิน: หักจากบัญชีหนึ่งและเพิ่มให้อีกบัญชีหนึ่ง ถ้าการหักลงแต่การเพิ่มล้มเหลว เงินก็หายไป เมื่อ document ที่เกี่ยวข้องไม่สามารถรวมเป็นหนึ่งได้ — เพราะมันเป็นคนละบัญชี หรืออยู่คนละ collection — MongoDB มี **multi-document transaction** จริง ๆ ให้ มันให้การรับประกัน ACID เต็มรูปแบบข้ามทุก operation ภายในมัน: ทั้งหมด commit ด้วยกันหรือ roll back ด้วยกัน
 
 ราคาของการรับประกันนั้นคือ transaction ต้องใช้ **session** เพื่อรัน ต้องใช้ **replica set** (standalone server รันมันไม่ได้) และมีต้นทุนสูงกว่าการเขียนธรรมดา ดังนั้นนี่จึงเป็นเครื่องมือที่ใช้อย่างจงใจ ไม่ใช่ค่าเริ่มต้น
 
 ## transaction อยู่ใน session
 
-ขั้นตอนเป็นแบบเดิมเสมอ คุณเริ่ม **session** จากนั้นรันการดำเนินการของคุณภายใน transaction ที่ผูกกับ session นั้น ตัวช่วยของ driver ที่เรียกว่า `withTransaction` ห่อหุ้มทุกอย่างไว้: มันเริ่ม transaction รัน callback ของคุณ **commit** ถ้ามันคืนค่ามาอย่างสะอาด และ **abort** (roll back ทุกอย่าง) ถ้ามัน throw นอกจากนี้มันยังลอง commit ใหม่โดยอัตโนมัติเมื่อเกิด transient error บางอย่าง ซึ่งเป็นเหตุผลที่คุณควรใช้มันมากกว่าการเริ่มและ commit ด้วยมือ
+ขั้นตอนเป็นแบบเดิมเสมอ คุณเริ่ม **session** จากนั้นรัน operation ของคุณภายใน transaction ที่ผูกกับ session นั้น ตัวช่วยของ driver ที่เรียกว่า `withTransaction` ห่อหุ้มทุกอย่างไว้: มันเริ่ม transaction รัน callback ของคุณ **commit** ถ้า callback จบโดยไม่มี error และ **abort** (roll back ทุกอย่าง) ถ้ามัน throw นอกจากนี้มันยังลอง commit ใหม่โดยอัตโนมัติเมื่อเกิด transient error บางอย่าง ซึ่งเป็นเหตุผลที่คุณควรใช้มันมากกว่าการเริ่มและ commit ด้วยมือ
 
 export const txnFlow = `flowchart TD
   S["startSession"] --> B["Begin transaction"]
@@ -27,11 +27,11 @@ export const txnFlow = `flowchart TD
   C -->|"Yes"| COMMIT["Commit — both changes become visible together"]
   C -->|"No"| ABORT["Abort — every change is rolled back"]`
 
-<Mermaid code={txnFlow} title="transaction เริ่มใน session รันการดำเนินการของมัน จากนั้น commit การเปลี่ยนแปลงทั้งหมดด้วยกัน หรือ abort และ roll back ทุกอย่างกลับ" />
+<Mermaid code={txnFlow} title="transaction เริ่มใน session รัน operation ของมัน จากนั้น commit การเปลี่ยนแปลงทั้งหมดด้วยกัน หรือ abort และ roll back ทุกอย่างกลับ" />
 
 ## การโอนเงินระหว่างบัญชี
 
-ตรงนี้เราย้ายค่าสามหน่วยจาก Ada ไปยัง Linus ข้ามสองเอกสารในคอลเลกชัน `accounts` ทุกการดำเนินการส่ง **session** ผ่านไป ซึ่งคือสิ่งที่ผูกมันเข้ากับ transaction ถ้าการอัปเดตใดล้มเหลว — สมมติว่าต้นทางมียอดคงเหลือไม่พอแล้วเรา throw — การโอนทั้งหมดจะถูก roll back และยอดคงเหลือทั้งสองไม่เปลี่ยนแปลง:
+ตรงนี้เราย้ายค่าสามหน่วยจาก Ada ไปยัง Linus ข้ามสอง document ใน collection `accounts` ทุก operation ส่ง **session** ผ่านไป ซึ่งคือสิ่งที่ผูกมันเข้ากับ transaction ถ้าการอัปเดตใดล้มเหลว — สมมติว่าต้นทางมียอดคงเหลือไม่พอแล้วเรา throw — การโอนทั้งหมดจะถูก roll back และยอดคงเหลือทั้งสองไม่เปลี่ยนแปลง:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -161,18 +161,37 @@ export const txnFlow = `flowchart TD
 - **transaction ต้องใช้ replica set** `mongod` แบบ standalone ตัวเดียวรันมันไม่ได้ การตั้งค่า Docker บนเครื่องในคอร์สนี้รัน replica set แบบหนึ่ง node อยู่แล้ว เพื่อให้คุณลองตัวอย่างเหล่านี้ได้
 - **ทำให้ transaction สั้น** transaction ถือ resource ไว้ตลอดอายุของมันและมีขีดจำกัดเวลาเป็นค่าเริ่มต้น ทำเฉพาะการเขียนที่ต้องเป็น atomic ภายในมัน และทำงานที่ช้า — การเรียกผ่านเครือข่าย การคำนวณหนัก — ไว้ภายนอก
 - **มีต้นทุนด้านประสิทธิภาพจริง** transaction ช้ากว่าการเขียน single-document ที่เทียบเท่า และมันสามารถ abort ภายใต้ write conflict และต้องลองใหม่ ใช้มันที่ซึ่งความถูกต้องเรียกร้อง ไม่ใช่เป็นผ้าห่มปลอบใจ
-- **ส่ง session ผ่านไปทุกที่** การดำเนินการภายใน callback ที่ลืมส่ง session จะรัน *นอก* transaction และจะไม่ถูก roll back
+- **ส่ง session ผ่านไปทุกที่** operation ภายใน callback ที่ลืมส่ง session จะรัน *นอก* transaction และจะไม่ถูก roll back
 
 <Callout title="ให้ความสำคัญกับการออกแบบ single-document ก่อน">
-ก่อนเขียน transaction ให้ถามว่าเอกสารสามารถปรับรูปร่างให้การเปลี่ยนแปลงพอดีกับเอกสารใดเอกสารหนึ่งได้หรือไม่ การเขียน single-document นั้นง่ายกว่า เร็วกว่า และเป็น atomic ฟรี ๆ transaction เป็นคำตอบเฉพาะเมื่อข้อมูลไม่สามารถนำมารวมกันได้จริง ๆ
+ก่อนเขียน transaction ให้ถามว่า document สามารถปรับรูปร่างให้การเปลี่ยนแปลงพอดีกับ document ใด document หนึ่งได้หรือไม่ การเขียน single-document นั้นง่ายกว่า เร็วกว่า และเป็น atomic ฟรี ๆ transaction เป็นคำตอบเฉพาะเมื่อข้อมูลไม่สามารถนำมารวมกันได้จริง ๆ
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| ใช้ multi-document transaction | ACID เต็มรูปแบบข้าม document และ collection รับประกันว่า commit หรือ abort พร้อมกันทั้งหมด | ต้อง lock resource ไว้ตลอดอายุ transaction เพิ่ม latency และกิน WiredTiger cache มากขึ้นเพราะต้องเก็บ snapshot ไว้จนกว่าจะ commit |
+| หลีกเลี่ยง transaction ด้วยการออกแบบ document ใหม่ | เร็วกว่า ไม่มี lock ยืดยาว ไม่กิน cache เพิ่ม | ต้องยอมรับข้อจำกัดของโมเดลข้อมูล เช่น duplication หรือ eventual consistency ระหว่าง collection |
+
+## Common Mistakes
+
+- **ไม่ handle transient transaction error ด้วยการ retry เอง** — เชื่อว่า `withTransaction` จัดการ retry ให้ทุกกรณี แต่ถ้าเขียน transaction แบบ manual โดยไม่ดักจับ error label อย่าง `TransientTransactionError` หรือ `UnknownTransactionCommitResult` แล้วลองใหม่ transaction จะล้มเหลวเงียบ ๆ ภายใต้ write conflict ปกติที่ควรลองใหม่ได้สำเร็จ
+- **ปล่อยให้ transaction รันนานเกินขีดจำกัดเวลาเริ่มต้น (60 วินาที)** — ใส่ logic ที่ต้องเรียก API ภายนอกหรือคำนวณหนักไว้ในตัว transaction ทำให้มันแขวนอยู่นาน ชน `transactionLifetimeLimitSeconds` แล้วถูก abort อัตโนมัติ ทั้งที่งานหนักนั้นควรทำให้เสร็จก่อนแล้วค่อยเปิด transaction สั้น ๆ
+- **คว้า transaction ก่อนตรวจว่า embedding แก้ปัญหาได้อยู่แล้วหรือไม่** — เห็น operation ที่แตะสอง document ก็เปิด transaction ทันที ทั้งที่ข้อมูลสองก้อนนั้น redesign ให้อยู่ document เดียวได้ ทำให้เสียต้นทุนเรื่อง lock และ latency ไปฟรี ๆ
+
+> 💡 Real World Example
+>
+> **ธนาคาร/fintech ทั่วไป** — ใช้ multi-document transaction สำหรับการโอนเงินระหว่างบัญชี หัก balance จากบัญชีต้นทางและเพิ่มให้บัญชีปลายทางต้อง commit พร้อมกันเสมอ เพื่อไม่ให้เงิน "หาย" หรือ "งอก" ระหว่างทาง
+>
+> **Coinbase** — ใช้ transaction ที่ผูกกับ session เพื่อรักษาความถูกต้องของยอดเงินดิจิทัลข้าม ledger document หลายฉบับ เพราะข้อผิดพลาดด้าน consistency ในระบบการเงินมีต้นทุนสูงกว่าการแลก latency ที่เพิ่มขึ้นจาก transaction มาก
 
 export const quizMulti = [
   {
-    q: 'อะไรผูกการดำเนินการเข้ากับ multi-document transaction?',
+    q: 'อะไรผูก operation เข้ากับ multi-document transaction?',
     options: [
-      'ชื่อคอลเลกชันพิเศษ',
-      'การส่ง session ให้ทุกการดำเนินการใน transaction',
+      'ชื่อ collection พิเศษ',
+      'การส่ง session ให้ทุก operation ใน transaction',
       'การตั้ง write concern เป็น majority',
       'การรันมันภายใน stored procedure',
     ],
@@ -204,7 +223,7 @@ export const quizMulti = [
       'ทำงานให้มากที่สุดเท่าที่จะเป็นไปได้ภายในมัน',
       'ทำให้สั้นและย้ายงานที่ช้าออกไปไว้ภายนอกมัน',
       'รวมการเรียกผ่านเครือข่ายไว้ภายในมันเสมอ',
-      'ห้ามส่ง session ให้การดำเนินการ',
+      'ห้ามส่ง session ให้ operation',
     ],
     answer: 1,
   },

@@ -424,6 +424,26 @@ element หายไปและ array ว่างเปล่าอีกค�
 กฎข้อเดียวที่ป้องกันบั๊ก update ที่เลวร้ายที่สุด นั่นคือ ในการเปลี่ยนส่วนหนึ่งของ document ให้ห่อการเปลี่ยนแปลงของคุณไว้ใน $set (หรือ $inc, $push, $unset, …) document เปล่า ๆ ที่ไม่มี operator จะแทนที่ทั้งก้อน
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `updateOne` | กระทบ document เดียว เจาะจง เข้าใจง่ายว่าอะไรถูกแก้ | ต้องเรียกซ้ำถ้าต้องแก้หลาย document ทำให้เดินทางไปกลับหลายครั้ง |
+| `updateMany` | แก้หลาย document ในการเรียกเดียว เร็วกว่ามากเมื่อ scope ใหญ่ | atomic เฉพาะ "ต่อ document" เท่านั้น ไม่ atomic ข้าม document — document อื่นอาจอ่านเห็นสถานะที่แก้ไปแล้วบางส่วนระหว่างที่ operation ยังไม่จบ |
+| update ด้วย operator (`$set` บางส่วน) | แก้เฉพาะ field ที่ต้องการ ส่วนที่เหลือของ document ปลอดภัย | ต้องจำเสมอว่าใส่ operator ทุกครั้ง ไม่งั้นเสี่ยงโดนแทนที่ทั้งก้อน |
+
+## Common Mistakes
+
+- **ลืม await ผลลัพธ์ของ `updateOne`/`updateMany` แล้วไปทำ logic ถัดไปทันที** — โค้ดเดินหน้าต่อโดยสมมติว่า update สำเร็จแล้ว ทั้งที่ยังไม่รู้ `matchedCount`/`modifiedCount` เลย ทำให้ debug ยากเมื่อ update จริง ๆ ไม่ได้ผล
+- **ใช้ `updateOne` วนลูปเมื่อจริง ๆ ต้องการ `updateMany`** — ต้องการแก้ document หลายรายการที่ตรง filter เดียวกัน แต่ดัน loop เรียก `updateOne` ทีละตัว ทั้งที่ `updateMany` ทำงานเดียวกันในการเรียกครั้งเดียวและเร็วกว่ามาก
+- **เข้าใจว่า `updateMany` เป็น transaction เดียวที่ atomic ทั้งชุด** — ความจริงแล้วแต่ละ document ถูกแก้แบบ atomic เฉพาะตัวมันเอง ถ้าต้องการความ atomic ข้าม document จริง ๆ ต้องใช้ multi-document transaction ไม่ใช่แค่ `updateMany`
+
+> 💡 Real World Example
+>
+> **ระบบตัดสต็อกสินค้าตอนสั่งซื้อ** — เมื่อ order ถูกยืนยัน ระบบเรียก `updateOne` เพิ่ม field `status` ของ order เป็น `"confirmed"` ด้วย `$set` แล้วเรียก `updateMany` (`$inc: { stock: -qty }`) แยกกับสินค้าหลายรายการในตะกร้าเดียว โดยรู้ตัวว่าทั้งสอง operation ไม่ atomic ร่วมกัน จึงห่อด้วย transaction เมื่อความถูกต้องสำคัญมาก
+>
+> **ระบบแจ้งเตือนแบบ batch** — ทำ flash sale แล้วต้องการติด flag `notified: true` ให้ผู้ใช้ที่สมัครรับข่าวหมวดนั้นทุกคนพร้อมกัน ใช้ `updateMany({ subscribedCategory: "electronics" }, { $set: { notified: true } })` ครั้งเดียวแทนการวนลูป update ทีละคน
+
 export const quizUpdate = [
   {
     q: 'คุณเรียก updateOne ด้วย document ธรรมดาที่ไม่มี operator เลย จะเกิดอะไรขึ้น?',

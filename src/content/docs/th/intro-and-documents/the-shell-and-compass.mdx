@@ -52,7 +52,7 @@ it
 - tab **Documents** แสดง document จริง คุณเลื่อนดูมันได้ แก้ field โดยดับเบิลคลิกที่ค่าของมัน และเพิ่ม document ใหม่ด้วยปุ่ม **ADD DATA** สีเขียวที่มุมขวาบน
 - tab **Schema** สุ่มตัวอย่าง collection และวาดภาพว่ามี field ใดอยู่บ้างและเก็บ type อะไร — เป็นวิธีที่รวดเร็วในการเข้าใจ collection ที่ไม่คุ้นเคยโดยไม่ต้องอ่านทุก document
 - tab **Aggregations** เป็นตัวสร้าง pipeline แบบ visual คุณเพิ่ม stage ทีละอันและเฝ้าดู document แปลงร่าง ซึ่งทำให้โมดูล aggregation ตามได้ง่ายขึ้นมาก
-- **Explain Plan** (มีให้เมื่อคุณรัน query) แสดงว่า MongoDB ดำเนินการมันอย่างไร — ว่ามันใช้ index หรือสแกนทั้งหมด — ซึ่งเป็นหัวใจของโมดูล index
+- **Explain Plan** (มีให้เมื่อคุณรัน query) แสดงว่า MongoDB รันมันอย่างไร — ว่ามันใช้ index หรือสแกนทั้งหมด — ซึ่งเป็นหัวใจของโมดูล index
 
 Compass และ shell ส่งเสริมกัน: Compass สำหรับการดูและสำรวจ, shell สำหรับการทำซ้ำและเขียนสคริปต์ ไม่มีอันไหนแทนที่ driver ในโค้ดแอปพลิเคชันของคุณ
 
@@ -133,6 +133,25 @@ export const toolDiagram = `flowchart TD
 <Callout title="หนึ่ง string สามประตู">
 shell, Compass, และทุก driver ล้วนเปิด database เดียวกันผ่าน connection string เดียวกัน เรียน string เพียงครั้งเดียวแล้วคุณก็เข้าถึง MongoDB ได้จากทุกที่
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| mongosh | เขียนสคริปต์และทำงานซ้ำ ๆ ได้เร็ว รันผ่าน SSH บนเซิร์ฟเวอร์ที่ไม่มี GUI ได้ และ automate เป็นไฟล์ `.js` ได้ | ต้องจำ syntax คำสั่งและชื่อ field เอง ไม่มีภาพช่วยตอนสำรวจข้อมูลที่ไม่คุ้นเคย |
+| Compass (GUI) | เห็นภาพ schema และ document จริงได้ทันที สร้าง aggregation pipeline แบบลากวางทีละ stage ทำให้เข้าใจข้อมูลใหม่ได้เร็ว | ต้องมีหน้าจอ ใช้ผ่าน SSH หรือ automate ในสคริปต์ไม่ได้ และเปิดแอปหนักกว่าการพิมพ์คำสั่งเดียวใน terminal |
+
+## Common Mistakes
+
+- **ใช้ Compass เป็นเครื่องมือ automate งานประจำ** — Compass ออกแบบมาให้คลิกสำรวจ ไม่ใช่รันซ้ำเป็น pipeline อัตโนมัติ งานที่ต้องรันซ้ำทุกวันควรเป็นสคริปต์ mongosh หรือ driver แทน
+- **สร้าง client ใหม่ในโค้ดแอปพลิเคชันทุก request** — driver ตั้งใจให้สร้าง client อายุยืนแค่ครั้งเดียวแล้วใช้ connection pool ซ้ำ การสร้างใหม่ทุก request เปิด/ปิด connection โดยไม่จำเป็นและทำให้ช้าลงมาก
+- **คิดว่า mongosh กับ driver ใช้ syntax เดียวกัน 100%** — mongosh เป็น JavaScript shell ที่มี helper เฉพาะตัวอย่าง `use`, `show dbs`, `it` ซึ่งไม่มีใน driver จริง driver แต่ละภาษาต้องเรียก method ที่ตรงกับ API ของตัวเอง ไม่ใช่ copy คำสั่ง shell ไปวางตรง ๆ
+
+> 💡 Real World Example
+>
+> **ทีม on-call / SRE** — ต่อเข้าเซิร์ฟเวอร์ production ผ่าน SSH แล้วใช้ mongosh รัน query ตรวจสอบสถานะเร็ว ๆ เพราะไม่มี GUI ให้ใช้และต้องการความเร็วตอนแก้ปัญหากลางดึก
+>
+> **ทีม data / analyst** — ใช้ Compass เปิดดู collection ที่ไม่คุ้นเคยก่อน แล้วใช้ตัวสร้าง aggregation pipeline แบบ visual ประกอบ stage ทีละอันจนได้ pipeline ที่ถูกต้อง ก่อนค่อยคัดลอกไปฝังในโค้ดจริง
 
 export const quizShell = [
   {

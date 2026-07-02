@@ -162,6 +162,26 @@ acknowledgement จับคู่ index ของแต่ละรายกา
 ยกเว้นว่าคุณมีตัวระบุในโลกจริงที่รับประกันว่าไม่ซ้ำกัน (อย่าง ISBN) ก็ปล่อยให้ MongoDB สร้าง ObjectId มันไม่ซ้ำกัน เรียงลำดับตามเวลาที่สร้างได้ และเป็นอีกหนึ่งสิ่งที่คุณไม่ต้องเสี่ยงทำพลาด
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `insertOne` | เรียบง่าย จัดการ error ของแต่ละ document ตรงไปตรงมา | หนึ่ง round trip ต่อหนึ่ง document ช้าเมื่อมีจำนวนมาก |
+| `insertMany` (ordered) | batch เดียว ลด round trip | document ที่ error ตัวแรกหยุดทั้งชุด ตัวที่เหลือไม่ถูก insert |
+| `insertMany` (unordered) | เดินหน้าต่อแม้มี document ที่ error insert ทุกตัวที่ไม่ชนกัน | ลำดับการ insert ไม่การันตี ต้องแกะผลลัพธ์เพื่อรู้ว่าตัวไหนล้มเหลว |
+
+## Common Mistakes
+
+- **insert document ทีละตัวในลูปแทนที่จะใช้ `insertMany`** — เสีย round trip โดยไม่จำเป็น ยิ่งจำนวน document เยอะยิ่งช้าเห็นได้ชัด ควรรวมเป็น array แล้วเรียก `insertMany` ครั้งเดียว
+- **คิดว่า `insertOne` คืนค่า document ที่ถูก insert กลับมาเต็ม ๆ** — จริง ๆ แล้วมันคืนแค่ acknowledgement กับ `insertedId` เท่านั้น ถ้าต้องการ document เต็ม ต้อง `findOne` ตามด้วย `_id` นั้นเอง
+- **ไม่ตรวจ `insertedCount` ของ `insertMany` แบบ unordered** — เข้าใจว่า "ไม่มี error โยนขึ้นมา" แปลว่า document ทุกตัวถูก insert ครบ ทั้งที่ unordered อาจข้าม document ที่ล้มเหลวไปเงียบ ๆ ต้องเทียบ `insertedCount` กับจำนวนที่ส่งเข้าไป
+
+> 💡 Real World Example
+>
+> **ระบบ import สินค้าเข้าคลัง (e-commerce)** — เมื่อ merchant อัปโหลดไฟล์ CSV สินค้าหลายพันรายการ ระบบแปลงแต่ละแถวเป็น document แล้วส่งเข้า `insertMany` เป็นชุด (batch) ละ 500 รายการ แทนที่จะ `insertOne` ทีละแถว
+>
+> **ระบบ log/event ingestion** — service ที่รับ event จำนวนมากต่อวินาที มักสะสม event ไว้ใน buffer สั้น ๆ แล้ว `insertMany` แบบ unordered เป็นก้อนเดียว เพื่อไม่ให้ event หนึ่งตัวที่ผิดรูปแบบไปบล็อก event อื่นทั้งหมด
+
 export const quizInsert = [
   {
     q: 'ถ้าคุณ insert document โดยไม่มี field _id จะเกิดอะไรขึ้น?',

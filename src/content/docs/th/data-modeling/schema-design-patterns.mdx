@@ -105,6 +105,25 @@ pattern เหล่านี้ผสมกันได้อย่างอิ
 แต่ละ pattern แลกบางอย่าง — สำเนาที่ต้องดูแล งานเล็กน้อยตอนเขียน — เพื่อการอ่านที่เร็วหรือง่ายกว่า เรียนรู้ปัญหาที่แต่ละอันแก้ เพื่อที่เมื่อคุณพบอาการ คุณจะรู้วิธีรักษาอยู่แล้ว ใช้ pattern เพราะคุณมีปัญหาของมัน ไม่ใช่เพียงเพราะมันมีอยู่
 </Callout>
 
+## Trade-offs
+
+| Pattern | Benefit | Cost |
+|---------|---------|------|
+| Bucket pattern | ลดจำนวน document ต่อการอ่าน overhead ต่อ index น้อยลงมาก | ต้องออกแบบขนาด bucket ล่วงหน้า และ query ข้าม bucket ซับซ้อนขึ้น |
+| Computed pattern | อ่านเร็วมาก ไม่ต้องคำนวณค่าเดิมซ้ำในทุกการอ่าน | เพิ่มงานตอนเขียน และเสี่ยง field ที่คำนวณไว้ล้าสมัย (stale) ถ้าลืม refresh |
+
+## Common Mistakes
+
+- **ใช้ pattern ก่อนที่จะมีปัญหาจริง** — Bucket, Computed, Subset และ Extended Reference ล้วนเพิ่มความซับซ้อนให้ schema อย่าหยิบมาใช้แบบเก็งกำไรก่อนวัด workload จริง
+- **ใช้ Computed pattern แล้วลืม refresh ค่าที่คำนวณไว้** — field ที่ precompute จะเก่าค้างทันทีถ้า source เปลี่ยนแล้วไม่มี job หรือ trigger คอยอัปเดตมันตาม
+- **เลือกขนาด bucket ผิดใน Bucket pattern** — bucket เล็กเกินไปแทบไม่ต่างจากการไม่ bucket เลย ส่วน bucket ใหญ่เกินไปก็เสี่ยงชนขนาด document เหมือน unbounded array เดิม
+
+> 💡 Real World Example
+>
+> **Bosch** — ใช้ Bucket pattern เก็บข้อมูล telemetry จากอุปกรณ์ IoT โดยจัดกลุ่ม reading เป็น document ต่อช่วงเวลา (เช่นต่อชั่วโมง) แทนที่จะสร้าง document ใหม่ทุก reading ลดจำนวน document ลงหลายเท่าตัว
+>
+> **EA (Electronic Arts)** — ใช้แนวทางแบบ Computed pattern precompute สถิติผู้เล่นและ leaderboard ไว้ล่วงหน้า แทนที่จะ aggregate คะแนนจากทุก match ใหม่ทุกครั้งที่มีคนเปิดดู
+
 export const quizPatterns = [
   {
     q: 'pattern ใดเก็บเฉพาะ element ไม่กี่อันที่ถูกอ่านบ่อยไว้ใน document หลัก และเก็บรายการเต็มไว้ที่อื่น?',

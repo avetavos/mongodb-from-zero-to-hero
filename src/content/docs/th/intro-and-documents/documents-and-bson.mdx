@@ -94,6 +94,25 @@ export const bsonDiagram = `flowchart TD
 คุณคิดเป็น JSON แต่ MongoDB เก็บ BSON — รูปแบบไบนารีที่มีตัวเลขจริง, วันที่, และ ObjectId การรู้ว่า field หนึ่งเก็บ type อะไรจริง ๆ โดยเฉพาะสำหรับตัวเลขและวันที่ ป้องกัน bug เงียบ ๆ ทั้งหมวด
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| BSON (type เพิ่มเติมอย่าง Date, ObjectId, Decimal128, Binary) | เก็บค่าตรง type จริง query และ sort ได้ถูกต้องตาม type เช่นเรียงตามวันที่จริงหรือคำนวณเงินแม่นยำด้วย Decimal128 | ไม่ portable เท่า JSON ทันที ระบบภายนอกที่รับเฉพาะ JSON text ต้องแปลง type พวกนี้ก่อน ซึ่งอาจสูญเสียความแม่นยำถ้าทำไม่ถูกวิธี |
+| JSON ธรรมดา | portable ข้ามระบบได้ทันที อ่านง่าย เครื่องมือรองรับทุกที่ | มี type พื้นฐานน้อย (string, number, boolean, null, array, object) เท่านั้น ต้องเข้ารหัส Date และเลขแม่นยำสูงเป็น string เอง แล้วเสี่ยงตีความผิดฝั่ง |
+
+## Common Mistakes
+
+- **เก็บ ObjectId เป็น string ธรรมดาแทนที่จะเป็น BSON type ObjectId** — ทำให้เสีย type-aware querying และการเรียงลำดับตามเวลาที่เป็นผลพลอยได้ของ ObjectId ไปฟรี ๆ ถ้าเก็บเป็น string การเปรียบเทียบจะเป็นการเทียบตัวอักษร ไม่ใช่เทียบค่าจริง
+- **คิดว่า BSON กับ JSON เป็นสิ่งเดียวกัน** — คุณ*เขียน*และ*อ่าน*เป็น JSON ผ่าน shell/driver แต่สิ่งที่เก็บบนดิสก์คือ BSON การไม่รู้ความต่างนี้ทำให้งงว่าทำไม type ตัวเลขหรือวันที่ถึงหน้าตาเปลี่ยนไปตอนย้ายข้อมูลผ่านระบบที่ใช้ JSON text ล้วน
+- **ใช้ Double เก็บเงินเพราะมันคือ "ตัวเลขทศนิยม"** — Double แทนค่าเช่น `0.10` ไม่แม่นยำ ทำให้ยอดรวมคลาดเคลื่อนสะสม ต้องใช้ Decimal128 สำหรับจำนวนเงิน
+
+> 💡 Real World Example
+>
+> **ระบบ fintech / e-commerce ที่ต้องคำนวณยอดเงิน** — มักบังคับใช้ Decimal128 สำหรับทุก field ที่เป็นเงิน เพื่อไม่ให้เกิดข้อผิดพลาดสะสมจากการปัดเศษแบบ floating-point เวลารวมยอด invoice จำนวนมาก
+>
+> **eBay** — ใช้ ObjectId เป็นทั้ง primary key และตัวช่วยเรียงลำดับคร่าว ๆ ตามเวลาสร้างของ metadata document จำนวนมหาศาล โดยไม่ต้องเก็บ field `created_at` แยกต่างหากสำหรับ use case ที่ไม่ต้องการความแม่นยำระดับมิลลิวินาที
+
 export const quizBson = [
   {
     q: 'What does BSON stand for, and why does MongoDB use it?',

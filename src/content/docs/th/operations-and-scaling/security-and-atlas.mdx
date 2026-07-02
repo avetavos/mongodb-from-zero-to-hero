@@ -118,6 +118,25 @@ snippet เดียวกันนั้นแสดงประตู **networ
 Security ใน production คือสี่ชั้น: ล็อกเครือข่าย, กำหนดให้ต้องมี TLS, กำหนดให้ต้องมี authentication และมอบ roles แบบ least-privilege — บวกกับ encryption at rest บนดิสก์ อย่าวาง MongoDB ที่ไม่มี authentication ไว้บน address สาธารณะเด็ดขาด หากคุณไม่อยากประกอบทั้งหมดนี้ด้วยตัวเอง MongoDB Atlas ส่งมอบมันแบบปลอดภัยโดยค่าเริ่มต้น
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Self-hosted MongoDB | ควบคุม infrastructure และ config ได้เต็มที่ | ต้องรับผิดชอบ patch, TLS certificate rotation, backup และ security audit เองทั้งหมด |
+| MongoDB Atlas | Security เปิดโดยค่าเริ่มต้น, backup และ patch จัดการให้, ลดภาระ ops | ควบคุมรายละเอียดระดับ low-level ได้น้อยกว่า, ต้นทุนเป็นแบบ usage-based ต่างจาก self-hosted |
+
+## Common Mistakes
+
+- **ใช้ database user เดียวกันสำหรับทุก service หรือทุก environment** — ถ้า credential ของ user ตัวเดียวรั่ว ทุก service ที่ใช้ user เดียวกันถูกกระทบหมด ควรแยก user ต่อ service และต่อ environment (dev/staging/prod) เพื่อจำกัดผลกระทบเมื่อเกิดปัญหา
+- **เข้าใจว่า TLS ปกป้อง data ทั้งหมดแล้วเลยข้าม encryption at rest** — TLS ปกป้องเฉพาะข้อมูลระหว่างขนส่งเท่านั้น ถ้า disk หรือ backup snapshot ถูกขโมยไปโดยไม่ได้เข้ารหัส at rest ข้อมูลก็ยังอ่านได้ตรง ๆ
+- **ตั้ง IP access list ใน Atlas เป็นเปิดกว้างทุก address เพื่อความสะดวกตอน develop แล้วลืมจำกัดก่อนขึ้น production** — เปิดกว้างขนาดนั้นเท่ากับปิด network layer ทิ้งไปทั้งอัน authentication เพียงอย่างเดียวไม่ได้ทดแทน network restriction ที่หายไป
+
+> 💡 Real World Example
+>
+> **เหตุการณ์ MongoDB instance ที่เปิด public โดยไม่มี authentication** ที่เป็นข่าวหลายครั้งในอดีต (เช่นคลื่นการโจมตีเรียกค่าไถ่ปี 2017 ที่ instance นับหมื่นเครื่องถูกยึดข้อมูลไป) — เป็นตัวอย่างว่าการข้ามแค่ authentication layer เดียวสร้างความเสียหายได้มากแค่ไหน
+>
+> **ทีมสตาร์ทอัพที่ย้ายจาก self-hosted ไป Atlas** — ใช้ Database Access และ Network Access ของ Atlas แทนการจัดการ `mongod.conf` และ firewall rule เองทุกเครื่อง ลดเวลาที่ทีมเล็ก ๆ ต้องใช้ดูแล security ให้เหลือแค่การตั้งค่าในหน้า UI
+
 export const quizSecurity = [
   {
     q: 'กฎเหล็กด้าน security ใน production สำหรับ MongoDB คืออะไร?',

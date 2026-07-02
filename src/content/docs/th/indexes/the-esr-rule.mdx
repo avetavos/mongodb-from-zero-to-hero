@@ -71,7 +71,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-## การประยุกต์ ESR
+## การนำ ESR ไปใช้
 
 ESR บอกว่า: ฟิลด์ equality ก่อน, ฟิลด์ sort ที่สอง, ฟิลด์ range ท้ายสุด นั่นให้ index `{ city: 1, joined: 1, fines: 1 }`:
 
@@ -132,7 +132,7 @@ export const esrDiagram = `flowchart TB
 
 <Mermaid code={esrDiagram} title="Equality บีบลงเหลือบล็อกเดียว Sort ถูกตอบสนองด้วยลำดับของ index และ Range คือการเดินขั้นสุดท้าย" />
 
-equality บน `city` ตรึงการค้นหาไว้ที่ชิ้นต่อเนื่องชิ้นเดียวของ index ภายในชิ้นนั้นเอกสารถูกวางเรียงตามลำดับ `joined` อยู่แล้ว ดังนั้น MongoDB จึงคืนเอกสารแบบเรียงโดยไม่ต้องมีขั้นตอนเรียงแยกต่างหาก range บน `fines` มาท้ายสุดเพราะ range ทำให้ฟิลด์ของ index ที่ตามมาไม่เรียงลำดับ — ถ้า `fines` มาก่อน `joined` ปีที่เข้าร่วมภายในช่วงนั้นจะกระจัดกระจาย และ MongoDB จะต้องเรียงมันในหน่วยความจำหลังการอ่าน
+equality บน `city` ตรึงการค้นหาไว้ที่ชิ้นต่อเนื่องชิ้นเดียวของ index ภายในชิ้นนั้น document ถูกวางเรียงตามลำดับ `joined` อยู่แล้ว ดังนั้น MongoDB จึงคืน document แบบเรียงโดยไม่ต้องมีขั้นตอนเรียงแยกต่างหาก range บน `fines` มาท้ายสุดเพราะ range ทำให้ฟิลด์ของ index ที่ตามมาไม่เรียงลำดับ — ถ้า `fines` มาก่อน `joined` ปีที่เข้าร่วมภายในช่วงนั้นจะกระจัดกระจาย และ MongoDB จะต้องเรียงมันในหน่วยความจำหลังการอ่าน
 
 ## ทำไมลำดับอื่นจึงแพ้
 
@@ -151,6 +151,25 @@ equality บน `city` ตรึงการค้นหาไว้ที่ช
 <Callout title="Equality, Sort, Range">
 จัดลำดับฟิลด์ของ compound index ตามวิธีที่ query ใช้มัน: การจับคู่แบบเป๊ะก่อน, ฟิลด์ sort ถัดมา, การเปรียบเทียบแบบ range ท้ายสุด ลำดับเดียวนั้นให้ index หนึ่งอันบีบ เรียง และสแกนได้โดยไม่ต้องมีการเรียงแยกต่างหาก
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| เรียงฟิลด์ตาม ESR อย่างเคร่งครัด | index อันเดียวรองรับได้หลาย query shape ที่มี pattern filter/sort/range คล้ายกัน ลดจำนวน index ที่ต้องดูแล | ต้องมีวินัยตรวจสอบทุกครั้งที่ query pattern เปลี่ยน ไม่ใช่แค่สร้างแล้วจบ |
+| เรียงฟิลด์แบบเฉพาะกิจตาม query ที่เขียนอยู่ตรงหน้า | เขียนเร็ว ไม่ต้องคิดเยอะตอนเริ่มต้น | index ผูกติดกับ query shape เดียว เมื่อ query เปลี่ยนต้องสร้าง index ใหม่เพิ่มเรื่อยๆ |
+
+## Common Mistakes
+
+- **วางฟิลด์ range ไว้ก่อนฟิลด์ sort** — range ทำให้ลำดับของฟิลด์ index ที่ตามมาไม่ต่อเนื่องอีกต่อไป ผลคือ MongoDB ต้องเรียงผลลัพธ์ในหน่วยความจำแม้จะมี index ก็ตาม
+- **คิดว่า ESR เป็นกฎตายตัวที่ใช้ได้กับทุก query** — ESR เป็นจุดเริ่มต้นที่ดีสำหรับ pattern filter-sort-range ทั่วไปเท่านั้น ต้องยืนยันด้วย `explain()` เสมอ โดยเฉพาะ query ที่ซับซ้อนกว่านั้น
+- **ใส่ฟิลด์ equality หลายตัวปนกับฟิลด์ sort โดยไม่จัดกลุ่ม** — ฟิลด์ equality ทั้งหมดต้องอยู่ด้านหน้าสุดของ index ด้วยกัน ถ้าแทรกฟิลด์ sort หรือ range ไว้ระหว่างฟิลด์ equality จะทำลาย prefix ที่ query equality หลายฟิลด์ต้องการ
+
+> 💡 Real World Example
+>
+> **ระบบ order management ที่ query ตาม `{ status: equality, createdAt: sort, totalAmount: range }`** — ทีมออกแบบ index ตาม ESR เป็น `{ status: 1, createdAt: 1, totalAmount: 1 }` ทำให้ dashboard ที่กรองสถานะออเดอร์ เรียงตามวันที่ และกรองช่วงยอดเงิน ทำงานโดยไม่มีขั้นตอน sort ในหน่วยความจำเลย
+>
+> **ทีมที่ debug query ช้าลงหลัง requirement เปลี่ยน** — เดิม query กรองเฉพาะ equality กับ sort ทำงานเร็ว แต่หลังเพิ่มเงื่อนไข range ใหม่เข้าไปโดยไม่ทบทวนลำดับ index เดิม ทำให้ query กลับไปมีขั้นตอน sort ที่ชัดเจนใน `explain()` ต้องสร้าง index ใหม่ตาม ESR ให้ตรงกับ query pattern ที่เปลี่ยนไป
 
 export const quizEsr = [
   {
@@ -173,7 +192,7 @@ export const quizEsr = [
     options: [
       'query ถูกปฏิเสธ',
       'ขั้นตอน sort ในหน่วยความจำที่ชัดเจน เพราะลำดับของ index ไม่ตอบสนองการเรียงอีกต่อไป',
-      'covered query โดยไม่มีการดึงเอกสาร',
+      'covered query โดยไม่มีการดึง document',
       'plan เดียวกับลำดับ ESR ที่ถูกต้อง',
     ],
     answer: 1,

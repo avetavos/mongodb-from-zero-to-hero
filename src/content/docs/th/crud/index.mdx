@@ -91,6 +91,27 @@ export const crudFlowDiagram = `flowchart LR
 CRUD ก็เป็นเพียงสี่กริยาที่กระทำต่อถุงของ document ฝึกฝนรูปแบบเอกพจน์ของแต่ละกริยาให้ชำนาญก่อน รูปแบบพหูพจน์ก็คือการเรียกเดียวกันด้วย filter ที่บังเอิญตรงกับมากกว่าหนึ่ง document
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| method แบบเอกพจน์ (insertOne/updateOne/deleteOne) | ควบคุมแม่นยำ กระทบ document เดียว คาดเดาผลได้ง่าย | ต้องเรียกซ้ำหลายครั้งถ้าต้องจัดการหลาย document ทำให้เดินทางไปกลับ (round trip) บ่อย |
+| method แบบพหูพจน์ (insertMany/updateMany/deleteMany) | จัดการหลาย document ในการเรียกเดียว เร็วกว่ามาก | filter หรือ array ที่ผิดพลาดกระทบวงกว้างกว่าที่ตั้งใจ |
+| hard delete | คืนพื้นที่จัดเก็บทันที เรียบง่าย | ลบถาวร ไม่มี audit trail |
+| soft delete (update flag) | กู้คืนได้ มี audit trail | ต้องกรอง flag ในทุก query ต่อจากนี้ |
+
+## Common Mistakes
+
+- **เขียนโค้ด insert วนลูปทีละ document** — ควรใช้ `insertMany` ส่งเป็น batch เดียว ลดจำนวน round trip ไปเซิร์ฟเวอร์
+- **เรียก `updateMany`/`deleteMany` โดยไม่ตรวจ filter ให้ดีก่อน** — ลืมใส่ filter หรือใส่ filter กว้างเกินไป ทำให้กระทบ document ทั้ง collection โดยไม่ตั้งใจ
+- **ไม่ตรวจผลลัพธ์ (acknowledgement) หลังเขียน** — เห็นแค่ว่าไม่มี error โยนขึ้นมาแล้วสรุปว่าสำเร็จ ทั้งที่ `matchedCount`/`modifiedCount`/`deletedCount` อาจเป็น 0
+
+> 💡 Real World Example
+>
+> **ระบบสั่งซื้อ e-commerce** — เมื่อลูกค้ากด checkout ระบบ `insertOne` order ใหม่ ตามด้วย `updateMany` ลด stock ของสินค้าในตะกร้าทุกชิ้น แล้วสุดท้าย `deleteMany` ล้างตะกร้าที่ค้างอยู่เกิน 30 วัน ทั้งหมดคือ CRUD สี่กลุ่มทำงานร่วมกันใน pipeline เดียว
+>
+> **ระบบ session ของเว็บแอป** — ใช้ `findOne` ตรวจ session ทุก request, `updateOne` ต่ออายุ TTL, และ `deleteOne` เมื่อ logout
+
 export const quizIndex = [
   {
     q: 'method ใดอ่าน document แรกที่ตรงกับ filter กลับคืนมา?',

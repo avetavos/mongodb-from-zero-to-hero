@@ -171,6 +171,25 @@ document ที่ทำผิดกฎจะถูกปฏิเสธ อั�
 MongoDB ให้คุณเริ่มต้นโดยไม่มี schema และเพิ่มมันเมื่อรูปร่างลงตัว `$jsonSchema` validator พร้อม `required` และ `properties` เปลี่ยน "อะไรก็ได้" ให้เป็น "field เหล่านี้ ชนิดเหล่านี้" และ `validationLevel` บวก `validationAction` ให้คุณ rollout มันอย่างอ่อนโยน — warn ก่อน บังคับใช้เมื่อข้อมูลสะอาดแล้ว
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| ใช้ `$jsonSchema` validation | จับการเขียนที่ผิดรูปแบบได้ตั้งแต่ระดับ database เหมือนมี schema แบบเบา ๆ คอยกันตก | เพิ่มขั้นตอนตอนเขียน ต้องคอย sync กฎกับโค้ดฝั่งแอปพลิเคชันเสมอ |
+| ไม่ใช้ validator (พึ่ง schema flexibility เดิมของ MongoDB) | ยืดหยุ่นเต็มที่ เขียนอะไรก็ได้โดยไม่มีแรงเสียดทาน | ข้อมูลผิดรูปแบบหลุดเข้า production ได้ง่าย กว่าจะรู้ก็สายเกินไปแล้ว |
+
+## Common Mistakes
+
+- **คิดว่า `$jsonSchema` validator แทนที่การ validate ฝั่งแอปพลิเคชันได้ทั้งหมด** — validator เช็คแค่ shape พื้นฐานตอนเขียนเข้า database เท่านั้น ไม่รู้ business rule เชิงลึก เช่น "email นี้ต้องไม่ซ้ำกับ user อื่น" ยังต้องใช้ unique index หรือ logic แยกต่างหาก
+- **เพิ่ม validator เข้ม ๆ ทันทีบน collection ที่มีข้อมูลเก่าอยู่แล้ว** — ถ้าไม่ผ่าน `"moderate"` กับ `"warn"` ก่อน การเปิด `"strict"` กับ `"error"` ทันทีจะทำให้การเขียนต่อ document เก่าที่ไม่ตรง schema ล้มเหลวโดยไม่ทันตั้งตัว
+- **ลืมอัปเดต validator เมื่อ schema ของแอปพลิเคชันเปลี่ยน** — validator ไม่ sync กับโค้ดอัตโนมัติ ถ้าเพิ่ม field ใหม่ในแอปแต่ลืมแก้ `$jsonSchema` การเขียนอาจถูกปฏิเสธโดยไม่คาดคิด
+
+> 💡 Real World Example
+>
+> **Toyota Connected** — validate payload telemetry จากรถยนต์ที่เชื่อมต่อด้วย `$jsonSchema` ก่อนเก็บ เพื่อกัน sensor ที่ส่งข้อมูลผิดรูปแบบไม่ให้ปนเข้าไปใน collection หลัก
+>
+> **ระบบธนาคารและ fintech** — ใช้ `$jsonSchema` เป็นราวกันตกบน collection ธุรกรรม กำหนด required field อย่างจำนวนเงินและสกุลเงินให้ตรง type เสมอ ก่อนที่ข้อมูลผิดจะไหลต่อไปยัง downstream analytics
+
 export const quizValidation = [
   {
     q: 'operator ใดแสดง schema validation rule ของ MongoDB?',

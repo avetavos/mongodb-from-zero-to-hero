@@ -126,6 +126,26 @@ rs.status()
 replica set เก็บข้อมูลของคุณหลายสำเนาให้ซิงค์กันผ่าน oplog และเลือก primary ใหม่ด้วยคะแนนเสียงข้างมากเมื่อตัวเดิมล้มเหลว ใช้จำนวนผู้ลงคะแนนเป็นเลขคี่เพื่อให้การล้มเหลวครั้งเดียวไม่เคยทำให้เสมอกัน
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Replica set (เทียบ `mongod` เดี่ยว) | Automatic failover, ไม่มี downtime ยาวเมื่อ primary ล้มเหลว | ต้องรัน node เพิ่มอย่างน้อยสามตัว, write ยังคอขวดที่ primary เดียวเสมอ |
+| อ่านจาก secondaries | กระจายภาระ read ออกจาก primary | ข้อมูลที่ได้อาจ stale เพราะ replication lag |
+| อ่านจาก primary เท่านั้น | Consistency สูงสุด อ่าน write ล่าสุดเสมอ | ไม่ได้ประโยชน์จากการกระจายโหลด primary รับภาระเต็ม |
+
+## Common Mistakes
+
+- **คิดว่า write scale ได้ด้วยการเพิ่ม secondary** — secondary ช่วยกระจายเฉพาะ read เท่านั้น ทุก write ยังคงไปที่ primary ตัวเดียวเสมอ ถ้าต้องการ scale write ต้องไปที่ sharding ไม่ใช่การเพิ่ม secondary
+- **วางสมาชิกทุกตัวไว้ใน availability zone หรือ data center เดียวกัน** — replica set ป้องกัน node ล้มเหลว แต่ถ้าทุก node อยู่ที่เดียวกัน เมื่อ AZ ทั้งก้อนล่ม set ทั้งชุดก็ล่มไปด้วย ต้องกระจายสมาชิกข้าม AZ หรือ data center จริง ๆ
+- **ไม่ได้ตั้ง write concern ให้เหมาะกับความสำคัญของข้อมูล** — write concern เริ่มต้นยืนยันแค่ที่ primary เท่านั้น ถ้า primary ล้มเหลวก่อน replicate ไปที่อื่น write นั้นอาจหายไปพร้อม election; ข้อมูลสำคัญควรใช้ `{ w: "majority" }`
+
+> 💡 Real World Example
+>
+> **Uber** — ในช่วงที่ใช้ MongoDB สำหรับบาง service พึ่ง replica set กับ automatic failover เพื่อให้ trip data ยังเขียนต่อได้แม้ node ใดตัวหนึ่งล้มเหลวกลางดึกโดยไม่ต้องปลุกใครมาแก้
+>
+> **MongoDB Atlas** — ทุก cluster เป็น replica set อย่างน้อยสาม node กระจายข้าม availability zone โดยอัตโนมัติ และมีปุ่มทดสอบ failover ให้ลองกดดูผลจริงได้โดยไม่ต้องรอเหตุการณ์จริงเกิดขึ้นก่อน
+
 export const quizReplica = [
   {
     q: 'secondaries เก็บข้อมูลของพวกมันให้ซิงค์กับ primary อย่างไร?',
@@ -162,7 +182,7 @@ export const quizReplica = [
     options: [
       'secondaries เก็บสำเนาข้อมูลแบบบีบอัด',
       'มี replication lag ระหว่าง write บน primary กับการเล่นซ้ำของมันบน secondaries',
-      'secondaries ถือเอกสารเพียงครึ่งเดียว',
+      'secondaries ถือ document เพียงครึ่งเดียว',
       'secondaries ปฏิเสธการอ่านทั้งหมด',
     ],
     answer: 1,

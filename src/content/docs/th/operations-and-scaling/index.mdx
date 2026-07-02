@@ -57,6 +57,28 @@ export const productionOverview = `flowchart TB
 MongoDB ใน production คือสี่ปัญหาที่มีสี่คำตอบที่มีชื่อเรียก: replica sets สำหรับ availability, sharding สำหรับ scale, profiling และ indexes สำหรับ performance, และ auth บวก TLS บวก network rules สำหรับ security ส่วนที่เหลือของโมดูลนี้จะค่อย ๆ พูดถึงทีละอย่าง
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `mongod` เดี่ยว | ตั้งค่าง่ายที่สุด ต้นทุนต่ำสุด | ไม่มี high availability เครื่องเดียวคือ single point of failure |
+| Replica set | Automatic failover, กระจาย read ไปยัง secondaries ได้ | Write ยังไปที่ primary เดียวเสมอ, ต้องดูแล infrastructure เพิ่มขึ้น |
+| Sharded cluster | Scale ทั้ง write และ storage ในแนวนอน | Operational complexity สูงขึ้นมาก, shard key ที่เลือกผิดแก้ทีหลังยาก |
+| Self-managed | ควบคุม infrastructure ได้เต็มที่ | ต้องรับผิดชอบ patch, backup และ security เองทั้งหมด |
+| MongoDB Atlas | ลดภาระงาน ops, ปลอดภัยโดยค่าเริ่มต้น | ควบคุมรายละเอียดระดับ low-level ได้น้อยกว่า, ต้นทุนคิดตาม usage |
+
+## Common Mistakes
+
+- **คิดว่าต้อง shard ตั้งแต่วันแรกเพราะ "ข้อมูลจะเยอะในอนาคต"** — replica set เดี่ยวรองรับ traffic ได้นานกว่าที่คนส่วนใหญ่คิด และ sharding เพิ่ม operational complexity ที่ไม่คุ้มถ้ายังไม่มีหลักฐานว่าเครื่องเดียวตามไม่ทันจริง
+- **มองว่า security เป็นงานที่ทำครั้งเดียวตอน deploy แล้วจบ** — patch, credential rotation และการทบทวน access ต้องทำต่อเนื่อง ไม่ใช่ checklist ที่ติ๊กแล้วลืม
+- **ไม่เคยทดสอบ failover หรือแผน disaster recovery ก่อนขึ้น production จริง** — HA ที่ไม่เคยถูกซ้อมคือ HA ที่ไม่มีใครรู้ว่าใช้งานได้จริงหรือเปล่าตอนจำเป็น
+
+> 💡 Real World Example
+>
+> **Baidu** — ใช้ MongoDB sharded cluster เก็บข้อมูลระดับหลายพันล้าน document กระจาย write และ storage ข้ามหลาย shard แทนที่จะพยายาม scale เครื่องเดียวขึ้นเรื่อย ๆ
+>
+> **ทีมที่ใช้ MongoDB Atlas** — พึ่ง auto-scaling ให้ cluster ขยาย storage และ compute ตาม load จริงโดยอัตโนมัติ แทนที่จะต้อง provision เกินความจำเป็นไว้ล่วงหน้าเหมือน self-hosted
+
 export const quizOverview = [
   {
     q: 'ฟีเจอร์ใดของ MongoDB ที่ให้ high availability — รอดจากการล้มเหลวของเซิร์ฟเวอร์เดียว?',

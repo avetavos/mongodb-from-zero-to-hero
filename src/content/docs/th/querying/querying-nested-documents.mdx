@@ -221,6 +221,26 @@ dot path ต่อกันได้ลึกเท่าที่ข้อม�
 หากต้องการจับคู่ field ที่ฝังลึกเดียว ให้ใช้ dot path ที่ใส่อัญประกาศ — บางส่วนและไม่ขึ้นกับลำดับ หากต้องการจับคู่ embedded document ทั้งก้อน ให้ส่ง document สมบูรณ์ให้ field — แต่จงรู้ว่ามันคือการเปรียบเทียบแบบตรงเป๊ะมีลำดับที่พังทันทีที่ key ที่เก็บไว้ถูกจัดเรียงใหม่หรือมี field เพิ่มเข้ามา
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| dot-notation query บน nested field ที่ตื้นและ schema นิ่ง | อ่านง่าย ใช้ index ได้ดี — compound index บน dot path ทำงานเหมือน field ปกติ | ต้องรู้ path ที่แน่นอนล่วงหน้า เปลี่ยน schema แล้วต้องแก้ query ทุกจุดที่อ้างถึง |
+| document ที่ซ้อนลึกหรือ shape ไม่แน่นอนในแต่ละ document | ยืดหยุ่นสำหรับข้อมูลที่มีรูปร่างต่างกันในแต่ละ document | สร้าง index ที่ครอบคลุมยาก selectivity แย่ลง และ query ต้องรับมือกรณี field หายไปหรือ type ต่างกัน |
+| จับคู่ sub-document ทั้งก้อนแบบตรงเป๊ะ | ตรวจสอบ "เหมือนกันทั้งหมด" ได้ในคำสั่งเดียว | ไวต่อลำดับ field และ field ส่วนเกิน ใช้งานได้แคบกว่า dot notation มาก |
+
+## Common Mistakes
+
+- **คาดหวังว่า index บน dot path ที่ซ้อนลึกจะมีประสิทธิภาพเท่า index บน field ระดับบนสุดเสมอ** — ยิ่งซ้อนลึกและ shape ของแต่ละ document ไม่สม่ำเสมอ ยิ่งทำให้ selectivity แย่ลงและ index ต้องครอบคลุมกรณีที่กว้างเกินจำเป็น
+- **ใช้ dot notation กับ field ที่บาง document เก็บเป็น object ซ้อน แต่บางอันเก็บเป็นค่าอื่นหรือไม่มี field เลย** — query ไม่ error แต่ผลลัพธ์ขาดหายไปเงียบ ๆ เพราะ document ที่รูปร่างต่างกันจะไม่ถูกจับคู่ ทำให้ debug ยาก
+- **ปล่อยให้ schema ซ้อนลึกขึ้นเรื่อย ๆ (4-5 ชั้น) โดยไม่ทบทวนว่าควร flatten หรือแยก collection** — ยิ่งซ้อนลึก dot path ยิ่งยาวและเปราะบางต่อการเปลี่ยน schema ทุกครั้งที่มีการปรับโครงสร้างข้อมูล
+
+> 💡 Real World Example
+>
+> **ระบบ user profile ของแอป e-commerce** — สร้าง index บน `address.zipcode` และ `address.country` เพราะ schema ของ address นิ่งและตื้น ทำให้ query หาผู้ใช้ตามพื้นที่จัดส่งเร็วและใช้ index ได้เต็มที่
+>
+> **CMS ที่เก็บ content block เป็น nested JSON ที่มีรูปร่างต่างกันในแต่ละหน้า** — เพจแต่ละประเภท (บทความ, landing page, product page) เก็บ field ซ้อนลึกไม่เท่ากัน ทีม backend มักหลีกเลี่ยงการ query ลึกเข้าไปใน block เหล่านี้โดยตรง แล้วใช้ field สรุปไว้ระดับบนสุดแทนเพื่อให้ query และ index ง่ายขึ้น
+
 export const quizNested = [
   {
     q: 'คุณจะจับคู่ field city ภายใน object address ที่ฝังอยู่ได้อย่างไร?',

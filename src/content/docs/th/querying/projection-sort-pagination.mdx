@@ -293,6 +293,27 @@ db.members.find({ name: { $gt: "Linus" } })
 เซิร์ฟเวอร์ใช้การอ่านในลำดับเดิมเสมอ: เลือกสิ่งที่ตรง จัดลำดับ ทิ้งส่วนหน้าที่ถูก skip แล้วจำกัดจำนวน การซึมซับลำดับนั้นบอกคุณว่าทำไมหน้าจึงต้องมี sort และทำไม skip ที่ลึกจึงต้องจ่ายค่าทุก document ที่มันเดินผ่าน — นั่นคือเมล็ดพันธุ์ของ range-based pagination
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| inclusion projection (`{ name: 1, joined: 1 }`) | ควบคุมชัดเจนว่า field ไหนออกไป ปลอดภัยสำหรับ response สาธารณะ | ต้องแก้ query ทุกครั้งที่ต้องการ field ใหม่ |
+| exclusion projection (`{ internalNotes: 0 }`) | สะดวก เขียนสั้น ไม่ต้อง list field ที่ต้องการทั้งหมด | field ใหม่ที่เพิ่มเข้า schema ทีหลังจะถูกส่งออกไปโดยอัตโนมัติโดยไม่ตั้งใจ |
+| skip/limit pagination | เขียนง่าย เหมาะกับหน้าตื้น ๆ และ UI แบบเลขหน้า | skip ต้องเดินผ่าน document ที่ถูกข้ามทุกครั้ง ช้าลงเรื่อย ๆ เมื่อหน้าลึกขึ้น |
+| range/cursor-based pagination | อ่านเฉพาะ document ที่ต้องการเสมอ ไม่ว่าจะลึกแค่ไหน scale ได้ดีกับข้อมูลใหญ่ | กระโดดไปหน้า N ตรง ๆ ไม่ได้ ต้องมี field ที่ sort ได้และมี index รองรับ |
+
+## Common Mistakes
+
+- **ใช้ exclusion projection สำหรับ response สาธารณะแล้วลืมว่ามัน "รั่ว" field ใหม่โดยอัตโนมัติ** — เมื่อทีม backend เพิ่ม field ภายใน (เช่น cost หรือ flag ภายใน) เข้า schema ทีหลัง exclusion projection ที่เขียนไว้เดิมจะส่ง field นั้นออกไปทันทีโดยไม่มีใครตั้งใจ สำหรับ API สาธารณะควรใช้ inclusion projection เพื่อควบคุมชัดเจนกว่า
+- **sort บน field ที่ไม่มี index กับ collection ขนาดใหญ่** — เซิร์ฟเวอร์ต้องทำ in-memory sort ซึ่งมีเพดานหน่วยความจำจำกัด ถ้าข้อมูลที่ต้อง sort เกินเพดานนั้น query จะ error ตรง ๆ ต้องมี index รองรับ sort key เมื่อ collection โตขึ้น
+- **คิดว่า `limit()` เพียงอย่างเดียวทำให้ query เร็วเสมอ** — ถ้าไม่มี filter หรือ index ที่ดี เซิร์ฟเวอร์ยังต้องสแกนและ sort document จำนวนมากก่อนจะตัดเหลือแค่จำนวนที่ `limit` ขอ `limit` ไม่ได้ลดงานสแกน มันแค่ตัดสิ่งที่ส่งกลับมาให้คุณเท่านั้น
+
+> 💡 Real World Example
+>
+> **Infinite scroll ของ social feed** — ใช้ cursor-based pagination ด้วย field เช่น timestamp หรือ `_id` แทน skip/limit เพราะผู้ใช้เลื่อนลึกได้เรื่อย ๆ โดยไม่ยอมให้ query ช้าลงตามความลึกของหน้า
+>
+> **REST API ของ SaaS ที่ expose ข้อมูลลูกค้า** — ใช้ inclusion projection เสมอสำหรับ endpoint สาธารณะ เพื่อไม่ให้ field ภายใน เช่น cost หรือ internal flag รั่วไหลออกไปเมื่อทีม backend เพิ่ม field ใหม่ในอนาคต
+
 export const quizPagination = [
   {
     q: 'ใน projection { name: 1, _id: 0 } ส่งกลับอะไร?',

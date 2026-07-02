@@ -15,7 +15,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## เวลาหายไปไหน
 
-คิวรีที่ช้าส่วนใหญ่ลงเอยที่หนึ่งในสองสาเหตุ: คิวรีอ่านเอกสารมากกว่าที่มันคืนกลับมาก หรือข้อมูลที่มันต้องการไม่ได้อยู่ในหน่วยความจำและต้องดึงมาจากดิสก์ ภาพแรกชัดเจนที่สุด คิวรีเดียวกัน เมื่อมีและไม่มี index ที่รองรับ ทำงานในปริมาณที่แตกต่างกันอย่างมหาศาล:
+คิวรีที่ช้าส่วนใหญ่ลงเอยที่หนึ่งในสองสาเหตุ: คิวรีอ่าน document มากกว่าที่มันคืนกลับมาก หรือข้อมูลที่มันต้องการไม่ได้อยู่ในหน่วยความจำและต้องดึงมาจากดิสก์ ภาพแรกชัดเจนที่สุด คิวรีเดียวกัน เมื่อมีและไม่มี index ที่รองรับ ทำงานในปริมาณที่แตกต่างกันอย่างมหาศาล:
 
 export const latencyFlow = `flowchart TB
   subgraph Slow["No index — COLLSCAN"]
@@ -35,7 +35,7 @@ export const latencyFlow = `flowchart TB
 
 ## การเปิด profiler
 
-profiler เขียนเอกสารหนึ่งอันต่อ operation ที่ช้าหนึ่งครั้งลงใน collection พิเศษ `system.profile` ในแต่ละฐานข้อมูล คุณตั้งค่ามันต่อฐานข้อมูล Level `1` บันทึกเฉพาะ operations ที่ช้ากว่า threshold ที่คุณเลือกเป็นมิลลิวินาที; level `2` บันทึกทุกอย่าง (มีประโยชน์ตอน development แต่ส่งเสียงรบกวนมากเกินไปใน production); level `0` ปิดมัน
+profiler เขียน document หนึ่งอันต่อ operation ที่ช้าหนึ่งครั้งลงใน collection พิเศษ `system.profile` ในแต่ละฐานข้อมูล คุณตั้งค่ามันต่อฐานข้อมูล Level `1` บันทึกเฉพาะ operations ที่ช้ากว่า threshold ที่คุณเลือกเป็นมิลลิวินาที; level `2` บันทึกทุกอย่าง (มีประโยชน์ตอน development แต่ส่งเสียงรบกวนมากเกินไปใน production); level `0` ปิดมัน
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -80,7 +80,7 @@ profiler เขียนเอกสารหนึ่งอันต่อ oper
 
 ## การอ่าน system.profile
 
-เมื่อ profiler เปิดอยู่ คุณคิวรี `system.profile` เหมือน collection อื่น ๆ เรียงตามเวลาจากมากไปน้อยและดู operations ล่าสุดที่ช้าที่สุด ฟิลด์ที่ต้องจับตาคือ `millis` (ใช้เวลานานเท่าไร), `docsExamined` เทียบกับ `nreturned` (อ่านเอกสารกี่อันเทียบกับที่คืน) และ `planSummary` (ว่ามันใช้ index หรือ collection scan):
+เมื่อ profiler เปิดอยู่ คุณคิวรี `system.profile` เหมือน collection อื่น ๆ เรียงตามเวลาจากมากไปน้อยและดู operations ล่าสุดที่ช้าที่สุด ฟิลด์ที่ต้องจับตาคือ `millis` (ใช้เวลานานเท่าไร), `docsExamined` เทียบกับ `nreturned` (อ่าน document กี่อันเทียบกับที่คืน) และ `planSummary` (ว่ามันใช้ index หรือ collection scan):
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -141,7 +141,7 @@ profiler เขียนเอกสารหนึ่งอันต่อ oper
   </TabItem>
 </Tabs>
 
-profile entry เดียวเล่าเรื่องราวทั้งหมดได้ในพริบตา อันนี้อ่านเอกสารหนึ่งล้านอันเพื่อคืนสิบสองอัน โดยมี plan summary เป็น `COLLSCAN` — กรณีตัวอย่างของการขาด index:
+profile entry เดียวเล่าเรื่องราวทั้งหมดได้ในพริบตา อันนี้อ่าน document หนึ่งล้านอันเพื่อคืนสิบสองอัน โดยมี plan summary เป็น `COLLSCAN` — กรณีตัวอย่างของการขาด index:
 
 ```json
 {
@@ -165,8 +165,8 @@ db.members.find({ joined: 2023 }).explain("executionStats")
 คิวรีที่ช้าส่วนใหญ่หายได้ด้วยหนึ่งในไม่กี่ท่าต่อไปนี้:
 
 - **เพิ่ม index** บนฟิลด์ที่คิวรีใช้ filter หรือ sort เพื่อให้เซิร์ฟเวอร์ seek แทนที่จะ scan นี่คือการแก้ไขที่ส่งผลกระทบสูงสุดเพียงอย่างเดียวและเป็นเหตุผลที่ profiler มีอยู่
-- **Project ให้น้อยลง** ขอเฉพาะฟิลด์ที่คุณต้องการแทนที่จะเอาทั้งเอกสาร ซึ่งลด bytes ที่ต้องเคลื่อนย้ายและสามารถทำให้คิวรีถูกตอบจาก index ได้ทั้งหมด
-- **หลีกเลี่ยงผลลัพธ์ที่ไม่มีขอบเขต** ใช้ `limit` กับคิวรีที่อาจ match เอกสารจำนวนมากเสมอ; การกวาดทั้ง collection โดยไม่ตั้งใจนั้นช้าไม่ว่า index จะดีแค่ไหน
+- **Project ให้น้อยลง** ขอเฉพาะฟิลด์ที่คุณต้องการแทนที่จะเอาทั้ง document ซึ่งลด bytes ที่ต้องเคลื่อนย้ายและสามารถทำให้คิวรีถูกตอบจาก index ได้ทั้งหมด
+- **หลีกเลี่ยงผลลัพธ์ที่ไม่มีขอบเขต** ใช้ `limit` กับคิวรีที่อาจ match document จำนวนมากเสมอ; การกวาดทั้ง collection โดยไม่ตั้งใจนั้นช้าไม่ว่า index จะดีแค่ไหน
 - **ปรับขนาด connection ให้พอเหมาะ** driver ดูแล **connection pool** และนำ connection มาใช้ซ้ำแทนที่จะเปิดอันใหม่ต่อ request การใช้ client ที่แชร์กันซ้ำ — ไม่ใช่สร้างอันใหม่ต่อการเรียกแต่ละครั้ง — ทำให้ pool นั้นแข็งแรงและหลีกเลี่ยงการใช้ขีดจำกัด connection ของเซิร์ฟเวอร์จนหมด
 
 **ใน Compass / Atlas:** Compass มีมุมมอง *Performance Insights* และ *Explain Plan* ที่รัน `explain` ให้คุณและทำเครื่องหมาย collection scan ให้เห็นด้วยตา Atlas ไปไกลกว่าด้วย *Performance Advisor* ที่เฝ้าดู traffic จริงของคุณและแนะนำ index ที่ควรสร้าง และแท็บ *Profiler* ที่นำ operations ที่ช้าที่สุดออกมาแสดงโดยที่คุณไม่ต้องไปแตะ `system.profile` ด้วยมือ
@@ -181,6 +181,25 @@ db.members.find({ joined: 2023 }).explain("executionStats")
 <Callout title="วัดก่อน แล้วจึงแก้">
 เปิด profiler เพื่อหาคิวรีที่ช้าจริง ๆ อ่าน system.profile หาอัตราส่วน docsExamined ต่อ nreturned ที่สูง ยืนยันด้วย explain แล้วแก้มัน — โดยปกติด้วยการเพิ่ม index ที่ถูกต้อง project ให้น้อยลง และจำกัดขอบเขตผลลัพธ์ อย่าเดาเรื่อง performance
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Profiler level `2` (บันทึกทุก operation) | จับคิวรีช้าได้ทุกตัว รวมถึงที่เกิดเป็นครั้งคราว | overhead สูง และ `system.profile` ที่เป็น capped collection เต็มเร็ว ทำให้ entry เก่าหลุดก่อนได้ตรวจสอบ |
+| Profiler level `1` พร้อม `slowms` threshold | overhead ต่ำ เหมาะกับการเปิดทิ้งไว้ต่อเนื่องใน production | คิวรีที่ช้าแบบ intermittent หรือช้ากว่า threshold แค่นิดเดียวอาจหลุดจากการสังเกต |
+
+## Common Mistakes
+
+- **ตั้ง `slowms` ต่ำเกินไปใน production แล้วลืมผลที่ตามมา** — threshold ที่ต่ำเกินไปทำให้เกือบทุกคิวรีถูกบันทึก ได้ผลเหมือนเปิด level `2` โดยไม่ตั้งใจ overhead สูงขึ้นและ capped collection หมุนเวียนเร็วจนข้อมูลที่ต้องการหายไปก่อน
+- **เชื่อว่า index ที่มีอยู่ต้องถูก planner เลือกใช้เสมอ** — planner อาจยังเลือก `COLLSCAN` แม้มี index ถ้า selectivity ต่ำหรือ index ไม่ตรงกับ query pattern เช่นลำดับฟิลด์ผิดสำหรับ compound index ต้องเช็ค `explain` จริง ไม่ใช่สันนิษฐานจากการมี index อยู่
+- **มองแค่ latency เฉลี่ยแทนที่จะดู tail latency (p95/p99)** — ค่าเฉลี่ยกลบคิวรีที่ช้าเป็นครั้งคราวได้ง่าย ผู้ใช้ที่เจอคิวรีช้าที่สุดคือคนที่รู้สึกถึงปัญหาจริง ไม่ใช่ค่าเฉลี่ย
+
+> 💡 Real World Example
+>
+> **Performance Advisor ใน MongoDB Atlas** — สแกน traffic จริงต่อเนื่องและแนะนำ index ที่ควรสร้างโดยอัตโนมัติ แทนที่ทีมต้องมานั่งไล่อ่าน `system.profile` ด้วยมือทุกวัน
+>
+> **ทีม e-commerce ช่วง Black Friday** — เปิด profiler level `1` พร้อม `slowms` ต่ำเป็นการชั่วคราวช่วง traffic พีค เพื่อจับคิวรีช้าที่โผล่มาเฉพาะตอนโหลดสูง แล้วปรับกลับเป็น threshold ปกติหลังผ่านช่วงพีคเพื่อคุม overhead
 
 export const quizPerf = [
   {
@@ -197,7 +216,7 @@ export const quizPerf = [
     q: 'ใน profile entry, docsExamined ใหญ่กว่า nreturned มาก สิ่งนี้บ่งบอกอะไร?',
     options: [
       'คิวรีกำลังใช้ index ที่เหมาะสมที่สุด',
-      'คิวรีกำลังอ่านเอกสารมากกว่าที่มันคืนมาก — น่าจะขาด index',
+      'คิวรีกำลังอ่าน document มากกว่าที่มันคืนมาก — น่าจะขาด index',
       'profiler ถูกตั้งค่าผิด',
       'ชุดผลลัพธ์เล็กเกินไปจนไม่สำคัญ',
     ],

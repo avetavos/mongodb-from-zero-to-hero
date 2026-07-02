@@ -90,6 +90,27 @@ export const embedRefDiagram = `flowchart TB
 สัญญาณที่ชัดเจนที่สุดสำหรับ embedding คือ co-access: ถ้าแอปพลิเคชันของคุณเกือบทุกครั้งอ่านข้อมูลสองชิ้นในจังหวะเดียวกัน และลูกมีขอบเขตจำกัดและเป็นของ parent เดียวเท่านั้น ให้ embed มัน ถ้าข้อมูลถูกแชร์ ใหญ่ หรือโตได้ไม่จำกัด ให้ reference แทน
 </Callout>
 
+## Trade-offs
+
+| สถานการณ์ | Benefit ของตัวเลือกที่แนะนำ | Cost |
+|---------|---------|------|
+| 1:1 (เช่น user + profile) — embed | อ่านครั้งเดียว เขียนแบบ atomic | document ใหญ่ขึ้นเล็กน้อย แยกออกทีหลังยากถ้าส่วนนั้นต้อง scale เดี่ยว ๆ |
+| 1:many bounded (เช่น post + tags) — embed | เร็ว เรียบง่าย ไม่ต้อง join | ต้องมั่นใจว่าขอบเขตจำกัดจริง ไม่งั้นย้อนกลับมาแก้ยากภายหลัง |
+| 1:many unbounded (เช่น user + posts) — reference จากฝั่งลูก | parent เล็กตลอดเวลา ลูก query และแบ่งหน้าได้อิสระ | ต้อง query ที่สองเพื่อดึงลูกทั้งหมด ไม่มี atomic write ข้าม parent-child |
+| many:many (เช่น student ↔ course) — reference array ทั้งสองฝั่ง | อ่านเร็วทั้งสองทิศทางโดยไม่ต้อง `$lookup` | เขียนสองเท่า ต้องคอย sync ทั้งสองฝั่งให้ตรงกันเสมอ |
+
+## Common Mistakes
+
+- **คิดว่า embedding เร็วกว่า referencing เสมอ** — ถ้า array ที่ embed โตไม่มีขอบเขต การอ่านและเขียนจะช้าลงเรื่อย ๆ เพราะเซิร์ฟเวอร์ต้องจัดการ document ทั้งก้อนทุกครั้ง สุดท้ายช้ากว่าการ reference เสียอีก
+- **คิดว่า `$lookup` ทำงานเหมือน JOIN ใน SQL ทุกประการ** — `$lookup` ไม่มี query optimizer แบบ relational database คอยเลือก join strategy ให้ ใช้มันบน hot path บ่อย ๆ แล้ว performance จะแย่กว่าที่คาดไว้
+- **ยึดกฎ embed-or-reference เดียวกับทุกความสัมพันธ์ใน schema** — การตัดสินใจต้องทำทีละความสัมพันธ์ตาม access pattern และการเติบโตของมันเอง ไม่ใช่นโยบายเดียวที่ใช้กับทุก field
+
+> 💡 Real World Example
+>
+> **eBay** — จัดการ product listing จำนวนมหาศาลด้วยการ reference แทนที่จะ embed ทุกอย่างไว้ที่เดียว เพื่อให้ seller อัปเดตราคาหรือสต๊อกได้โดยไม่ต้องแก้ document อื่นที่ point มาที่สินค้าเดียวกัน
+>
+> **Forbes** — embed field ของบทความ เช่น tag และ metadata สั้น ๆ ไว้ใน document เดียวกัน เพื่อให้หน้าแสดงบทความโหลดได้ในการอ่านครั้งเดียว โดยไม่ต้อง join ไปหลาย collection
+
 export const quizEmbedRef = [
   {
     q: 'ข้อได้เปรียบหลักของการ embed ข้อมูลที่เกี่ยวข้องไว้ใน document คืออะไร?',

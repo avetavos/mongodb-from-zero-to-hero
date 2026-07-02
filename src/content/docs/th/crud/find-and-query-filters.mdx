@@ -245,6 +245,26 @@ filter ที่ระบุ field และค่าหมายความว
 query filter คือ document ที่อธิบาย document ที่คุณต้องการ ระบุ field หลายตัว แล้ว MongoDB จะกำหนดให้ทั้งหมดต้องตรงกัน — implicit AND นั้นคือม้างานเบื้องหลังการอ่านในชีวิตประจำวันส่วนใหญ่
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| equality filter ธรรมดา (`field: value`) | เขียนง่าย อ่านง่าย ใช้ index ตรง ๆ ได้อย่างมีประสิทธิภาพ | ตอบคำถามได้จำกัด แค่ "เท่ากับ" เท่านั้น |
+| filter หลาย field แบบ implicit AND | คมชัดขึ้น กรองได้แม่นกว่าโดยไม่ต้องเขียน operator เพิ่ม | field ยิ่งเยอะ ยิ่งต้องมี compound index ที่ตรงกับลำดับ field ไม่งั้น query ช้า |
+| filter ที่ใช้ operator ซับซ้อน (`$gt`, `$in`, `$regex` ฯลฯ) | ยืดหยุ่นสูง ตอบคำถามเชิงช่วงหรือ pattern ได้ | ออกแบบ index ให้ครอบคลุมยากขึ้น บาง operator (เช่น `$regex` ที่ไม่ขึ้นต้นด้วย anchor) ใช้ index ไม่ได้เต็มที่หรือใช้ไม่ได้เลย |
+
+## Common Mistakes
+
+- **คิดว่า `find` คืนผลลัพธ์ทันทีที่เรียก** — จริง ๆ แล้วมันคืน cursor แบบ lazy เท่านั้น ถ้าลืม `toArray()`/วนลูป ก็จะไม่เห็น error แต่ก็ไม่เห็นข้อมูลเช่นกัน
+- **ใช้ `find({})` แล้วดึงทั้ง collection มา filter ในแอปฝั่ง client** — ควรส่ง filter ที่ต้องการไปให้ MongoDB กรองให้ตั้งแต่ query เพื่อลดข้อมูลที่ต้องส่งผ่านสาย และให้ index ช่วยงานได้
+- **สับสนระหว่าง `find` กับ `findOne` เมื่อคาดหวัง document เดียว** — เผลอเรียก `find` แล้วอ่านผลลัพธ์ตัวแรกจาก array ทั้งที่ `findOne` ตรงจุดประสงค์กว่าและคืนค่า null ตรงไปตรงมาเมื่อไม่พบ
+
+> 💡 Real World Example
+>
+> **หน้าค้นหาสินค้าของ e-commerce** — ผู้ใช้กรองด้วยหลาย field พร้อมกัน (หมวดหมู่ + ช่วงราคา + สถานะมีสต็อก) ระบบประกอบ filter document ที่มีหลาย field และหลาย operator เข้าด้วยกัน แล้วพึ่ง compound index ให้ query ยังเร็วแม้ collection มีสินค้าเป็นล้านรายการ
+>
+> **Dashboard แอดมิน** — ใช้ `findOne({ email })` ตรวจสอบผู้ใช้ตอน login และ `find({ status: "active" })` ดึงรายชื่อผู้ใช้ที่ยัง active สำหรับตารางรายงาน
+
 export const quizFind = [
   {
     q: 'find คืนอะไร เมื่อเทียบกับ findOne?',

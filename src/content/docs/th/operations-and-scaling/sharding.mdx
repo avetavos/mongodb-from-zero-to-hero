@@ -31,7 +31,7 @@ export const shardTopology = `flowchart TB
 
 ## shard key, chunks และ balancer
 
-ทั้งระบบขึ้นอยู่กับการตัดสินใจหนึ่งอย่าง: **shard key** ซึ่งเป็นฟิลด์ (หรือชุดของฟิลด์) ที่ MongoDB ใช้ตัดสินว่าเอกสารหนึ่งอยู่บน shard ไหน MongoDB แบ่งช่วงของ key ออกเป็นบล็อกที่ต่อเนื่องกันเรียกว่า **chunks** และกำหนดแต่ละ chunk ให้กับ shard เมื่อข้อมูลโตขึ้น chunk ที่ใหญ่เกินไปจะถูกแบ่งเป็นสอง และกระบวนการเบื้องหลังที่เรียกว่า **balancer** จะย้าย chunks ระหว่าง shards อย่างเงียบ ๆ เพื่อให้พวกมันเท่ากันโดยประมาณ
+ทั้งระบบขึ้นอยู่กับการตัดสินใจหนึ่งอย่าง: **shard key** ซึ่งเป็นฟิลด์ (หรือชุดของฟิลด์) ที่ MongoDB ใช้ตัดสินว่า document หนึ่งอยู่บน shard ไหน MongoDB แบ่งช่วงของ key ออกเป็นบล็อกที่ต่อเนื่องกันเรียกว่า **chunks** และกำหนดแต่ละ chunk ให้กับ shard เมื่อข้อมูลโตขึ้น chunk ที่ใหญ่เกินไปจะถูกแบ่งเป็นสอง และทำงานเบื้องหลังที่เรียกว่า **balancer** จะย้าย chunks ระหว่าง shards อย่างเงียบ ๆ เพื่อให้พวกมันเท่ากันโดยประมาณ
 
 export const chunkFlow = `flowchart LR
   K["Shard key value"] --> C["Which chunk owns this value"]
@@ -39,7 +39,7 @@ export const chunkFlow = `flowchart LR
   S --> Done["Document lands on that shard"]
   Bal["Balancer"] -. "migrates chunks to keep shards even" .- S`
 
-<Mermaid code={chunkFlow} title="shard key ของเอกสารตัดสิน chunk ของมัน และ chunk ตัดสิน shard ของมัน; balancer ปรับจำนวน chunk ให้เท่ากันเมื่อเวลาผ่านไป" />
+<Mermaid code={chunkFlow} title="shard key ของ document ตัดสิน chunk ของมัน และ chunk ตัดสิน shard ของมัน; balancer ปรับจำนวน chunk ให้เท่ากันเมื่อเวลาผ่านไป" />
 
 มีสองวิธีในการแมป key ไปยัง chunks **Ranged** sharding เก็บค่า key ที่อยู่ใกล้กันไว้ด้วยกัน — มีประโยชน์เมื่อคุณคิวรีตามช่วง แต่เสี่ยงถ้า write กระจุกตัวที่ปลายด้านหนึ่งของช่วง เพราะพวกมันจะกองทับกันลงบน shard เดียว **Hashed** sharding ส่ง key ผ่าน hash ก่อน กระจายแม้แต่ค่าที่เรียงต่อเนื่องให้กระจายทั่วถึงข้าม shards — เยี่ยมสำหรับการกระจาย write แต่มันทำลาย locality ดังนั้นคิวรีแบบช่วงต้องกระจายออกไปทุก shard คุณเปิด sharding บน collection และเลือกกลยุทธ์ได้ในการเรียกเดียว:
 
@@ -100,7 +100,7 @@ export const chunkFlow = `flowchart LR
 
 ## การเลือก shard key ที่ดี
 
-shard key ที่ไม่ดีไม่สามารถแก้ไขแบบเงียบ ๆ ภายหลังได้ ดังนั้นการเลือกนี้สมควรได้รับความใส่ใจตั้งแต่แรก สามคุณสมบัติที่ทำให้ key ดี **High cardinality** หมายถึง key มีค่าที่แตกต่างกันจำนวนมาก เพื่อให้ข้อมูลแบ่งออกเป็น chunks ได้หลายอัน — ฟิลด์ที่มีค่าเพียงไม่กี่ค่าจำกัดว่าคุณกระจายได้ไกลแค่ไหน **Even distribution** หมายถึงค่ากระจายตัวข้ามเอกสาร เพื่อให้ไม่มี shard ใด shard หนึ่งกลายเป็นคอขวด และ **low hotspotting** หมายถึง write ไม่ได้พุ่งเป้าไปยังช่วงที่กำลังโตเดียวกันทั้งหมด; key ที่เพิ่มขึ้นเรื่อย ๆ อย่างสม่ำเสมอเช่น timestamp หรือ id ที่ auto-increment คือกับดักคลาสสิก เพราะทุก write ใหม่ลงบน chunk "สูงสุด" เดียวกันและถล่ม shard เดียว การ hash key เช่นนั้น หรือการนำมาผสมกับฟิลด์ที่มี cardinality สูงกว่า จะทำลาย hotspot นั้น
+shard key ที่ไม่ดีไม่สามารถแก้ไขแบบเงียบ ๆ ภายหลังได้ ดังนั้นการเลือกนี้สมควรได้รับความใส่ใจตั้งแต่แรก สามคุณสมบัติที่ทำให้ key ดี **High cardinality** หมายถึง key มีค่าที่แตกต่างกันจำนวนมาก เพื่อให้ข้อมูลแบ่งออกเป็น chunks ได้หลายอัน — ฟิลด์ที่มีค่าเพียงไม่กี่ค่าจำกัดว่าคุณกระจายได้ไกลแค่ไหน **Even distribution** หมายถึงค่ากระจายตัวข้าม document เพื่อให้ไม่มี shard ใด shard หนึ่งกลายเป็นคอขวด และ **low hotspotting** หมายถึง write ไม่ได้พุ่งเป้าไปยังช่วงที่กำลังโตเดียวกันทั้งหมด; key ที่เพิ่มขึ้นเรื่อย ๆ อย่างสม่ำเสมอเช่น timestamp หรือ id ที่ auto-increment คือกับดักคลาสสิก เพราะทุก write ใหม่ลงบน chunk "สูงสุด" เดียวกันและถล่ม shard เดียว การ hash key เช่นนั้น หรือการนำมาผสมกับฟิลด์ที่มี cardinality สูงกว่า จะทำลาย hotspot นั้น
 
 **ใน Atlas:** มุมมอง cluster เปิด sharding ออกมาเป็นตัวเลือกการตั้งค่า และ *Shard Key Advisor* กับ *Shard Key Analyzer* ช่วยให้คุณประเมินการกระจายตัวของ key ที่เป็นตัวเลือกก่อนที่คุณจะตัดสินใจเลือกมัน — คุ้มค่าที่จะใช้มาก เมื่อพิจารณาว่า key เปลี่ยนยากแค่ไหนหลังจากนั้น
 
@@ -114,6 +114,25 @@ shard key ที่ไม่ดีไม่สามารถแก้ไขแ�
 <Callout title="shard key คือการตัดสินใจที่สำคัญ">
 Sharding กระจาย collection หนึ่งข้ามหลาย shards และ router ใช้แผนที่ของ config servers เพื่อส่งแต่ละ request ไปยัง shard ที่ถูกต้อง ทุกอย่างขึ้นอยู่กับ shard key: เลือกอันที่มี high cardinality และ even distribution และหลีกเลี่ยง key ที่เพิ่มขึ้นแบบ monotonic ที่ทำให้เกิด hotspot บน shard เดียว
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Ranged sharding | รองรับคิวรีแบบช่วงได้เร็ว — targeted ไปยัง chunk ที่ต่อเนื่องกัน | เสี่ยง hotspot ถ้า write กระจุกตัวที่ปลายด้านหนึ่งของช่วง |
+| Hashed sharding | กระจาย write สม่ำเสมอข้าม shard ลด hotspot | ทำลาย locality ของช่วง คิวรีแบบช่วงกลายเป็น scatter-gather ทุก shard |
+
+## Common Mistakes
+
+- **เลือก field ที่เพิ่มขึ้นแบบ monotonic (เช่น timestamp หรือ auto-increment `_id`) เป็น shard key ตรง ๆ** — ทุก write ใหม่พุ่งไปที่ chunk บนสุดของช่วงเดียว ถล่ม shard เดียวขณะที่ shard อื่นว่างเปล่า นี่คือ hotspot ที่พบบ่อยที่สุดของ sharded cluster ที่เพิ่งเปิดใช้งาน
+- **ลืมว่า balancer ต้องใช้ I/O และ network ระหว่าง migrate chunk** — migration เกิดขึ้นแบบ background แต่ก็แย่ง resource กับ traffic จริงอยู่ดี cluster ที่ sensitive ต่อ latency ควรตั้ง balancing window ไว้ในช่วงที่ traffic ต่ำ
+- **คิดว่า sharding แก้ปัญหาคิวรีที่ไม่มี index รองรับ** — sharding กระจายข้อมูล ไม่ได้ทำให้คิวรีที่ scan ทั้ง collection เร็วขึ้น ถ้าคิวรีไม่มี index ที่เหมาะสม มันจะ scan ทุก shard พร้อมกันแทนที่จะ scan เครื่องเดียว ซึ่งแย่กว่าเดิม
+
+> 💡 Real World Example
+>
+> **Baidu** — ใช้ sharded cluster ของ MongoDB เก็บข้อมูลระดับหลายพันล้าน document กระจายข้ามหลาย shard สำหรับระบบค้นหาและ log ขนาดใหญ่
+>
+> **MongoDB Atlas** — ช่วยแนะนำเวลาที่ควร shard ผ่าน Shard Key Advisor และจัดการ balancer กับ chunk migration ให้อัตโนมัติ ลดงาน operational ที่ต้องทำเองเทียบกับ self-hosted cluster
 
 export const quizShard = [
   {
@@ -129,7 +148,7 @@ export const quizShard = [
   {
     q: 'config servers เก็บอะไร?',
     options: [
-      'สำเนาเต็มของทุกเอกสาร',
+      'สำเนาเต็มของทุก document',
       'metadata ของ cluster ที่แมปว่า chunks ไหนอยู่บน shards ไหน',
       'oplog ของแต่ละ shard',
       'ผลลัพธ์คิวรีที่ถูก cache ไว้',
