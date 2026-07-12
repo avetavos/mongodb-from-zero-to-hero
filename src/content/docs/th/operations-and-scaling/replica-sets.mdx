@@ -138,7 +138,7 @@ replica set เก็บข้อมูลของคุณหลายสำ�
 
 - **คิดว่า write scale ได้ด้วยการเพิ่ม secondary** — secondary ช่วยกระจายเฉพาะ read เท่านั้น ทุก write ยังคงไปที่ primary ตัวเดียวเสมอ ถ้าต้องการ scale write ต้องไปที่ sharding ไม่ใช่การเพิ่ม secondary
 - **วางสมาชิกทุกตัวไว้ใน availability zone หรือ data center เดียวกัน** — replica set ป้องกัน node ล้มเหลว แต่ถ้าทุก node อยู่ที่เดียวกัน เมื่อ AZ ทั้งก้อนล่ม set ทั้งชุดก็ล่มไปด้วย ต้องกระจายสมาชิกข้าม AZ หรือ data center จริง ๆ
-- **ไม่ได้ตั้ง write concern ให้เหมาะกับความสำคัญของข้อมูล** — write concern เริ่มต้นยืนยันแค่ที่ primary เท่านั้น ถ้า primary ล้มเหลวก่อน replicate ไปที่อื่น write นั้นอาจหายไปพร้อม election; ข้อมูลสำคัญควรใช้ `{ w: "majority" }`
+- **คิดว่า write ปลอดภัยแล้วทันทีที่ primary รับ** — ตั้งแต่ MongoDB 5.0 (2021) เป็นต้นมา write concern เริ่มต้นคือ `w: "majority"` คือรอให้สมาชิกส่วนใหญ่ที่มีสิทธิ์ลงคะแนน (voting members) ยืนยันก่อน ไม่ใช่ยืนยันแค่ที่ primary เท่านั้น ความผิดพลาดคือการเข้าใจว่า write durable แล้วตั้งแต่ primary รับ ทั้งที่ค่า default จะรอ majority ให้อยู่แล้ว ถ้าไปตั้ง `w: 1` เอง write ที่ยังไม่ replicate อาจหายไปพร้อม election ได้ ข้อมูลสำคัญจึงควรคง `{ w: "majority" }` ไว้
 
 > 💡 Real World Example
 >
