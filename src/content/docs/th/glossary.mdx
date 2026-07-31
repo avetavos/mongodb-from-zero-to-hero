@@ -24,7 +24,7 @@ import ProgressTracker from '../../../components/ProgressTracker.tsx';
 
 | English | Thai Style | หมายเหตุ |
 |---------|-----------|---------|
-| query | query | ใช้ทับศัพท์ ไม่แปลเป็น "คิวรี" |
+| query | query | ใช้ทับศัพท์ ไม่แปลเป็น " query " |
 | filter | filter | เงื่อนไขที่ query ใช้จับคู่ document |
 | operator (`$gt`, `$in`, ...) | operator | คีย์พิเศษขึ้นต้นด้วย `$` |
 | projection | projection | การเลือกว่าจะคืน field ไหนกลับมา |
@@ -52,7 +52,7 @@ import ProgressTracker from '../../../components/ProgressTracker.tsx';
 | primary / secondary | primary / secondary | node ที่รับเขียน / node ที่คัดลอกข้อมูลมา |
 | sharding | sharding | การกระจาย collection ไปหลาย shard เพื่อ scale การเขียน |
 | shard key | shard key | field ที่ใช้ตัดสินว่า document อยู่บน shard ไหน |
-| chunk | chunk | ช่วงของ shard key ที่ถูกกำหนดให้ shard หนึ่ง ๆ |
+| chunk | chunk | ช่วงของ shard key ที่กำหนดให้ shard ใด shard หนึ่งดูแล |
 
 ## เมื่อ **ไม่** ควรใช้ literal Thai translation
 
@@ -65,7 +65,7 @@ import ProgressTracker from '../../../components/ProgressTracker.tsx';
 | ชิ้นส่วน (หมายถึง shard/chunk) | shard / chunk |
 
 <Callout title="ทำไมคำเหล่านี้ไม่แปลเป็นไทยทั้งหมด">
-เพราะนั่นไม่ใช่วิธีที่ Thai developer พูดกันจริง ๆ ในที่ทำงาน คำอย่าง document, collection, index หรือ transaction ถูกใช้เป็นภาษาอังกฤษปนไทยเสมอทั้งในโค้ด, ใน MongoDB documentation ทางการ, และในบทสนทนาหน้างาน — การแปลคำเหล่านี้เป็นไทยล้วนจะทำให้อ่านแปลกและค้นหาคำศัพท์ในเอกสารทางการไม่เจอ course นี้จึงคงคำศัพท์เทคนิคไว้เป็นภาษาอังกฤษ แล้วใช้ภาษาไทยสำหรับโครงสร้างประโยคและคำอธิบายแทน
+เพราะนั่นไม่ใช่วิธีที่ Thai developer พูดกันจริง ๆ ในที่ทำงาน คำอย่าง document, collection, index หรือ transaction เราพูดเป็นภาษาอังกฤษปนไทยเสมอ ทั้งในโค้ด ใน MongoDB documentation ทางการ และในบทสนทนาหน้างาน แปลเป็นไทยล้วนเมื่อไรก็อ่านแปลกทันที แถมค้นคำศัพท์ในเอกสารทางการไม่เจอ ดังนั้น course นี้จึงคงคำศัพท์เทคนิคไว้เป็นภาษาอังกฤษ แล้วใช้ภาษาไทยกับโครงสร้างประโยคและคำอธิบายแทน
 </Callout>
 
 <ProgressTracker client:visible id="glossary" />

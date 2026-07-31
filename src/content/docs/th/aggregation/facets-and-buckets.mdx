@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-สอง stage สุดท้ายในโมดูลนี้ตอบคำถามที่ต้องการสรุป *หลายอย่าง* พร้อมกัน `$facet` รัน sub-pipeline หลายอันเคียงข้างกันบนอินพุตเดียวกัน คุณจึงได้หน้าผลลัพธ์ จำนวนนับรวม และการแยกย่อยในการเดินทางครั้งเดียว `$bucket` และ `$bucketAuto` จัดกลุ่ม document เข้าช่วง เหมือนที่ฮิสโทแกรมจัดเรียงค่าเข้าถัง เมื่อรวมกันแล้วมันขับเคลื่อนเคียวรีสไตล์ "dashboard": หนึ่งคำขอ หลายแผง
+สอง stage สุดท้ายในโมดูลนี้ตอบคำถามที่ต้องการสรุป *หลายอย่าง* พร้อมกัน `$facet` รัน sub-pipeline หลายอันเคียงข้างกันบน input เดียวกัน คุณจึงได้หน้าผลลัพธ์ จำนวนนับรวม และการแยกย่อยในการเดินทางครั้งเดียว `$bucket` และ `$bucketAuto` จัดกลุ่ม document เข้าช่วง เหมือนที่ฮิสโทแกรมจัดเรียงค่าเข้าถัง พอใช้คู่กันก็ได้ query สไตล์ "dashboard" คือหนึ่ง request ได้หลายแผงพร้อมกัน
 
 เรากลับมาที่ collection `sales` แบบแบนราบ ที่แต่ละ document คือออเดอร์เดียวที่มี `price`, `quantity` และ `genre`
 
 ## $facet รัน sub-pipeline แบบขนาน
 
-`$facet` รับออบเจกต์ที่คีย์เป็นชื่อที่คุณเลือก และค่าเป็น **sub-pipeline** แต่ละ sub-pipeline เห็น document อินพุต **เดียวกัน** — อันที่ไปถึง stage `$facet` — และผลิต array ผลลัพธ์ของตัวเอง ผลลัพธ์คือหนึ่ง document ที่มีฟิลด์ต่อหนึ่ง facet การใช้งานคลาสสิกคือ "ผลลัพธ์บวกจำนวนนับรวม" สำหรับรายการแบบแบ่งหน้า:
+`$facet` รับ object ที่คีย์เป็นชื่อที่คุณเลือก และค่าเป็น **sub-pipeline** แต่ละ sub-pipeline เห็น document input **เดียวกัน** — อันที่ไปถึง stage `$facet` — และผลิต array ผลลัพธ์ของตัวเอง ผลลัพธ์คือหนึ่ง document ที่มีฟิลด์ต่อหนึ่ง facet การใช้งานคลาสสิกคือ "ผลลัพธ์บวกจำนวนนับรวม" สำหรับรายการแบบแบ่งหน้า:
 
 export const facetFlow = `flowchart LR
   In["sales documents"] --> F["$facet"]
@@ -28,7 +28,7 @@ export const facetFlow = `flowchart LR
   B --> Out
   C --> Out`
 
-<Mermaid code={facetFlow} title="หนึ่ง stage หลาย sub-pipeline บนอินพุตเดียวกัน รวมเข้าเป็นหนึ่ง document ผลลัพธ์" />
+<Mermaid code={facetFlow} title="หนึ่ง stage หลาย sub-pipeline บน input เดียวกัน รวมเข้าเป็นหนึ่ง document ผลลัพธ์" />
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -151,11 +151,11 @@ export const facetFlow = `flowchart LR
 ]
 ```
 
-**ใน Compass:** `$facet` มีให้ใช้ในแท็บ **Aggregations** และแต่ละ sub-pipeline สามารถสร้างและดูตัวอย่างได้ก่อนที่คุณจะรวมพวกมัน มันเป็นวิธีธรรมชาติในการประกอบเคียวรีแบบผลลัพธ์บวกจำนวนนับสำหรับหน้าจอที่แบ่งหน้า
+**ใน Compass:** `$facet` มีให้ใช้ในแท็บ **Aggregations** และแต่ละ sub-pipeline สร้างและดูตัวอย่างได้ก่อนจะรวมเข้าด้วยกัน เป็นวิธีที่เป็นธรรมชาติมากในการประกอบ query แบบ "ผลลัพธ์บวกจำนวนนับ" สำหรับหน้าจอที่แบ่งหน้า
 
 ## $bucket จัดกลุ่มเข้าช่วงที่ระบุชัดเจน
 
-`$bucket` จัดเรียง document เข้าถังที่คุณนิยามด้วย **ขอบเขต** ของมัน คุณให้ expression `groupBy` array ของ `boundaries` ที่เรียงจากน้อยไปมาก ถัง `default` สำหรับค่าที่ตกนอกช่วง และ `output` ของ accumulator ต่อถัง ที่นี่เราจัดออเดอร์เข้าถังตามราคาเป็นแถบ "cheap" "mid" และ "premium":
+`$bucket` จัดเรียง document ลงถังที่คุณกำหนด **ขอบเขต** ไว้เอง โดยส่ง expression `groupBy` array ของ `boundaries` ที่เรียงจากน้อยไปมาก ถัง `default` สำหรับค่าที่ตกนอกช่วง และ `output` ของ accumulator ต่อถัง ที่นี่เราจัดออเดอร์เข้าถังตามราคาเป็นแถบ "cheap" "mid" และ "premium":
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -240,7 +240,7 @@ export const facetFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
-`_id` ของแต่ละถังคือขอบเขตล่างของมัน และ accumulator สรุปออเดอร์ที่ตกลงตรงนั้น:
+`_id` ของแต่ละถังคือขอบเขตล่างของถังนั้น ส่วน accumulator สรุปออเดอร์ที่ตกลงมาในถัง:
 
 ```json
 [
@@ -252,7 +252,7 @@ export const facetFlow = `flowchart LR
 
 ## $bucketAuto เลือกขอบเขตให้คุณ
 
-เมื่อคุณไม่รู้ขอบเขตที่ดีล่วงหน้า `$bucketAuto` จะเลือกมันเองเพื่อให้ document กระจายไปตามจำนวนถังเป้าหมายได้เท่ากันที่สุดเท่าที่ทำได้ คุณให้ `groupBy` และจำนวน `buckets` มันจะคืน `min` และ `max` ของแต่ละถังไว้ภายใน `_id`:
+เมื่อคุณไม่รู้ขอบเขตที่ดีล่วงหน้า `$bucketAuto` จะเลือกขอบเขตให้เอง เพื่อกระจาย document ลงตามจำนวนถังเป้าหมายให้เท่ากันที่สุด คุณส่งแค่ `groupBy` กับจำนวน `buckets` แล้วจะได้ `min` และ `max` ของแต่ละถังกลับมาใน `_id`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -312,7 +312,7 @@ export const facetFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
-ขอบเขตถูกคำนวณให้คุณ แต่ละถังพาช่วงและจำนวนนับของมัน:
+ขอบเขตคำนวณมาให้เรียบร้อย แต่ละถังพาช่วงและจำนวนนับติดมาด้วย:
 
 ```json
 [
@@ -324,31 +324,31 @@ export const facetFlow = `flowchart LR
 
 ## ทิปและกับดัก
 
-- แต่ละ sub-pipeline ของ `$facet` เริ่มจากอินพุต **เดียวกัน** ฟิลเตอร์ *ก่อน* `$facet` ถ้าคุณต้องการให้ทุก facet ใช้เซตที่แคบลงร่วมกัน แทนที่จะทำ `$match` ซ้ำในแต่ละอัน
-- `$facet` ไม่สามารถใช้ index บน sub-pipeline ของมันได้ เพราะมันรันบน document ที่ถูกสตรีมมาแล้ว ทำให้อินพุตเล็กไว้ด้วยการ match ตั้งแต่เนิ่น ๆ
+- แต่ละ sub-pipeline ของ `$facet` เริ่มจาก input **เดียวกัน** filter *ก่อน* `$facet` ถ้าคุณต้องการให้ทุก facet ใช้เซตที่แคบลงร่วมกัน แทนที่จะทำ `$match` ซ้ำในแต่ละอัน
+- `$facet` ใช้ index กับ sub-pipeline ข้างในไม่ได้ เพราะรันบน document ที่ stream เข้ามาแล้ว ทำให้ input เล็กไว้ด้วยการ match ตั้งแต่เนิ่น ๆ
 - `$bucket` ต้องการ `boundaries` ที่เรียงจากน้อยไปมาก ค่าที่ต่ำกว่าขอบเขตแรกหรือสูงกว่าขอบเขตสุดท้ายจะไปยัง `default` และหากไม่มี `default` ค่าเช่นนั้นจะทำให้เกิดข้อผิดพลาด
 - `$bucketAuto` มุ่งให้ขนาดถังเท่ากันแต่จะไม่แยกค่าที่เหมือนกันออกข้ามถัง ดังนั้นจำนวนนับอาจออกมาไม่เท่ากันเมื่อ document จำนวนมากมีค่าร่วมกัน
 
 <Callout title="หลายคำตอบในครั้งเดียว หรือค่าเข้าถัง">
-$facet คำนวณหลาย sub-pipeline บนอินพุตเดียวกันและคืนมันเป็นฟิลด์ของหนึ่ง document — เหมาะสำหรับผลลัพธ์บวกจำนวนนับ $bucket และ $bucketAuto จัดกลุ่ม expression ตัวเลขเข้าช่วง: คุณให้ขอบเขตสำหรับ $bucket ส่วน $bucketAuto เลือกมันเองเพื่อปรับสมดุลถัง
+$facet รันหลาย sub-pipeline บน input เดียวกัน แล้วคืนผลออกมาเป็นฟิลด์ของ document เดียว เหมาะกับงานผลลัพธ์บวกจำนวนนับ ส่วน $bucket และ $bucketAuto จัดกลุ่ม expression ตัวเลขเข้าช่วง โดย $bucket ให้คุณกำหนดขอบเขตเอง ส่วน $bucketAuto เลือกขอบเขตให้เพื่อให้ถังสมดุล
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `$facet` (รวมหลาย sub-pipeline ใน request เดียว) | ได้ผลลัพธ์บวกจำนวนนับในคำขอเดียว ลด round-trip ระหว่าง client กับ server | แต่ละ facet ต้อง output ไม่เกิน 16MB และ `$facet` ใช้ index กับ sub-pipeline ของมันไม่ได้ |
-| ยิงหลาย query แยกกัน (แทน `$facet`) | แต่ละ query ใช้ index ได้เต็มที่ ไม่ติด limit ของ `$facet` | เพิ่มจำนวน round-trip ไปเซิร์ฟเวอร์ และต้องดูแล consistency ระหว่างหลาย query เอง |
+| `$facet` (รวมหลาย sub-pipeline ใน request เดียว) | ได้ผลลัพธ์บวกจำนวนนับในคำขอเดียว ลด round-trip ระหว่าง client กับ server | แต่ละ facet ต้อง output ไม่เกิน 16MB และ `$facet` ใช้ index กับ sub-pipeline ข้างในไม่ได้ |
+| ยิงหลาย query แยกกัน (แทน `$facet`) | แต่ละ query ใช้ index ได้เต็มที่ ไม่ติด limit ของ `$facet` | เพิ่มจำนวน round-trip ไป server และต้องดูแล consistency ระหว่างหลาย query เอง |
 | `$bucket` (กำหนด boundaries เอง) | ควบคุมขอบเขตของแต่ละถังได้ตรงตาม business logic เช่น ช่วงราคาที่ธุรกิจกำหนด | ต้องรู้ล่วงหน้าว่าขอบเขตควรเป็นเท่าไร ถ้าข้อมูลกระจายเปลี่ยนไปต้องมาปรับ boundaries เอง |
 | `$bucketAuto` (คำนวณ boundaries อัตโนมัติ) | ไม่ต้องรู้การกระจายของข้อมูลล่วงหน้า จำนวน document ต่อถังสมดุลกัน | ขอบเขตของถังไม่คงที่ระหว่างการรันแต่ละครั้งถ้าข้อมูลเปลี่ยน ทำให้เทียบผลระหว่างช่วงเวลายากขึ้น |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
-- **ใส่ document ขนาดใหญ่เข้า `$facet` โดยไม่ filter ก่อน แล้วเจอ error เกิน 16MB** — แต่ละ sub-pipeline ของ `$facet` มี output limit 16MB ต่อ facet ถ้าอินพุตใหญ่มากต้อง `$match`/`$limit` ก่อนเข้า `$facet` เสมอ
-- **คาดว่า sub-pipeline ของ `$facet` ใช้ index ได้เหมือน pipeline ปกติ** — `$facet` รันบน document ที่ถูกสตรีมมาแล้ว ไม่ใช่จาก collection โดยตรง ดังนั้น sub-pipeline ข้างในใช้ index ไม่ได้ ต้อง match ให้เล็กก่อนเข้า stage นี้
+- **ใส่ document ขนาดใหญ่เข้า `$facet` โดยไม่ filter ก่อน แล้วเจอ error เกิน 16MB** — แต่ละ sub-pipeline ของ `$facet` มี output limit 16MB ต่อ facet ถ้า input ใหญ่มากต้อง `$match`/`$limit` ก่อนเข้า `$facet` เสมอ
+- **คาดว่า sub-pipeline ของ `$facet` ใช้ index ได้เหมือน pipeline ปกติ** — `$facet` รันบน document ที่ถูก stream มาแล้ว ไม่ใช่จาก collection โดยตรง ดังนั้น sub-pipeline ข้างในใช้ index ไม่ได้ ต้อง match ให้เล็กก่อนเข้า stage นี้
 - **ใช้ `$bucket` แล้วไม่ตั้ง `default` แล้วแปลกใจว่า pipeline error** — ถ้ามีค่าที่ตกนอกช่วง `boundaries` และไม่ได้ตั้ง `default` ไว้ `$bucket` จะโยน error ทันที ไม่ใช่แค่ข้ามค่าที่ไม่ตรงไปเฉย ๆ
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Analytics dashboard แบบแบ่งหน้า** — หน้ารายการสินค้าที่ต้องโชว์ทั้งหน้าปัจจุบันและจำนวนรวมทั้งหมดในคำขอเดียว ใช้ `$facet` แยกเป็น sub-pipeline `pageResults` กับ `totalCount` เพื่อลด round-trip ไม่ต้องยิง query สองรอบ
 >
@@ -356,9 +356,9 @@ $facet คำนวณหลาย sub-pipeline บนอินพุตเด�
 
 export const quizFacets = [
   {
-    q: 'แต่ละ sub-pipeline ของ stage $facet รับอินพุตอะไร?',
+    q: 'แต่ละ sub-pipeline ของ stage $facet รับ input อะไร?',
     options: [
-      'ผลลัพธ์ของ sub-pipeline ที่ระบุไว้ก่อนหน้ามัน',
+      'ผลลัพธ์ของ sub-pipeline ที่ประกาศไว้ก่อนหน้า',
       'เซตของ document เดียวกันที่ไปถึง stage $facet',
       'สับเซตสุ่มของ collection',
       'เฉพาะ document ที่ตรงกับ facet แรก',
@@ -366,11 +366,11 @@ export const quizFacets = [
     answer: 1,
   },
   {
-    q: 'การใช้งานทั่วไปของ $facet คือการคืนผลลัพธ์แบบแบ่งหน้าพร้อมกับสิ่งใดในเคียวรีเดียว?',
+    q: 'การใช้งานทั่วไปของ $facet คือการคืนผลลัพธ์แบบแบ่งหน้าพร้อมกับสิ่งใดใน query เดียว?',
     options: [
       'สำเนา collection ชุดที่สอง',
       'จำนวนนับรวมของ document ที่ตรงกัน',
-      'ล็อกของเซิร์ฟเวอร์ฐานข้อมูล',
+      'ล็อกของ server ฐานข้อมูล',
       'ลิสต์ของ index',
     ],
     answer: 1,
@@ -381,17 +381,17 @@ export const quizFacets = [
       'เข้าถังแรก',
       'เข้าถังสุดท้าย',
       'เข้าถัง default (หรือเกิดข้อผิดพลาดถ้าไม่ได้ตั้งไว้)',
-      'มันถูกทิ้งเงียบ ๆ',
+      'หลุดหายไปเงียบ ๆ',
     ],
     answer: 2,
   },
   {
     q: '$bucketAuto ต่างจาก $bucket อย่างไร?',
     options: [
-      'มันบังคับให้คุณระบุขอบเขตอย่างชัดเจน',
-      'มันเลือกขอบเขตเองเพื่อกระจาย document ไปตามจำนวนถังเป้าหมาย',
-      'มันจัดถังได้เฉพาะสตริง',
-      'มันคืน document ยอดรวมทั้งหมดเพียงอันเดียว',
+      'บังคับให้คุณระบุขอบเขตเองอย่างชัดเจน',
+      'เลือกขอบเขตให้เอง เพื่อกระจาย document ตามจำนวนถังเป้าหมาย',
+      'จัดถังได้เฉพาะ string',
+      'คืน document ยอดรวมออกมาแค่อันเดียว',
     ],
     answer: 1,
   },

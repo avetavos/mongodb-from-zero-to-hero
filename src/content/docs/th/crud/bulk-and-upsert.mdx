@@ -1,6 +1,6 @@
 ---
 title: Upsert และ bulk write
-description: insert-หรือ-update ด้วย upsert และรวมการเขียนหลายครั้งเป็นการเดินทางไปกลับครั้งเดียวด้วย bulkWrite ทั้งแบบ ordered และ unordered
+description: insert-หรือ-update ด้วย upsert และรวมการเขียนหลายครั้งเป็น round trip เดียวด้วย bulkWrite ทั้งแบบ ordered และ unordered
 sidebar:
   order: 6
 ---
@@ -11,13 +11,15 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-สองท่าสุดท้ายในโมดูลนี้เป็นเรื่องของการทำสิ่งต่าง ๆ ได้มากขึ้นด้วยการเดินทางไปกลับที่น้อยลง **upsert** ตอบคำถามที่คุณเจอตลอดเวลา นั่นคือ "update document นี้ถ้ามันมีอยู่ ไม่อย่างนั้นก็สร้างมัน" **bulk write** ให้คุณส่งรายการของ operation ที่ปนกันทั้งหมด — insert, update, delete — ไปยังเซิร์ฟเวอร์ในการเรียกครั้งเดียว แทนที่จะเป็นการเดินทางผ่านเครือข่ายหนึ่งครั้งต่อ operation หนึ่งรายการ ทั้งคู่ไม่ได้แนะนำ operator ใหม่ พวกมันประกอบ method ที่คุณรู้อยู่แล้วให้เป็นอะไรบางอย่างที่มีประสิทธิภาพมากขึ้น
+สองท่าสุดท้ายในโมดูลนี้เป็นเรื่องของการทำสิ่งต่าง ๆ ได้มากขึ้นด้วย round trip ที่น้อยลง **upsert** ตอบคำถามที่คุณเจอตลอดเวลา นั่นคือ "ถ้า document นี้มีอยู่แล้วก็ update ถ้ายังไม่มีก็สร้างใหม่" **bulk write** ให้คุณส่งรายการของ operation ที่ปนกันทั้งหมด — insert, update, delete — ไปยัง server ในการเรียกครั้งเดียว แทนที่จะยิงข้ามเครือข่ายหนึ่งรอบต่อหนึ่ง operation
+
+ทั้งคู่ไม่ได้เพิ่ม operator ใหม่ แต่เอา method ที่คุณรู้อยู่แล้วมาประกอบใหม่ให้คุ้มขึ้น
 
 เราจบด้วย collection `members` ของเราอีกครั้งหนึ่ง
 
 ## Upsert: update หรือ insert
 
-เพิ่ม option upsert เข้าไปในการ update แล้วเมื่อ filter ไม่ตรงกับอะไรเลย MongoDB จะ insert document ใหม่ที่สร้างขึ้นจาก filter บวกกับ update เมื่อ filter *ตรงกัน* จริง ๆ มันจะทำตัวเหมือนการ update ธรรมดา ในที่นี้เราบันทึกการมาเยือนของ "Katherine" — ถ้าเธอยังไม่ได้เป็นสมาชิก สิ่งนี้จะสร้างเธอขึ้นมา:
+เพิ่ม option upsert เข้าไปในการ update แล้วเมื่อ filter ไม่ตรงกับอะไรเลย MongoDB จะ insert document ใหม่ที่สร้างขึ้นจาก filter บวกกับ update เมื่อ filter *เจอ* จริง ๆ ก็ทำตัวเหมือน update ธรรมดา ในที่นี้เราบันทึกการมาเยือนของ "Katherine" — ถ้าเธอยังไม่ได้เป็นสมาชิก สิ่งนี้จะสร้างเธอขึ้นมา:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -81,7 +83,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-เพราะไม่มี Katherine อยู่ acknowledgement จึงรายงาน `upsertedId` — `_id` ของ document ที่ถูกสร้างขึ้น `matchedCount` เป็น `0` ซึ่งเป็นสัญญาณบอกคุณว่าเกิดการ insert ขึ้นแทนที่จะเป็นการ update:
+เพราะไม่มี Katherine อยู่ acknowledgement จึงรายงาน `upsertedId` — `_id` ของ document ที่ถูกสร้างขึ้น `matchedCount` เป็น `0` ที่เป็นสัญญาณบอกคุณว่าเกิดการ insert ขึ้นแทนที่จะเป็นการ update:
 
 ```json
 {
@@ -103,11 +105,11 @@ document ใหม่ผสม filter และ update operator เข้าด�
 }
 ```
 
-รันการเรียกเดียวกันเป๊ะ ๆ เป็นครั้งที่สอง ตอนนี้ Katherine มีอยู่แล้ว มันจึง update เธอแทน `matchedCount` กลายเป็น `1`, `visits` ไต่ขึ้นไปเป็น `2` และ `upsertedId` ก็ไม่ปรากฏ
+รันการเรียกเดียวกันเป๊ะ ๆ เป็นครั้งที่สอง ตอนนี้ Katherine มีอยู่แล้ว จึงกลายเป็นการ update แทน `matchedCount` กลายเป็น `1`, `visits` ไต่ขึ้นไปเป็น `2` และ `upsertedId` ก็ไม่ปรากฏ
 
-## bulkWrite: operation หลายรายการ การเดินทางไปกลับครั้งเดียว
+## bulkWrite: operation หลายรายการ round trip เดียว
 
-`bulkWrite` รับรายการของ operation แล้วส่งพวกมันไปด้วยกัน แต่ละรายการระบุ operation ของมันและถือ filter และ update เดียวกันกับที่คุณจะส่งทีละรายการ ดังนั้นคุณจึงผสม insert, update และ delete ได้อย่างอิสระ ในที่นี้เรารับสมาชิกใหม่หนึ่งคน คิดค่าปรับหนึ่งครั้ง และลบสมาชิกที่ขาดการติดต่อ — ทั้งหมดในการเรียกครั้งเดียว:
+`bulkWrite` รับรายการของ operation แล้วส่งไปพร้อมกัน แต่ละรายการระบุ operation ของตัวเอง พร้อม filter และ update ชุดเดียวกับที่คุณจะส่งทีละครั้ง ดังนั้นคุณจึงผสม insert, update และ delete ได้อย่างอิสระ ในที่นี้เรารับสมาชิกใหม่หนึ่งคน คิดค่าปรับหนึ่งครั้ง และลบสมาชิกที่ขาดการติดต่อ — ทั้งหมดในการเรียกครั้งเดียว:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -203,7 +205,7 @@ acknowledgement เพียงหนึ่งเดียวสรุปทุ�
 }
 ```
 
-หัวใจทั้งหมดอยู่ที่การเดินทางไปกลับ นั่นคือ แทนที่จะเป็นการสนทนากับเซิร์ฟเวอร์สามครั้งแยกกัน driver รวมรายการนั้นเป็นชุดแล้วส่งมันไปครั้งเดียว
+หัวใจทั้งหมดอยู่ที่ round trip นั่นคือ แทนที่จะเป็นการสนทนากับ server สามครั้งแยกกัน driver รวมรายการทั้งหมดเป็นชุดเดียวแล้วส่งไปรอบเดียว
 
 export const bulkDiagram = `flowchart LR
   App["Your app"] -->|"one bulkWrite call"| Batch["Batched: insert + update + delete"]
@@ -212,11 +214,11 @@ export const bulkDiagram = `flowchart LR
   Server --> R2["modifiedCount: 1"]
   Server --> R3["deletedCount: 1"]`
 
-<Mermaid code={bulkDiagram} title="bulkWrite อัด operation หลายรายการเข้าไปในการเดินทางไปกลับครั้งเดียวและคืนผลลัพธ์ที่รวมกัน" />
+<Mermaid code={bulkDiagram} title="bulkWrite อัด operation หลายรายการเข้าไปใน round trip เดียวและคืนผลลัพธ์ที่รวมกัน" />
 
 ## ordered เทียบกับ unordered
 
-โดยปริยาย `bulkWrite` เป็นแบบ **ordered** นั่นคือ มันรัน operation ตามลำดับและหยุดที่รายการแรกที่ error ทำให้ที่เหลือไม่ถูกรัน สลับมันเป็นแบบ **unordered** แล้วเซิร์ฟเวอร์อาจรัน operation ในลำดับใดก็ได้และเดินหน้าต่อแม้มีความล้มเหลว โดยใช้ทุก operation ที่สามารถสำเร็จได้ unordered มักจะเร็วกว่าและเป็นตัวเลือกที่ถูกต้องเมื่อ operation ต่าง ๆ ไม่ขึ้นต่อกัน
+โดยปริยาย `bulkWrite` เป็นแบบ **ordered** นั่นคือรัน operation ไล่ตามลำดับ แล้วหยุดที่รายการแรกที่ error ทำให้ที่เหลือไม่ได้รัน สลับไปเป็นแบบ **unordered** แล้ว server อาจรัน operation ในลำดับใดก็ได้และเดินหน้าต่อแม้มีความล้มเหลว โดยใช้ทุก operation ที่สามารถสำเร็จได้ unordered มักจะเร็วกว่าและเป็นตัวเลือกที่ถูกต้องเมื่อ operation ต่าง ๆ ไม่ขึ้นต่อกัน
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -293,16 +295,16 @@ export const bulkDiagram = `flowchart LR
 
 ## เคล็ดลับและจุดที่ต้องระวัง
 
-- upsert สร้าง document ใหม่ของมันจาก **ทั้ง** เงื่อนไข equality ของ filter และ update operator ทำให้ filter เจาะจง (field ที่ระบุระเบียน) เพื่อให้ document ที่ถูก insert ออกมาในแบบที่คุณคาดหวัง
+- upsert สร้าง document ใหม่จาก **ทั้ง** เงื่อนไข equality ของ filter และ update operator ทำให้ filter เจาะจง (field ที่ระบุระเบียน) เพื่อให้ document ที่ insert ออกมาหน้าตาตรงกับที่คุณคาดไว้
 - หลังจาก upsert ให้ตรวจ `matchedCount` ค่า `0` บวกกับ `upsertedId` หมายความว่ามี document ถูกสร้างขึ้น ส่วน `1` หมายความว่ารายการที่มีอยู่ถูก update
 - ordered `bulkWrite` หยุดที่ error แรก ถ้าคุณต้องการให้ทุก operation ที่เป็นอิสระต่อกันถูกพยายามทำโดยไม่สนความล้มเหลว ก็กำหนด option แบบ unordered
-- `bulkWrite` เป็นเรื่องของประสิทธิภาพ ไม่ใช่ transaction เว้นแต่คุณจะห่อมันไว้ใน transaction operation ต่าง ๆ ไม่ได้เป็นแบบทั้งหมดหรือไม่ทำเลย — บางรายการสำเร็จได้ในขณะที่บางรายการล้มเหลว
+- `bulkWrite` เป็นเรื่องของประสิทธิภาพ ไม่ใช่ transaction เว้นแต่คุณจะห่อไว้ใน transaction operation ชุดนี้ไม่ได้เป็นแบบทั้งหมดหรือไม่ทำเลย บางรายการสำเร็จ ส่วนบางรายการล้มเหลวได้
 
-<Callout title="การเดินทางไปกลับน้อยลง องค์ประกอบเดิม">
-upsert และ bulk write ไม่ได้เพิ่มภาษา query ใหม่ — พวกมันอัด insert, update และ delete ที่คุณรู้อยู่แล้วเข้าไปในการเดินทางไปยังเซิร์ฟเวอร์ครั้งเดียว นั่นคือสิ่งที่ "การทำให้ CRUD เร็ว" หมายถึงเป็นส่วนใหญ่ในทางปฏิบัติ
+<Callout title="round trip น้อยลง องค์ประกอบเดิม">
+upsert และ bulk write ไม่ได้เพิ่มภาษา query ใหม่ — แต่อัด insert, update และ delete ที่คุณรู้อยู่แล้วให้ถึง server ในรอบเดียว นั่นคือสิ่งที่ "การทำให้ CRUD เร็ว" หมายถึงเป็นส่วนใหญ่ในทางปฏิบัติ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -310,21 +312,21 @@ upsert และ bulk write ไม่ได้เพิ่มภาษา query 
 | upsert | round trip เดียว จบทั้ง insert-ถ้าไม่มี และ update-ถ้ามี | ถ้ามีหลาย request แข่งกันด้วย filter เดียวกันพร้อมกัน (race condition) อาจเกิด document ซ้ำได้ถ้าไม่มี unique index รองรับ |
 | check-then-insert/update แบบ explicit (`findOne` ก่อน แล้วค่อย insert/update) | ควบคุมได้ละเอียด ตัดสินใจ logic เพิ่มเติมได้ก่อนเขียน | สอง round trip แทนที่จะเป็นหนึ่ง และยังมีช่องว่างระหว่าง find กับ write ที่ request อื่นแทรกเข้ามาได้ (race เช่นกัน แต่ควบคุมยากกว่า) |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **เชื่อว่า upsert ป้องกัน document ซ้ำได้เสมอ** — ถ้าไม่มี unique index ครอบ field ที่ใช้เป็น filter การยิง upsert พร้อมกันหลาย request ด้วย filter เดียวกันสามารถสร้าง document ซ้ำได้ เพราะ MongoDB ตรวจ "ไม่พบ" แล้ว insert แบบแยกกันในแต่ละ request ก่อนที่อีกฝั่งจะเห็นผลลัพธ์ของกันและกัน
-- **ใส่ operation หลายพันตัวลงใน `bulkWrite` เดียวโดยไม่แบ่ง batch** — payload ใหญ่เกินไปอาจชนลิมิตของ driver/เซิร์ฟเวอร์ ควรแบ่งเป็นชุดที่ขนาดพอเหมาะแล้วยิงหลายรอบ
+- **ใส่ operation หลายพันตัวลงใน `bulkWrite` เดียวโดยไม่แบ่ง batch** — payload ใหญ่เกินไปอาจชนลิมิตของ driver/ server ควรแบ่งเป็นชุดที่ขนาดพอเหมาะแล้วยิงหลายรอบ
 - **ใช้ ordered `bulkWrite` (ค่าเริ่มต้น) เมื่อ operation ต่าง ๆ ไม่เกี่ยวข้องกัน** — ถ้า operation ตัวที่ 3 ล้มเหลว operation ที่ 4-100 จะไม่ถูกรันเลย ทั้งที่ไม่มีอะไรเกี่ยวข้องกับตัวที่ล้มเหลว ทำให้งานที่ควรสำเร็จหายไปด้วย ควรใช้ unordered ถ้า operation เป็นอิสระต่อกันจริง ๆ
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
-> **ระบบนับยอดสินค้าคงคลัง (inventory sync)** — เมื่อซิงก์สต็อกจากคลังสินค้าจริงเข้าระบบทุกคืน ใช้ `bulkWrite` แบบ unordered รวม `updateOne` หลายพันรายการ (แก้ยอด stock ต่อ SKU) เข้าเป็นการเดินทางไปกลับไม่กี่ครั้ง แทนที่จะยิง update ทีละ SKU
+> **ระบบนับยอดสินค้าคงคลัง (inventory sync)** — เมื่อซิงก์สต็อกจากคลังสินค้าจริงเข้าระบบทุกคืน ใช้ `bulkWrite` แบบ unordered รวม `updateOne` หลายพันรายการ (แก้ยอด stock ต่อ SKU) เข้าเป็น round trip ไม่กี่ครั้ง แทนที่จะยิง update ทีละ SKU
 >
 > **ระบบนับยอด page view / analytics counter** — ใช้ upsert กับ `updateOne({ page, date }, { $inc: { views: 1 } }, { upsert: true })` เพื่อสร้างแถวนับยอดของวันนั้นถ้ายังไม่มี หรือบวกเพิ่มถ้ามีอยู่แล้ว โดยมี unique compound index บน `(page, date)` กันไม่ให้เกิดแถวซ้ำเวลามี request มาพร้อมกันจำนวนมาก
 
 export const quizBulk = [
   {
-    q: 'upsert รันและ filter ของมันไม่ตรงกับ document ที่มีอยู่เลย จะเกิดอะไรขึ้น?',
+    q: 'รัน upsert แล้ว filter ไม่ match document ที่มีอยู่เลย จะเกิดอะไรขึ้น?',
     options: [
       'ไม่มีอะไรเปลี่ยนและมี error ถูกคืนกลับมา',
       'document ใหม่ถูก insert จาก filter บวกกับ update operator',
@@ -336,20 +338,20 @@ export const quizBulk = [
   {
     q: 'ประโยชน์หลักของ bulkWrite เหนือการเรียกแยกกันคืออะไร?',
     options: [
-      'มันทำให้ทุก operation เป็น atomic โดยปริยาย',
-      'มันตรวจสอบความถูกต้องของแต่ละ document เทียบกับ schema',
-      'มันส่ง operation หลายรายการไปยังเซิร์ฟเวอร์ในการเดินทางไปกลับครั้งเดียว',
-      'มันลองทำซ้ำ operation ที่ล้มเหลวโดยอัตโนมัติ',
+      'ทำให้ทุก operation เป็น atomic โดยอัตโนมัติ',
+      'ตรวจความถูกต้องของแต่ละ document เทียบกับ schema',
+      'ส่ง operation หลายรายการไปยัง server ใน round trip เดียว',
+      'retry operation ที่ล้มเหลวให้อัตโนมัติ',
     ],
     answer: 2,
   },
   {
     q: 'ordered bulkWrite ทำตัวอย่างไรเมื่อ operation หนึ่งล้มเหลว?',
     options: [
-      'มันรัน operation ที่เหลืออยู่ต่อไปอยู่ดี',
-      'มันหยุดที่ความล้มเหลว ทำให้ operation ที่ตามมาไม่ถูกรัน',
-      'มัน roll back ทุก operation ที่ใช้ไปก่อนหน้านี้',
-      'มันแปลงชุดเป็น unordered โดยอัตโนมัติ',
+      'รัน operation ที่เหลือต่อไปอยู่ดี',
+      'หยุดตรงจุดที่ล้มเหลว operation ที่ตามมาจึงไม่ได้รัน',
+      'roll back ทุก operation ที่ทำไปก่อนหน้า',
+      'เปลี่ยนชุดนั้นเป็น unordered ให้อัตโนมัติ',
     ],
     answer: 1,
   },

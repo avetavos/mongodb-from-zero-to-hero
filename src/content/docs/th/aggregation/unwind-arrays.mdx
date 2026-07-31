@@ -11,7 +11,9 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-array มีอยู่ทุกที่ใน document MongoDB — แท็กบนโพสต์ รายการในออเดอร์ บทเรียนในคอร์ส การจะ *สรุป* ข้ามสมาชิกของ array เหล่านั้น มักต้องดูทีละตัว `$unwind` ทำสิ่งนั้นพอดี: มันรับ document ที่มีฟิลด์ array แล้วปล่อยออกมา **หนึ่ง document ต่อหนึ่งสมาชิก** โดยคัดลอกส่วนที่เหลือของ document ไปยังแต่ละอัน document ที่มี array สามสมาชิกจะกลายเป็นสาม document
+array อยู่ทุกที่ใน document ของ MongoDB — tag บนโพสต์ รายการในออเดอร์ บทเรียนในคอร์ส เวลาจะ *สรุป* ข้ามสมาชิกของ array พวกนี้ ส่วนใหญ่ต้องมองทีละตัว
+
+`$unwind` ทำหน้าที่นั้นพอดี: รับ document ที่มีฟิลด์ array แล้วปล่อยออกมา **หนึ่ง document ต่อหนึ่งสมาชิก** พร้อมคัดลอกส่วนที่เหลือของ document ติดไปด้วยทุกอัน  document ที่มี array สามสมาชิกจึงกลายเป็นสาม document
 
 สำหรับบทเรียนนี้ document `sales` แต่ละอันบันทึกออเดอร์ที่มีหลายรายการสินค้าใน array `items`:
 
@@ -28,7 +30,7 @@ array มีอยู่ทุกที่ใน document MongoDB — แท็�
 
 ## หนึ่ง document ต่อหนึ่งสมาชิก array
 
-ให้เส้นทางไปยังฟิลด์ array แก่ `$unwind` (พร้อมตัวนำหน้า `$`) แล้วมันจะแผ่ document ออก document ที่ปล่อยออกมาทุกอันเหมือนกันทุกประการ ยกเว้นฟิลด์ array ถูกแทนที่ด้วยสมาชิกตัวใดตัวหนึ่งของมัน
+ส่ง path ของฟิลด์ array ให้ `$unwind` (มี `$` นำหน้า) แล้ว stage นี้จะแผ่ document ออก  document ที่ปล่อยออกมาทุกอันหน้าตาเหมือนเดิมเป๊ะ ต่างแค่ฟิลด์ array กลายเป็นสมาชิกตัวเดียว
 
 export const unwindFlow = `flowchart LR
   In["one order with items array of two"] --> U["$unwind items"]
@@ -80,7 +82,7 @@ export const unwindFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
-ออเดอร์เดียวกลายเป็นหนึ่ง document ต่อหนึ่งรายการสินค้า โดย `items` ตอนนี้เป็นออบเจกต์ธรรมดาแทนที่จะเป็น array:
+ออเดอร์เดียวกลายเป็นหนึ่ง document ต่อหนึ่งรายการสินค้า โดย `items` ตอนนี้เป็น object ธรรมดาแทนที่จะเป็น array:
 
 ```json
 [
@@ -89,11 +91,11 @@ export const unwindFlow = `flowchart LR
 ]
 ```
 
-**ใน Compass:** เพิ่ม stage `$unwind` ในแท็บ **Aggregations** แล้วชี้มันไปที่ฟิลด์ array การดูตัวอย่างแสดงจำนวน document *เพิ่มขึ้น* — สัญญาณว่าคุณได้แบน array แล้ว — ซึ่งตรงข้ามกับสิ่งที่ `$match` และ `$group` ทำ
+**ใน Compass:** เพิ่ม stage `$unwind` ในแท็บ **Aggregations** แล้วชี้ไปที่ฟิลด์ array ตัวอย่างผลลัพธ์จะแสดงจำนวน document *เพิ่มขึ้น* นั่นคือสัญญาณว่าแบน array สำเร็จ ตรงข้ามกับ `$match` และ `$group` ที่ทำให้จำนวนลดลง
 
 ## การจับคู่คลาสสิก: $unwind แล้วตามด้วย $group
 
-`$unwind` ไม่ค่อยเป็นคำพูดสุดท้าย งานปกติของมันคือแบน array เพื่อให้ `$group` ในภายหลังสรุปข้ามสมาชิกได้ ที่นี่เราแบน items ของทุกออเดอร์ แล้วรวมจำนวนที่ขายต่อชื่อเรื่องข้ามทุกออเดอร์:
+`$unwind` แทบไม่เคยเป็น stage สุดท้าย งานปกติคือแบน array ไว้ให้ `$group` ที่ตามมาสรุปข้ามสมาชิกได้ ตรงนี้เราแบน items ของทุกออเดอร์ แล้วรวมยอดขายต่อชื่อหนังสือข้ามทุกออเดอร์:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -163,7 +165,7 @@ export const unwindFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
-ตอนนี้แต่ละชื่อเรื่องมีจำนวนรวมของมัน รวมข้ามรายการสินค้าของทุกออเดอร์:
+ตอนนี้แต่ละชื่อหนังสือได้ยอดรวม นับข้ามรายการสินค้าของทุกออเดอร์แล้ว:
 
 ```json
 [
@@ -174,7 +176,7 @@ export const unwindFlow = `flowchart LR
 
 ## การเก็บ array ที่ว่างและที่หายไป
 
-โดยค่าเริ่มต้น `$unwind` **ทิ้ง** document ที่ฟิลด์ array ว่าง หายไป หรือเป็น `null` — ไม่มีสมาชิกให้ปล่อยออก ดังนั้น document จึงหายไป เมื่อคุณต้องการให้ document เหล่านั้นรอด (โดยไม่มีฟิลด์นั้น) ให้ส่งรูปแบบยาวพร้อม `preserveNullAndEmptyArrays`:
+ค่า default ของ `$unwind` จะ **ทิ้ง** document ที่ฟิลด์ array ว่าง ไม่มี หรือเป็น `null` เพราะไม่มีสมาชิกให้ปล่อยออกมา document จึงหายไปทั้งก้อน ถ้าอยากให้ document พวกนั้นรอด (แค่ไม่มีฟิลด์นั้นติดมา) ให้เขียนแบบ object form พร้อม `preserveNullAndEmptyArrays`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -244,30 +246,30 @@ export const unwindFlow = `flowchart LR
 
 ## ทิปและกับดัก
 
-- `$unwind` **ทวีคูณ** document ออเดอร์ที่มีห้ารายการกลายเป็นห้า document — การแบนสามารถทำให้สตรีมโตขึ้นมากก่อนที่ `$group` ในภายหลังจะทำให้มันหดลงอีกครั้ง
-- หากไม่มี `preserveNullAndEmptyArrays` document ที่มี array ว่างหรือหายไปจะถูกทิ้งเงียบ ๆ ถ้าจำนวนนับของคุณขาดไปหลัง unwind นี่คือผู้ต้องสงสัยตามปกติ
-- หลังจาก unwind ให้อ้างถึงฟิลด์ของสมาชิกผ่านเส้นทางเดิม: เมื่อ `items` เป็นออบเจกต์เดี่ยว `"$items.qty"` จะอ่านจำนวนของสมาชิกนั้น
-- ถ้าฟิลด์ไม่ได้เป็น array จริง ๆ `$unwind` จะปฏิบัติต่อค่าสเกลาร์เดี่ยวเสมือนเป็น array หนึ่งสมาชิก และปล่อย document ออกมาหนึ่งครั้ง — ดังนั้นมันให้อภัยกับค่าที่ไม่ใช่ array
+- `$unwind` **ทวีคูณ** document ออเดอร์ที่มีห้ารายการกลายเป็นห้า document การแบนจึงทำให้ stream พองขึ้นมาก ก่อนที่ `$group` ตัวถัดไปจะบีบกลับลงมา
+- ถ้าไม่ใส่ `preserveNullAndEmptyArrays` document ที่ array ว่างหรือไม่มี array จะหายไปเงียบ ๆ ถ้ายอดนับหลัง unwind ขาดไป ให้สงสัยข้อนี้ก่อนเลย
+- หลัง unwind ให้อ้างฟิลด์ของสมาชิกด้วย path เดิม: เมื่อ `items` กลายเป็น object เดี่ยว `"$items.qty"` จะอ่านจำนวนของสมาชิกตัวนั้น
+- ถ้าฟิลด์ไม่ใช่ array จริง ๆ `$unwind` จะมองค่า scalar เดี่ยวเป็น array หนึ่งสมาชิก แล้วปล่อย document ออกมาครั้งเดียว จึงค่อนข้างใจดีกับค่าที่ไม่ใช่ array
 
 <Callout title="unwind แผ่ออก แล้ว group พับกลับ">
-$unwind เปลี่ยนหนึ่ง document ที่มี array N สมาชิกให้เป็น N document โดยลำพังมันแค่ทำให้สตรีมพองตัว พลังที่แท้จริงของมันปรากฏเมื่อ $group ตามมาเพื่อสรุปข้ามสมาชิกที่ถูกแบนทั้งหมดเหล่านั้น ตั้ง preserveNullAndEmptyArrays เมื่อ document ที่มี array ว่างต้องรอด
+$unwind เปลี่ยน document หนึ่งก้อนที่มี array N สมาชิกให้เป็น N document ถ้าใช้เดี่ยว ๆ ก็แค่ทำให้ stream พองขึ้น พลังจริงจะโผล่ตอนมี $group ตามมาสรุปข้ามสมาชิกที่แบนออกมาแล้ว และอย่าลืมตั้ง preserveNullAndEmptyArrays เมื่อ document ที่ array ว่างต้องรอด
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `$unwind` เพื่อวิเคราะห์ทีละสมาชิกของ array | ทำให้ `$group`/`$match` มองเห็นและสรุปข้ามสมาชิกแต่ละตัวได้ ซึ่งทำกับ array ทั้งก้อนตรง ๆ ไม่ได้ | จำนวน document ในสตรีมเพิ่มขึ้นตามจำนวนสมาชิก array ยิ่ง array ใหญ่ยิ่งเปลือง CPU/memory ระหว่าง stage |
-| ไม่ unwind ประมวลผล array เป็นก้อนด้วย operator อย่าง `$reduce`/`$map` | จำนวน document คงเดิม ไม่มีสตรีมขยายตัว | expression ซับซ้อนกว่า อ่านและ debug ยากกว่าการ unwind แล้วใช้ `$group` |
+| `$unwind` เพื่อวิเคราะห์ทีละสมาชิกของ array | ทำให้ `$group`/`$match` มองเห็นและสรุปข้ามสมาชิกแต่ละตัวได้ ซึ่งทำกับ array ทั้งก้อนตรง ๆ ไม่ได้ | จำนวน document ใน stream เพิ่มขึ้นตามจำนวนสมาชิก array ยิ่ง array ใหญ่ยิ่งเปลือง CPU/memory ระหว่าง stage |
+| ไม่ unwind ประมวลผล array เป็นก้อนด้วย operator อย่าง `$reduce`/`$map` | จำนวน document คงเดิม ไม่มี stream ขยายตัว | expression ซับซ้อนกว่า อ่านและ debug ยากกว่าการ unwind แล้วใช้ `$group` |
 | ตั้ง `preserveNullAndEmptyArrays: true` | document ที่ array ว่างหรือหายไปยังคงอยู่ในผลลัพธ์ ความถูกต้องของรายงานสูงขึ้น | ต้องเขียน syntax แบบยาว (object form) แทน string form สั้น ๆ และต้อง handle ฟิลด์ที่อาจไม่มีอยู่ใน stage ถัดไป |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
-- **`$unwind` ก่อน `$match` ที่กรองด้วยฟิลด์นอก array** — ทำให้ document ระเบิดออกมาก่อนโดยไม่จำเป็น ควร `$match` เท่าที่ทำได้ก่อน `$unwind` เพื่อลดจำนวน document ที่ต้องแบน
-- **ลืมว่าค่า default ของ `$unwind` ทิ้ง document ที่ array ว่างหรือหายไปแบบเงียบ ๆ** — ถ้าจำนวนแถวหลัง unwind น้อยกว่าที่คาด มักเป็นเพราะ document ที่ไม่มี array หรือ array ว่างถูกดรอปไปโดยไม่มี error ใด ๆ
-- **ไม่ตระหนักว่าการ unwind แล้วไม่ตามด้วย `$group` คือการทวีคูณข้อมูลเปล่า ๆ** — ถ้าปลายทางสุดท้ายไม่ได้สรุปกลับ ผลลัพธ์ที่ client ได้รับจะเป็น document ซ้ำ ๆ กันหลายเท่าโดยไม่มีประโยชน์เพิ่ม
+- **วาง `$unwind` ไว้ก่อน `$match` ที่กรองด้วยฟิลด์นอก array** — document ระเบิดออกมาก่อนโดยไม่จำเป็น ควร `$match` ให้มากที่สุดก่อน `$unwind` เพื่อลดจำนวน document ที่ต้องแบน
+- **ลืมว่า default ของ `$unwind` ทิ้ง document ที่ array ว่างหรือไม่มีอยู่แบบเงียบ ๆ** — ถ้าจำนวนแถวหลัง unwind น้อยกว่าที่คาด มักเป็นเพราะ document พวกนั้นหลุดไปโดยไม่มี error เตือน
+- **unwind แล้วไม่ตามด้วย `$group`** — ถ้าปลายทางไม่ได้สรุปกลับ ก็แค่ทวีคูณข้อมูลเปล่า ๆ client จะได้ document ซ้ำ ๆ หลายเท่าโดยไม่ได้ประโยชน์อะไรเพิ่ม
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Analytics dashboard สำหรับ order ที่มีหลายรายการสินค้า** — ก่อนจะสรุป "ยอดขายต่อสินค้า" ระบบต้อง `$unwind` array รายการสินค้าในแต่ละออเดอร์ก่อน แล้วค่อย `$group` ตามชื่อสินค้า เพื่อให้เห็นยอดขายจริงในระดับ item ไม่ใช่ระดับออเดอร์
 >
@@ -278,32 +280,32 @@ export const quizUnwind = [
     q: 'document มี array items ที่มี 3 สมาชิก $unwind บน items ผลิตอะไร?',
     options: [
       'หนึ่ง document โดย array ไม่เปลี่ยนแปลง',
-      'สาม document แต่ละอันพาหนึ่งสมาชิกใน items',
+      'สาม document แต่ละอันถือหนึ่งสมาชิกใน items',
       'หนึ่ง document โดยลบ items ออก',
-      'ข้อผิดพลาด เพราะ items เป็น array',
+      'error เพราะ items เป็น array',
     ],
     answer: 1,
   },
   {
-    q: 'stage ใดที่มักตามหลัง $unwind บ่อยที่สุดเพื่อสรุปสมาชิกที่ถูกแบน?',
+    q: 'stage ไหนมักตามหลัง $unwind บ่อยที่สุด เพื่อสรุปสมาชิกที่แบนออกมา?',
     options: ['$project', '$group', '$lookup', '$match'],
     answer: 1,
   },
   {
-    q: 'โดยค่าเริ่มต้น document ที่ array ที่ถูก unwind ว่างหรือหายไปจะเกิดอะไรขึ้น?',
+    q: 'ค่า default แล้ว document ที่ array ที่ unwind ว่างหรือไม่มีอยู่ จะเกิดอะไรขึ้น?',
     options: [
-      'มันถูกเก็บไว้โดยตั้งฟิลด์เป็น null',
-      'มันถูกทิ้งออกจากผลลัพธ์',
-      'มันทำให้ aggregation ล้มเหลว',
-      'มันถูกปล่อยออกมาหนึ่งครั้งพร้อม array ว่าง',
+      'ยังอยู่ โดยตั้งฟิลด์เป็น null',
+      'หลุดออกจากผลลัพธ์ไปเลย',
+      'ทำให้ aggregation ล้มเหลว',
+      'ถูกปล่อยออกมาหนึ่งครั้งพร้อม array ว่าง',
     ],
     answer: 1,
   },
   {
-    q: 'คุณเก็บ document ที่มี array ว่างหรือหายไปไว้ในผลลัพธ์อย่างไร?',
+    q: 'จะเก็บ document ที่ array ว่างหรือไม่มีอยู่ ไว้ในผลลัพธ์ได้อย่างไร?',
     options: [
       'เพิ่ม $match ก่อน $unwind',
-      'ใช้รูปแบบยาวโดยตั้ง preserveNullAndEmptyArrays เป็น true',
+      'ใช้ object form แล้วตั้ง preserveNullAndEmptyArrays เป็น true',
       'ตั้ง array เป็น null ก่อน',
       'ทำไม่ได้',
     ],

@@ -1,6 +1,6 @@
 ---
 title: Replica sets
-description: primary และ secondaries ของมันอยู่ในสภาพซิงค์กันผ่าน oplog อย่างไร และ election อัตโนมัติทำให้ฐานข้อมูลยังใช้งานได้เมื่อ primary ล้มเหลวอย่างไร
+description: primary กับ secondaries ซิงค์กันผ่าน oplog อย่างไร และ election อัตโนมัติทำให้ฐานข้อมูลยังใช้งานได้เมื่อ primary ล้มเหลวอย่างไร
 sidebar:
   order: 2
 ---
@@ -11,11 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-replica set คือคำตอบของคำถามตรง ๆ ข้อหนึ่ง: จะเกิดอะไรขึ้นเมื่อเซิร์ฟเวอร์ที่ถือข้อมูลของคุณหยุดตอบสนอง? เมื่อมี `mongod` ตัวเดียว คำตอบคือแอปพลิเคชันของคุณจะล่มจนกว่าจะมีคนแก้เครื่องนั้น เมื่อมี replica set คำตอบคือสำเนาอีกชุดจะเข้ามาทำหน้าที่แทนภายในไม่กี่วินาที และผู้ใช้ส่วนใหญ่จะไม่รู้สึกถึงมันเลย **replica set** คือกลุ่มของ `mongod` instances ที่ถือข้อมูลชุดเดียวกันทั้งหมด — หนึ่ง **primary** ที่รับทุก write และหนึ่งหรือมากกว่า **secondaries** ที่เก็บสำเนาของตัวเองให้ตามทันมัน
+replica set คือคำตอบของคำถามตรง ๆ ข้อหนึ่ง: จะเกิดอะไรขึ้นเมื่อ server ที่ถือข้อมูลของคุณหยุดตอบสนอง? เมื่อมี `mongod` ตัวเดียว คำตอบคือแอปพลิเคชันของคุณจะล่มจนกว่าจะมีคนแก้เครื่องนั้น เมื่อมี replica set คำตอบคือสำเนาอีกชุดจะเข้ามาทำหน้าที่แทนภายในไม่กี่วินาที และผู้ใช้ส่วนใหญ่แทบไม่รู้สึกอะไรเลย
+
+**replica set** คือกลุ่มของ `mongod` instance ที่ถือข้อมูลชุดเดียวกันทั้งหมด — มี **primary** หนึ่งตัวรับทุก write และ **secondaries** อีกหนึ่งตัวขึ้นไปที่คอยไล่สำเนาของตัวเองให้ตามทัน
 
 ## Primary, secondaries และ oplog
 
-มีแต่ primary เท่านั้นที่รับ write แต่ละ write ที่มันทำยังถูกบันทึกลงใน capped collection พิเศษที่เรียกว่า **oplog** — operations log ทุก secondary อ่าน oplog ของ primary อย่างต่อเนื่องและเล่นซ้ำ operations เหล่านั้นกับข้อมูลของตัวเอง เพื่อให้สำเนาบรรจบกัน นี่คือเหตุผลที่ secondaries เป็นแบบ *eventually* consistent: มี lag เล็กน้อยระหว่างที่ write ลงบน primary กับที่ write เดียวกันนั้นถูกเล่นซ้ำในที่อื่น ๆ ทั้งหมด
+มีแต่ primary เท่านั้นที่รับ write ทุก write ที่ primary ทำจะถูกบันทึกลง capped collection พิเศษชื่อ **oplog** — operations log ทุก secondary อ่าน oplog ของ primary อย่างต่อเนื่องและเล่นซ้ำ operations เหล่านั้นกับข้อมูลของตัวเอง เพื่อให้สำเนาบรรจบกัน นี่คือเหตุผลที่ secondaries เป็นแบบ *eventually* consistent: มี lag เล็กน้อยระหว่างที่ write ลงบน primary กับตอนที่ write เดียวกันไปเล่นซ้ำครบทุกที่
 
 export const replicaFlow = `flowchart TB
   Client["Application writes"] --> P["Primary"]
@@ -25,13 +27,13 @@ export const replicaFlow = `flowchart TB
   P -. "heartbeats every 2s" .- S1
   P -. "heartbeats every 2s" .- S2`
 
-<Mermaid code={replicaFlow} title="primary รับทุก write และบันทึกมันไว้ ส่วน secondaries อ่าน oplog ต่อท้ายและเล่นซ้ำเพื่อให้ซิงค์กัน" />
+<Mermaid code={replicaFlow} title="primary รับทุก write แล้วบันทึกลง oplog ส่วน secondaries คอยอ่าน oplog ต่อท้ายและเล่นซ้ำเพื่อให้ซิงค์กัน" />
 
-สมาชิกยังแลกเปลี่ยนข้อความ **heartbeat** เล็ก ๆ กันสองสามครั้งต่อนาที heartbeat เหล่านี้คือวิธีที่ set สังเกตเห็นปัญหา: ถ้า secondaries หยุดได้ยินเสียงจาก primary พวกมันจะสรุปว่ามันล้มเหลวและเริ่ม election
+สมาชิกยังแลกเปลี่ยนข้อความ **heartbeat** เล็ก ๆ กันสองสามครั้งต่อนาที heartbeat เหล่านี้คือวิธีที่ set สังเกตเห็นปัญหา: ถ้า secondaries ไม่ได้ยินเสียงจาก primary ก็จะสรุปว่า primary ล้มแล้ว และเริ่ม election
 
 ## Election อัตโนมัติ
 
-เมื่อ primary หายไป สมาชิกที่เหลือจะลงคะแนนเสียง secondary ที่มีสิทธิ์จะเสนอชื่อตัวเอง คนอื่นลงคะแนน และผู้สมัครที่ได้คะแนนเสียงข้างมากจะกลายเป็น primary ใหม่ นี่คือหัวใจของ high availability — มันเกิดขึ้นโดยอัตโนมัติ โดยปกติภายในประมาณสิบถึงสิบสองวินาที โดยไม่มีใครต้องถูกตามตัวตอนตีสาม
+เมื่อ primary หายไป สมาชิกที่เหลือจะลงคะแนนเสียง secondary ที่มีสิทธิ์จะเสนอชื่อตัวเอง คนอื่นลงคะแนน และผู้สมัครที่ได้คะแนนเสียงข้างมากจะกลายเป็น primary ใหม่ นี่คือหัวใจของ high availability ทั้งหมดเกิดขึ้นอัตโนมัติ โดยปกติภายในประมาณสิบถึงสิบสองวินาที โดยไม่มีใครต้องถูกตามตัวตอนตีสาม
 
 export const electionFlow = `flowchart TB
   P["Primary fails — heartbeats stop"] --> Detect["Secondaries notice the silence"]
@@ -46,7 +48,7 @@ export const electionFlow = `flowchart TB
 
 ## การเชื่อมต่อกับ replica set
 
-driver ไม่ได้เชื่อมต่อกับเซิร์ฟเวอร์ตายตัวหนึ่งตัว — มันเชื่อมต่อกับ *set* คุณระบุสมาชิกสองสามตัวเป็น seeds และตั้งชื่อ set ด้วย `replicaSet=` จากนั้น driver ค้นพบ topology ทั้งหมดเอง หา primary ปัจจุบันได้ด้วยตัวมันเอง และตาม primary โดยอัตโนมัติเมื่อข้าม election
+driver ไม่ได้ต่อกับ server ตัวใดตัวหนึ่งตายตัว แต่ต่อกับ *set* คุณระบุสมาชิกสองสามตัวเป็น seeds และตั้งชื่อ set ด้วย `replicaSet=` จากนั้น driver ค้นพบ topology ทั้งหมดเอง หา primary ปัจจุบันได้เอง และตาม primary ตัวใหม่โดยอัตโนมัติหลัง election
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -89,7 +91,7 @@ driver ไม่ได้เชื่อมต่อกับเซิร์ฟ�
   </TabItem>
 </Tabs>
 
-โดยค่าเริ่มต้น การอ่านก็ไปที่ primary เช่นกัน ซึ่งทำให้มัน strongly consistent ถ้าคุณยอมรับความล้าสมัยเล็กน้อยได้ — เช่น สำหรับ analytics หรือ feed ที่ไม่จำเป็นต้องได้ write ล่าสุดที่สุด — คุณสามารถบอก driver ให้อ่านจาก secondaries ด้วย read preference เช่น `secondaryPreferred` เพื่อกระจายภาระการอ่านออกจาก primary
+ค่า default การอ่านก็ไปที่ primary เหมือนกัน ผลคือได้ strongly consistent ถ้าคุณยอมรับความล้าสมัยเล็กน้อยได้ — เช่น สำหรับ analytics หรือ feed ที่ไม่จำเป็นต้องได้ write ล่าสุดที่สุด — คุณสามารถบอก driver ให้อ่านจาก secondaries ด้วย read preference เช่น `secondaryPreferred` เพื่อกระจายภาระการอ่านออกจาก primary
 
 ## การตรวจสอบ set
 
@@ -99,7 +101,7 @@ driver ไม่ได้เชื่อมต่อกับเซิร์ฟ�
 rs.status()
 ```
 
-คำตอบที่ตัดทอนแล้วแสดงสมาชิกแต่ละตัวพร้อมบทบาทของมันในฟิลด์ `stateStr`:
+ผลลัพธ์แบบย่อแสดงสมาชิกแต่ละตัวพร้อมบทบาทในฟิลด์ `stateStr`:
 
 ```json
 {
@@ -118,15 +120,15 @@ rs.status()
 ## เคล็ดลับและข้อควรระวัง
 
 - ให้มีจำนวนสมาชิกที่ลงคะแนนเป็น **เลขคี่** เพื่อให้การล้มเหลวครั้งเดียวเหลือเสียงข้างมากที่ชัดเจนเสมอ สามตัวคือขั้นต่ำที่นิยมใช้สำหรับ production
-- **arbiter** คือสมาชิกขนาดเบาที่ลงคะแนนแต่ไม่ถือข้อมูล มันสามารถตัดสินกรณีเสมอได้อย่างประหยัด แต่มันกลายเป็น primary ไม่ได้และไม่เพิ่มความทนทาน ดังนั้นให้เลือก secondary จริงที่ถือข้อมูลเมื่อคุณมีพื้นที่จัดเก็บพอ
+- **arbiter** คือสมาชิกขนาดเบาที่ลงคะแนนแต่ไม่ถือข้อมูล ช่วยตัดสินกรณีคะแนนเสมอได้แบบประหยัด แต่ขึ้นเป็น primary ไม่ได้ และไม่ได้เพิ่มความทนทานของข้อมูล ดังนั้นให้เลือก secondary จริงที่ถือข้อมูลเมื่อคุณมีพื้นที่จัดเก็บพอ
 - secondaries มี lag ถ้าแอปพลิเคชันของคุณอ่าน write ของตัวเองทันทีหลังจากเขียน ให้อ่านจาก primary หรือใช้ read concern ที่รอให้ write ทำ replication เสร็จ ไม่เช่นนั้นคุณอาจยังไม่เห็นการเปลี่ยนแปลงของตัวเอง
-- replica set ป้องกัน node ที่ล้มเหลว ไม่ได้ป้องกันคิวรีที่ผิดหรือ collection ที่ถูกลบทิ้ง — สิ่งเหล่านั้นถูก replicate ตามไปด้วย replication คือ availability ไม่ใช่ backup
+- replica set ป้องกัน node ที่ล้มเหลว ไม่ได้ป้องกัน query ที่ผิดหรือ collection ที่ถูกลบทิ้ง — สิ่งเหล่านั้นถูก replicate ตามไปด้วย replication คือ availability ไม่ใช่ backup
 
 <Callout title="Availability ผ่านสำเนาและการลงคะแนน">
 replica set เก็บข้อมูลของคุณหลายสำเนาให้ซิงค์กันผ่าน oplog และเลือก primary ใหม่ด้วยคะแนนเสียงข้างมากเมื่อตัวเดิมล้มเหลว ใช้จำนวนผู้ลงคะแนนเป็นเลขคี่เพื่อให้การล้มเหลวครั้งเดียวไม่เคยทำให้เสมอกัน
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -134,13 +136,13 @@ replica set เก็บข้อมูลของคุณหลายสำ�
 | อ่านจาก secondaries | กระจายภาระ read ออกจาก primary | ข้อมูลที่ได้อาจ stale เพราะ replication lag |
 | อ่านจาก primary เท่านั้น | Consistency สูงสุด อ่าน write ล่าสุดเสมอ | ไม่ได้ประโยชน์จากการกระจายโหลด primary รับภาระเต็ม |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **คิดว่า write scale ได้ด้วยการเพิ่ม secondary** — secondary ช่วยกระจายเฉพาะ read เท่านั้น ทุก write ยังคงไปที่ primary ตัวเดียวเสมอ ถ้าต้องการ scale write ต้องไปที่ sharding ไม่ใช่การเพิ่ม secondary
 - **วางสมาชิกทุกตัวไว้ใน availability zone หรือ data center เดียวกัน** — replica set ป้องกัน node ล้มเหลว แต่ถ้าทุก node อยู่ที่เดียวกัน เมื่อ AZ ทั้งก้อนล่ม set ทั้งชุดก็ล่มไปด้วย ต้องกระจายสมาชิกข้าม AZ หรือ data center จริง ๆ
 - **คิดว่า write ปลอดภัยแล้วทันทีที่ primary รับ** — ตั้งแต่ MongoDB 5.0 (2021) เป็นต้นมา write concern เริ่มต้นคือ `w: "majority"` คือรอให้สมาชิกส่วนใหญ่ที่มีสิทธิ์ลงคะแนน (voting members) ยืนยันก่อน ไม่ใช่ยืนยันแค่ที่ primary เท่านั้น ความผิดพลาดคือการเข้าใจว่า write durable แล้วตั้งแต่ primary รับ ทั้งที่ค่า default จะรอ majority ให้อยู่แล้ว ถ้าไปตั้ง `w: 1` เอง write ที่ยังไม่ replicate อาจหายไปพร้อม election ได้ ข้อมูลสำคัญจึงควรคง `{ w: "majority" }` ไว้
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Uber** — ในช่วงที่ใช้ MongoDB สำหรับบาง service พึ่ง replica set กับ automatic failover เพื่อให้ trip data ยังเขียนต่อได้แม้ node ใดตัวหนึ่งล้มเหลวกลางดึกโดยไม่ต้องปลุกใครมาแก้
 >
@@ -148,12 +150,12 @@ replica set เก็บข้อมูลของคุณหลายสำ�
 
 export const quizReplica = [
   {
-    q: 'secondaries เก็บข้อมูลของพวกมันให้ซิงค์กับ primary อย่างไร?',
+    q: 'secondaries ทำให้ข้อมูลตัวเองซิงค์กับ primary ได้อย่างไร?',
     options: [
-      'พวกมันคัดลอกไฟล์ของ primary ตามตารางเวลาที่กำหนดไว้',
-      'พวกมันอ่าน oplog ของ primary ต่อท้ายและเล่นซ้ำแต่ละ operation',
-      'พวกมันส่งต่อทุกการอ่านไปยัง primary',
-      'พวกมัน re-import ทั้ง collection ทุกนาที',
+      'คัดลอกไฟล์ของ primary ตามตารางเวลาที่ตั้งไว้',
+      'อ่าน oplog ของ primary ต่อท้ายแล้วเล่นซ้ำทีละ operation',
+      'ส่งต่อทุกการอ่านไปที่ primary',
+      're-import ทั้ง collection ใหม่ทุกนาที',
     ],
     answer: 1,
   },
@@ -170,7 +172,7 @@ export const quizReplica = [
   {
     q: 'ทำไมจึงแนะนำให้มีจำนวนสมาชิกที่ลงคะแนนเป็นเลขคี่?',
     options: [
-      'มันทำให้ oplog เล็กลง',
+      'ทำให้ oplog เล็กลง',
       'เพื่อให้การล้มเหลวครั้งเดียวยังเหลือเสียงข้างมากที่ชัดเจนและหลีกเลี่ยงการลงคะแนนที่เสมอกัน',
       'driver เชื่อมต่อได้เฉพาะกับ set ที่มีจำนวนเป็นเลขคี่',
       'MongoDB ไม่อนุญาตให้ใช้เลขคู่',
@@ -181,7 +183,7 @@ export const quizReplica = [
     q: 'การอ่านจาก secondary อาจคืนข้อมูลที่ล้าสมัยเล็กน้อยเพราะ:',
     options: [
       'secondaries เก็บสำเนาข้อมูลแบบบีบอัด',
-      'มี replication lag ระหว่าง write บน primary กับการเล่นซ้ำของมันบน secondaries',
+      'มี replication lag ระหว่าง write บน primary กับตอนเล่นซ้ำบน secondaries',
       'secondaries ถือ document เพียงครึ่งเดียว',
       'secondaries ปฏิเสธการอ่านทั้งหมด',
     ],

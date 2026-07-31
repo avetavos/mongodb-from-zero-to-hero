@@ -1,6 +1,6 @@
 ---
 title: Performance และ profiling
-description: หาคิวรีที่ช้าด้วย database profiler, อ่าน explain ซ้ำ, เก็บ working set ไว้ใน RAM และใช้วิธีแก้ไขทั่วไปที่ทำให้คิวรีกลับมาเร็วอีกครั้ง
+description: หา query ที่ช้าด้วย database profiler, อ่าน explain ซ้ำ, เก็บ working set ไว้ใน RAM และใช้วิธีแก้ไขทั่วไปที่ทำให้ query กลับมาเร็วอีกครั้ง
 sidebar:
   order: 4
 ---
@@ -11,11 +11,11 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-เมื่อฐานข้อมูลรู้สึกช้า สิ่งล่อใจคือการเดา: เพิ่มเซิร์ฟเวอร์ เพิ่มหน่วยความจำ เพิ่ม index สักที่แล้วหวังว่าจะดี วิธีของมืออาชีพคือตรงกันข้าม — *วัดก่อน* MongoDB ให้เครื่องมือสองอย่างสำหรับสิ่งนั้น **database profiler** บันทึก operations ที่รันจริงและแต่ละอันใช้เวลานานเท่าไร เพื่อให้คุณเห็นว่าคิวรีไหนคือปัญหา และ `explain` บอกคุณว่า *ทำไม* คิวรีหนึ่งจึงช้า โดยแสดง plan ที่เซิร์ฟเวอร์เลือก เมื่อใช้ร่วมกันพวกมันเปลี่ยนงาน performance จากการเดาสุ่มเป็นการสืบสวนสั้น ๆ
+เมื่อฐานข้อมูลรู้สึกช้า สิ่งล่อใจคือการเดา: เพิ่ม server เพิ่มหน่วยความจำ เพิ่ม index สักที่แล้วหวังว่าจะดี วิธีของมืออาชีพคือตรงกันข้าม — *วัดก่อน* MongoDB ให้เครื่องมือสองอย่างสำหรับสิ่งนั้น **database profiler** บันทึก operations ที่รันจริงและแต่ละอันใช้เวลานานเท่าไร เพื่อให้คุณเห็นว่า query ไหนคือปัญหา และ `explain` บอกคุณว่า *ทำไม* query หนึ่งจึงช้า โดยแสดง plan ที่ server เลือก ใช้สองอย่างคู่กันแล้ว งาน performance จะเปลี่ยนจากการเดาสุ่มเป็นการสืบสวนสั้น ๆ
 
 ## เวลาหายไปไหน
 
-คิวรีที่ช้าส่วนใหญ่ลงเอยที่หนึ่งในสองสาเหตุ: คิวรีอ่าน document มากกว่าที่มันคืนกลับมาก หรือข้อมูลที่มันต้องการไม่ได้อยู่ในหน่วยความจำและต้องดึงมาจากดิสก์ ภาพแรกชัดเจนที่สุด คิวรีเดียวกัน เมื่อมีและไม่มี index ที่รองรับ ทำงานในปริมาณที่แตกต่างกันอย่างมหาศาล:
+query ที่ช้าส่วนใหญ่ลงเอยที่หนึ่งในสองสาเหตุ: query อ่าน document มากกว่าที่คืนกลับมาก หรือข้อมูลที่ต้องใช้ไม่ได้อยู่ในหน่วยความจำ เลยต้องไปดึงจากดิสก์ ภาพแรกชัดเจนที่สุด query เดียวกัน เมื่อมีและไม่มี index ที่รองรับ ทำงานในปริมาณที่แตกต่างกันอย่างมหาศาล:
 
 export const latencyFlow = `flowchart TB
   subgraph Slow["No index — COLLSCAN"]
@@ -29,13 +29,13 @@ export const latencyFlow = `flowchart TB
     F2 --> O2["Return 12 docs — fast"]
   end`
 
-<Mermaid code={latencyFlow} title="หากไม่มี index คิวรีจะอ่านทุกอย่างและทิ้งส่วนใหญ่ไป; เมื่อมี index มันจะอ่านเฉพาะสิ่งที่มันคืนกลับ" />
+<Mermaid code={latencyFlow} title="หากไม่มี index query จะอ่านทุกอย่างและทิ้งส่วนใหญ่ไป; เมื่อมี index จะอ่านเฉพาะสิ่งที่คืนกลับ" />
 
-สาเหตุที่สองนั้นแยบยลกว่า: **working set** นั่นคือส่วนของข้อมูลและ index ที่คิวรีแตะต้องจริงในแต่ละวัน เมื่อ working set พอดีกับ RAM การอ่านจะได้รับการตอบจากหน่วยความจำและฐานข้อมูลบินฉิว เมื่อมันล้นเกิน RAM ทุกครั้งที่ miss จะกลายเป็นการอ่านดิสก์ และ latency ไต่ขึ้นแม้ว่าคิวรีเองจะไม่ได้เปลี่ยนแปลง การเก็บ working set ไว้ในหน่วยความจำ — ด้วยการเพิ่ม RAM หรือด้วยการอ่านข้อมูลน้อยลงต่อคิวรี — คือหนึ่งในคันโยกที่ใหญ่ที่สุดที่คุณมี
+สาเหตุที่สองนั้นแยบยลกว่า: **working set** นั่นคือส่วนของข้อมูลและ index ที่ query แตะต้องจริงในแต่ละวัน เมื่อ working set พอดีกับ RAM การอ่านจะได้รับการตอบจากหน่วยความจำและฐานข้อมูลบินฉิว เมื่อ working set ล้น RAM ทุกครั้งที่ miss จะกลายเป็นการอ่านดิสก์ และ latency ไต่ขึ้นแม้ว่า query เองจะไม่ได้เปลี่ยนแปลง การเก็บ working set ไว้ในหน่วยความจำ — ด้วยการเพิ่ม RAM หรือด้วยการอ่านข้อมูลน้อยลงต่อ query — คือหนึ่งในคันโยกที่ใหญ่ที่สุดที่คุณมี
 
 ## การเปิด profiler
 
-profiler เขียน document หนึ่งอันต่อ operation ที่ช้าหนึ่งครั้งลงใน collection พิเศษ `system.profile` ในแต่ละฐานข้อมูล คุณตั้งค่ามันต่อฐานข้อมูล Level `1` บันทึกเฉพาะ operations ที่ช้ากว่า threshold ที่คุณเลือกเป็นมิลลิวินาที; level `2` บันทึกทุกอย่าง (มีประโยชน์ตอน development แต่ส่งเสียงรบกวนมากเกินไปใน production); level `0` ปิดมัน
+profiler เขียน document หนึ่งอันต่อ operation ที่ช้าหนึ่งครั้งลงใน collection พิเศษ `system.profile` ในแต่ละฐานข้อมูล คุณตั้งค่าแยกต่อฐานข้อมูล Level `1` บันทึกเฉพาะ operations ที่ช้ากว่า threshold ที่คุณเลือกเป็นมิลลิวินาที; level `2` บันทึกทุกอย่าง (มีประโยชน์ตอน development แต่ส่งเสียงรบกวนมากเกินไปใน production); level `0` ปิด profiler
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -80,7 +80,7 @@ profiler เขียน document หนึ่งอันต่อ operation �
 
 ## การอ่าน system.profile
 
-เมื่อ profiler เปิดอยู่ คุณคิวรี `system.profile` เหมือน collection อื่น ๆ เรียงตามเวลาจากมากไปน้อยและดู operations ล่าสุดที่ช้าที่สุด ฟิลด์ที่ต้องจับตาคือ `millis` (ใช้เวลานานเท่าไร), `docsExamined` เทียบกับ `nreturned` (อ่าน document กี่อันเทียบกับที่คืน) และ `planSummary` (ว่ามันใช้ index หรือ collection scan):
+เมื่อ profiler เปิดอยู่ คุณ query `system.profile` เหมือน collection อื่น ๆ เรียงตามเวลาจากมากไปน้อยและดู operations ล่าสุดที่ช้าที่สุด ฟิลด์ที่ต้องจับตาคือ `millis` (ใช้เวลานานเท่าไร), `docsExamined` เทียบกับ `nreturned` (อ่าน document กี่อันเทียบกับที่คืน) และ `planSummary` (บอกว่าใช้ index หรือ collection scan):
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -154,7 +154,7 @@ profile entry เดียวเล่าเรื่องราวทั้ง
 }
 ```
 
-เมื่อ `docsExamined` ใหญ่กว่า `nreturned` มาก แสดงว่าคุณพบปัญหาแล้ว ขั้นตอนต่อไปคือ `explain` บนคิวรีนั้นเป๊ะ ๆ เพื่อยืนยัน plan แล้วจึงแก้ไข:
+เมื่อ `docsExamined` ใหญ่กว่า `nreturned` มาก แสดงว่าคุณพบปัญหาแล้ว ขั้นตอนต่อไปคือ `explain` บน query นั้นเป๊ะ ๆ เพื่อยืนยัน plan แล้วจึงแก้ไข:
 
 ```js
 db.members.find({ joined: 2023 }).explain("executionStats")
@@ -162,61 +162,61 @@ db.members.find({ joined: 2023 }).explain("executionStats")
 
 ## วิธีแก้ไขทั่วไป
 
-คิวรีที่ช้าส่วนใหญ่หายได้ด้วยหนึ่งในไม่กี่ท่าต่อไปนี้:
+query ที่ช้าส่วนใหญ่หายได้ด้วยหนึ่งในไม่กี่ท่าต่อไปนี้:
 
-- **เพิ่ม index** บนฟิลด์ที่คิวรีใช้ filter หรือ sort เพื่อให้เซิร์ฟเวอร์ seek แทนที่จะ scan นี่คือการแก้ไขที่ส่งผลกระทบสูงสุดเพียงอย่างเดียวและเป็นเหตุผลที่ profiler มีอยู่
-- **Project ให้น้อยลง** ขอเฉพาะฟิลด์ที่คุณต้องการแทนที่จะเอาทั้ง document ซึ่งลด bytes ที่ต้องเคลื่อนย้ายและสามารถทำให้คิวรีถูกตอบจาก index ได้ทั้งหมด
-- **หลีกเลี่ยงผลลัพธ์ที่ไม่มีขอบเขต** ใช้ `limit` กับคิวรีที่อาจ match document จำนวนมากเสมอ; การกวาดทั้ง collection โดยไม่ตั้งใจนั้นช้าไม่ว่า index จะดีแค่ไหน
-- **ปรับขนาด connection ให้พอเหมาะ** driver ดูแล **connection pool** และนำ connection มาใช้ซ้ำแทนที่จะเปิดอันใหม่ต่อ request การใช้ client ที่แชร์กันซ้ำ — ไม่ใช่สร้างอันใหม่ต่อการเรียกแต่ละครั้ง — ทำให้ pool นั้นแข็งแรงและหลีกเลี่ยงการใช้ขีดจำกัด connection ของเซิร์ฟเวอร์จนหมด
+- **เพิ่ม index** บนฟิลด์ที่ query ใช้ filter หรือ sort เพื่อให้ server seek แทนที่จะ scan นี่คือการแก้ไขที่ส่งผลกระทบสูงสุดเพียงอย่างเดียวและเป็นเหตุผลที่ profiler มีอยู่
+- **Project ให้น้อยลง** ขอเฉพาะฟิลด์ที่คุณต้องการแทนที่จะเอาทั้ง document ซึ่งลด bytes ที่ต้องเคลื่อนย้ายและสามารถทำให้ query ถูกตอบจาก index ได้ทั้งหมด
+- **หลีกเลี่ยงผลลัพธ์ที่ไม่มีขอบเขต** ใช้ `limit` กับ query ที่อาจ match document จำนวนมากเสมอ; การกวาดทั้ง collection โดยไม่ตั้งใจนั้นช้าไม่ว่า index จะดีแค่ไหน
+- **ปรับขนาด connection ให้พอเหมาะ** driver ดูแล **connection pool** และนำ connection มาใช้ซ้ำแทนที่จะเปิดอันใหม่ต่อ request การใช้ client ที่แชร์กันซ้ำ — ไม่ใช่สร้างอันใหม่ต่อการเรียกแต่ละครั้ง — ทำให้ pool นั้นแข็งแรงและหลีกเลี่ยงการใช้ขีดจำกัด connection ของ server จนหมด
 
 **ใน Compass / Atlas:** Compass มีมุมมอง *Performance Insights* และ *Explain Plan* ที่รัน `explain` ให้คุณและทำเครื่องหมาย collection scan ให้เห็นด้วยตา Atlas ไปไกลกว่าด้วย *Performance Advisor* ที่เฝ้าดู traffic จริงของคุณและแนะนำ index ที่ควรสร้าง และแท็บ *Profiler* ที่นำ operations ที่ช้าที่สุดออกมาแสดงโดยที่คุณไม่ต้องไปแตะ `system.profile` ด้วยมือ
 
 ## เคล็ดลับและข้อควรระวัง
 
 - ทำ profile ที่ level `1` พร้อม `slowms` ที่สมเหตุสมผลใน production ไม่ใช่ level `2` — การบันทึกทุก operation เพิ่ม overhead และท่วม collection
-- `system.profile` เป็น collection แบบ **capped**: มันมีขนาดคงที่และ entry เก่า ๆ จะหลุดออกไป อ่านมันทันทีหลังจากทำซ้ำคิวรีที่ช้า มิเช่นนั้นหลักฐานจะหมดอายุไป
-- profiler บอกคุณว่าคิวรี *ไหน* ช้า; `explain` บอกคุณว่า *ทำไม* ใช้พวกมันตามลำดับนั้น — หาตัวการก่อน แล้วจึงวินิจฉัยมัน
+- `system.profile` เป็น collection แบบ **capped**: ขนาดคงที่ และ entry เก่าจะหลุดออกไปเรื่อย ๆ ให้อ่านทันทีหลังจากทำซ้ำ query ที่ช้า ไม่อย่างนั้นหลักฐานจะหายไปก่อน
+- profiler บอกคุณว่า query *ไหน* ช้า; `explain` บอกคุณว่า *ทำไม* ใช้สองตัวนี้ตามลำดับ — หาตัวการก่อน แล้วค่อยวินิจฉัย
 - อัตราส่วน `docsExamined` ต่อ `nreturned` ที่สูงคือสัญญาณเดียวที่ชัดเจนที่สุดของการขาดหรือใช้ index ผิด ตั้งเป้าให้อ่านใกล้เคียงกับที่คุณคืน
 
 <Callout title="วัดก่อน แล้วจึงแก้">
-เปิด profiler เพื่อหาคิวรีที่ช้าจริง ๆ อ่าน system.profile หาอัตราส่วน docsExamined ต่อ nreturned ที่สูง ยืนยันด้วย explain แล้วแก้มัน — โดยปกติด้วยการเพิ่ม index ที่ถูกต้อง project ให้น้อยลง และจำกัดขอบเขตผลลัพธ์ อย่าเดาเรื่อง performance
+เปิด profiler เพื่อหา query ที่ช้าจริง ๆ อ่าน system.profile หาอัตราส่วน docsExamined ต่อ nreturned ที่สูง ยืนยันด้วย explain แล้วค่อยแก้ — ส่วนใหญ่คือเพิ่ม index ให้ถูกตัว project ให้น้อยลง และจำกัดขอบเขตผลลัพธ์ อย่าเดาเรื่อง performance
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Profiler level `2` (บันทึกทุก operation) | จับคิวรีช้าได้ทุกตัว รวมถึงที่เกิดเป็นครั้งคราว | overhead สูง และ `system.profile` ที่เป็น capped collection เต็มเร็ว ทำให้ entry เก่าหลุดก่อนได้ตรวจสอบ |
-| Profiler level `1` พร้อม `slowms` threshold | overhead ต่ำ เหมาะกับการเปิดทิ้งไว้ต่อเนื่องใน production | คิวรีที่ช้าแบบ intermittent หรือช้ากว่า threshold แค่นิดเดียวอาจหลุดจากการสังเกต |
+| Profiler level `2` (บันทึกทุก operation) | จับ query ช้าได้ทุกตัว รวมถึงที่เกิดเป็นครั้งคราว | overhead สูง และ `system.profile` ที่เป็น capped collection เต็มเร็ว ทำให้ entry เก่าหลุดก่อนได้ตรวจสอบ |
+| Profiler level `1` พร้อม `slowms` threshold | overhead ต่ำ เหมาะกับการเปิดทิ้งไว้ต่อเนื่องใน production | query ที่ช้าแบบ intermittent หรือช้ากว่า threshold แค่นิดเดียวอาจหลุดจากการสังเกต |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
-- **ตั้ง `slowms` ต่ำเกินไปใน production แล้วลืมผลที่ตามมา** — threshold ที่ต่ำเกินไปทำให้เกือบทุกคิวรีถูกบันทึก ได้ผลเหมือนเปิด level `2` โดยไม่ตั้งใจ overhead สูงขึ้นและ capped collection หมุนเวียนเร็วจนข้อมูลที่ต้องการหายไปก่อน
+- **ตั้ง `slowms` ต่ำเกินไปใน production แล้วลืมผลที่ตามมา** — threshold ที่ต่ำเกินไปทำให้เกือบทุก query ถูกบันทึก ได้ผลเหมือนเปิด level `2` โดยไม่ตั้งใจ overhead สูงขึ้นและ capped collection หมุนเวียนเร็วจนข้อมูลที่ต้องการหายไปก่อน
 - **เชื่อว่า index ที่มีอยู่ต้องถูก planner เลือกใช้เสมอ** — planner อาจยังเลือก `COLLSCAN` แม้มี index ถ้า selectivity ต่ำหรือ index ไม่ตรงกับ query pattern เช่นลำดับฟิลด์ผิดสำหรับ compound index ต้องเช็ค `explain` จริง ไม่ใช่สันนิษฐานจากการมี index อยู่
-- **มองแค่ latency เฉลี่ยแทนที่จะดู tail latency (p95/p99)** — ค่าเฉลี่ยกลบคิวรีที่ช้าเป็นครั้งคราวได้ง่าย ผู้ใช้ที่เจอคิวรีช้าที่สุดคือคนที่รู้สึกถึงปัญหาจริง ไม่ใช่ค่าเฉลี่ย
+- **มองแค่ latency เฉลี่ยแทนที่จะดู tail latency (p95/p99)** — ค่าเฉลี่ยกลบ query ที่ช้าเป็นครั้งคราวได้ง่าย ผู้ใช้ที่เจอ query ช้าที่สุดคือคนที่รู้สึกถึงปัญหาจริง ไม่ใช่ค่าเฉลี่ย
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Performance Advisor ใน MongoDB Atlas** — สแกน traffic จริงต่อเนื่องและแนะนำ index ที่ควรสร้างโดยอัตโนมัติ แทนที่ทีมต้องมานั่งไล่อ่าน `system.profile` ด้วยมือทุกวัน
 >
-> **ทีม e-commerce ช่วง Black Friday** — เปิด profiler level `1` พร้อม `slowms` ต่ำเป็นการชั่วคราวช่วง traffic พีค เพื่อจับคิวรีช้าที่โผล่มาเฉพาะตอนโหลดสูง แล้วปรับกลับเป็น threshold ปกติหลังผ่านช่วงพีคเพื่อคุม overhead
+> **ทีม e-commerce ช่วง Black Friday** — เปิด profiler level `1` พร้อม `slowms` ต่ำเป็นการชั่วคราวช่วง traffic พีค เพื่อจับ query ช้าที่โผล่มาเฉพาะตอนโหลดสูง แล้วปรับกลับเป็น threshold ปกติหลังผ่านช่วงพีคเพื่อคุม overhead
 
 export const quizPerf = [
   {
     q: 'database profiler ทำอะไร?',
     options: [
-      'มันสร้าง index ให้กับคิวรีที่ช้าโดยอัตโนมัติ',
-      'มันบันทึก operations และระยะเวลาของพวกมันลงใน collection system.profile',
-      'มัน replicate คิวรีที่ช้าไปยัง secondary',
-      'มันบล็อกคิวรีใด ๆ ที่ช้ากว่า slowms',
+      'สร้าง index ให้ query ที่ช้าโดยอัตโนมัติ',
+      'บันทึก operation พร้อมเวลาที่ใช้ลงใน collection system.profile',
+      'replicate query ที่ช้าไปยัง secondary',
+      'บล็อก query ที่ช้ากว่า slowms',
     ],
     answer: 1,
   },
   {
     q: 'ใน profile entry, docsExamined ใหญ่กว่า nreturned มาก สิ่งนี้บ่งบอกอะไร?',
     options: [
-      'คิวรีกำลังใช้ index ที่เหมาะสมที่สุด',
-      'คิวรีกำลังอ่าน document มากกว่าที่มันคืนมาก — น่าจะขาด index',
+      ' query กำลังใช้ index ที่เหมาะสมที่สุด',
+      'query อ่าน document มากกว่าที่คืนกลับมาก — น่าจะขาด index',
       'profiler ถูกตั้งค่าผิด',
       'ชุดผลลัพธ์เล็กเกินไปจนไม่สำคัญ',
     ],
@@ -226,19 +226,19 @@ export const quizPerf = [
     q: '"working set" คืออะไร?',
     options: [
       'รายการ index บน collection',
-      'ส่วนของข้อมูลและ index ที่คิวรีแตะต้องอย่างแข็งขัน ซึ่งคุณต้องการให้พอดีกับ RAM',
+      'ส่วนของข้อมูลและ index ที่ query แตะต้องอย่างแข็งขัน ซึ่งคุณต้องการให้พอดีกับ RAM',
       'backup ของ write ล่าสุด',
       'ชุดของ connection ใน pool ของ driver',
     ],
     answer: 1,
   },
   {
-    q: 'ทำไม driver จึงควรนำ client เดียวและ connection pool ของมันมาใช้ซ้ำ?',
+    q: 'ทำไม driver ควรใช้ client ตัวเดียวและ connection pool เดิมซ้ำ?',
     options: [
-      'มันรับประกัน strong consistency',
-      'การนำ connection ใน pool มาใช้ซ้ำหลีกเลี่ยงการเปิดอันใหม่ต่อ request และการใช้ขีดจำกัดของเซิร์ฟเวอร์จนหมด',
-      'มันเปิดใช้ sharding โดยอัตโนมัติ',
-      'มันปิด profiler',
+      'รับประกัน strong consistency',
+      'การนำ connection ใน pool มาใช้ซ้ำหลีกเลี่ยงการเปิดอันใหม่ต่อ request และการใช้ขีดจำกัดของ server จนหมด',
+      'เปิดใช้ sharding ให้อัตโนมัติ',
+      'ปิด profiler ให้',
     ],
     answer: 1,
   },

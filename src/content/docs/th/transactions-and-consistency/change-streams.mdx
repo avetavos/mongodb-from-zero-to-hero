@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-จนถึงตอนนี้เราเปลี่ยนแปลงข้อมูลและอ่านมันกลับมาด้วยตัวเอง แต่แอปพลิเคชันจำนวนมากต้อง **ตอบสนอง** ต่อการเปลี่ยนแปลงที่ส่วนอื่น ๆ ของระบบทำ — ส่งอีเมลเมื่อเพิ่มสมาชิก รีเฟรช cache เมื่อเรคคอร์ดเปลี่ยน push การอัปเดตไปยังแดชบอร์ดทันทีที่มีการจ่ายค่าปรับ การ polling collection ซ้ำแล้วซ้ำเล่าเพื่อจับการเปลี่ยนแปลงนั้นสิ้นเปลืองและช้า **change stream** แก้ปัญหานี้ได้โดยตรง: คุณเปิด stream ด้วย `watch()` แล้วฐานข้อมูลจะส่ง insert, update และ delete แต่ละรายการมาให้คุณตามที่มันเกิดขึ้น ตามลำดับ เป็นฟีดสด ๆ
+จนถึงตอนนี้เราเปลี่ยนข้อมูลแล้วอ่านกลับมาเองทั้งหมด แต่แอปพลิเคชันจำนวนมากต้อง **ตอบสนอง** ต่อการเปลี่ยนแปลงที่ส่วนอื่น ๆ ของระบบทำ — ส่งอีเมลเมื่อเพิ่มสมาชิก รีเฟรช cache เมื่อเรคคอร์ดเปลี่ยน push การอัปเดตไปยังแดชบอร์ดทันทีที่มีการจ่ายค่าปรับ การ polling collection ซ้ำแล้วซ้ำเล่าเพื่อจับการเปลี่ยนแปลงนั้นสิ้นเปลืองและช้า **change stream** แก้ปัญหานี้ได้โดยตรง: คุณเปิด stream ด้วย `watch()` แล้วฐานข้อมูลจะส่ง insert, update และ delete แต่ละรายการมาให้ตามลำดับที่เกิดจริง เป็นฟีดสด ๆ
 
-change stream สร้างขึ้นบน **oplog** ซึ่งเป็น log ภายในตัวเดียวกับที่ replica set ใช้คัดลอกการเขียนจาก primary ไปยัง secondary ของมัน เพราะ oplog บันทึกทุกการเปลี่ยนแปลงตามลำดับอยู่แล้ว change stream จึงเป็นเพียง reader ที่ประพฤติดีของ log นั้น ซึ่งเป็นเหตุผลที่ change stream — เช่นเดียวกับ transaction — ต้องใช้ **replica set** เพื่อรัน
+change stream สร้างขึ้นบน **oplog** ที่เป็น log ภายในตัวเดียวกับที่ replica set ใช้คัดลอกการเขียนจาก primary ไปยัง secondary เพราะ oplog บันทึกทุกการเปลี่ยนแปลงเรียงตามลำดับอยู่แล้ว change stream จึงเป็นแค่ reader ที่อ่าน log นั้นอย่างเรียบร้อย นั่นคือเหตุผลที่ change stream — เช่นเดียวกับ transaction — ต้องใช้ **replica set** เพื่อรัน
 
 ## การเปิด stream บน collection
 
-ตรงนี้เรา watch collection `members` และตอบสนองต่อทุกการเปลี่ยนแปลง แต่ละ event ที่ stream ส่งออกมาคือ document ที่อธิบายสิ่งที่เกิดขึ้น: `operationType` ของมัน (เช่น `insert` หรือ `update`) document key และสำหรับ update คือคำอธิบายว่าฟิลด์ใดเปลี่ยนไป loop ด้านล่างเพียงพิมพ์แต่ละ event ตามที่มันมาถึงและฟังต่อไป:
+ตรงนี้เรา watch collection `members` และตอบสนองต่อทุกการเปลี่ยนแปลง แต่ละ event ที่ stream ส่งออกมาคือ document ที่อธิบายว่าเกิดอะไรขึ้น ทั้ง `operationType` (เช่น `insert` หรือ `update`) document key และถ้าเป็น update ก็จะบอกว่าฟิลด์ไหนเปลี่ยนไปบ้าง loop ข้างล่างแค่พิมพ์ทุก event ที่วิ่งเข้ามาแล้วฟังต่อ:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -71,7 +71,7 @@ change stream สร้างขึ้นบน **oplog** ซึ่งเป็�
   </TabItem>
 </Tabs>
 
-เมื่อมีคน insert สมาชิกใหม่ที่อื่น event แบบนี้จะปรากฏบน stream ฟิลด์ `_id` คือ **resume token** สำหรับ event นี้ — อ่านต่อเพื่อดูว่าทำไมมันถึงสำคัญ:
+เมื่อมีคน insert สมาชิกใหม่ที่อื่น event แบบนี้จะปรากฏบน stream ฟิลด์ `_id` คือ **resume token** สำหรับ event นี้ — อ่านต่อแล้วจะเห็นว่าทำไมถึงสำคัญ:
 
 ```json
 {
@@ -84,7 +84,7 @@ change stream สร้างขึ้นบน **oplog** ซึ่งเป็�
 
 ## ฟีดไหลอย่างไร
 
-การเขียนไปยัง primary ถูกบันทึกใน oplog และจากตรงนั้น change stream หยิบมันขึ้นมาและส่งมอบให้ผู้บริโภคทุกตัวที่กำลัง watch อยู่ การเขียนครั้งเดียวสามารถกระจายออกไปยัง listener อิสระจำนวนมาก แต่ละตัวประมวลผลมันเพื่อจุดประสงค์ของตัวเอง:
+การเขียนไปยัง primary ถูกบันทึกใน oplog จากตรงนั้น change stream ก็หยิบขึ้นมาส่งต่อให้ทุก consumer ที่ watch อยู่ การเขียนครั้งเดียวจึงกระจายไปถึง listener อิสระหลายตัวได้ แต่ละตัวเอาไปประมวลผลตามจุดประสงค์ของตัวเอง:
 
 export const streamFlow = `flowchart LR
   W["A write on the primary"] --> O["Oplog records the change in order"]
@@ -93,11 +93,11 @@ export const streamFlow = `flowchart LR
   CS --> C2["Consumer: refresh a cache"]
   CS --> C3["Consumer: update a dashboard"]`
 
-<Mermaid code={streamFlow} title="การเขียนลงใน oplog change stream อ่านมัน และกระจาย event ออกไปยังผู้บริโภคทุกตัวที่กำลัง watch อยู่" />
+<Mermaid code={streamFlow} title="การเขียนถูกบันทึกลง oplog แล้ว change stream อ่านต่อ และกระจาย event ออกไปยังทุก consumer ที่ watch อยู่" />
 
 ## การ resume จากจุดที่คุณค้างไว้
 
-เครือข่ายหลุดและโปรเซส restart และระบบแบบ event-driven ไม่อาจยอมพลาดการเปลี่ยนแปลงที่เกิดขึ้นขณะที่มันไม่อยู่ได้ ทุก event พก **resume token** ไว้ใน `_id` ของมัน ถ้าคุณเก็บ token ของ event สุดท้ายที่คุณจัดการสำเร็จไว้ คุณสามารถเปิด stream ใหม่จากจุดนั้นเป๊ะ ๆ และรับทุกการเปลี่ยนแปลงตั้งแต่นั้นเป็นต้นมา โดยไม่มีรายการใดถูกข้ามและไม่มีรายการใดซ้ำ ตรงนี้เรา resume หลังจาก token ที่รู้จัก:
+เครือข่ายหลุดและโปรเซส restart และระบบแบบ event-driven ยอมให้พลาดการเปลี่ยนแปลงที่เกิดตอนตัวเองไม่อยู่ไม่ได้ ทุก event จึงพก **resume token** มาใน `_id` ถ้าคุณเก็บ token ของ event สุดท้ายที่คุณจัดการสำเร็จไว้ คุณสามารถเปิด stream ใหม่จากจุดนั้นเป๊ะ ๆ และรับทุกการเปลี่ยนแปลงตั้งแต่นั้นเป็นต้นมา โดยไม่มีรายการใดถูกข้ามและไม่มีรายการใดซ้ำ ตรงนี้เรา resume หลังจาก token ที่รู้จัก:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -139,29 +139,29 @@ export const streamFlow = `flowchart LR
 
 ## เคล็ดลับและข้อควรระวัง
 
-- **change stream ต้องใช้ replica set** ด้วยเหตุผลเดียวกับ transaction: มันอ่านจาก oplog ซึ่งมีอยู่เฉพาะบน replica set เท่านั้น
-- **กรองที่ต้นทางด้วย pipeline** คุณสามารถส่ง aggregation pipeline ให้ `watch()` ได้ — ตัวอย่างเช่น `$match` บน `operationType` หรือบนฟิลด์ — เพื่อให้เซิร์ฟเวอร์ส่งมาเฉพาะ event ที่คุณสนใจ แทนที่จะกรองมันในแอปพลิเคชันของคุณ
-- **เก็บ resume token ไว้อย่างถาวร** การเก็บ token ที่จัดการล่าสุดไว้อย่างทนทานคือสิ่งที่ทำให้ผู้บริโภคปลอดภัยต่อการ crash หากไม่มีมัน การ restart จะพลาด event หรือต้องประมวลผลใหม่ตั้งแต่ต้น
-- **token หมดอายุไปพร้อม oplog** ถ้าผู้บริโภคออฟไลน์นานจนจุด resume ของมันหลุดออกไปจากปลาย oplog แล้ว stream จะไม่สามารถ resume จากตรงนั้นได้ และคุณต้องกระทบยอดด้วยวิธีอื่น
+- **change stream ต้องมี replica set** ด้วยเหตุผลเดียวกับ transaction คืออ่านจาก oplog ซึ่งมีอยู่บน replica set เท่านั้น
+- **กรองที่ต้นทางด้วย pipeline** คุณสามารถส่ง aggregation pipeline ให้ `watch()` ได้ — ตัวอย่างเช่น `$match` บน `operationType` หรือบนฟิลด์ — เพื่อให้ server ส่งมาเฉพาะ event ที่คุณสนใจ แทนที่จะมากรองทีหลังในแอป
+- **เก็บ resume token ไว้อย่างถาวร** การเก็บ token ที่จัดการล่าสุดไว้อย่างทนทานคือสิ่งที่ทำให้ consumer ทนต่อการ crash ได้ ถ้าไม่เก็บไว้ พอ restart ก็จะพลาด event หรือต้องไล่ประมวลผลใหม่ตั้งแต่ต้น
+- **token หมดอายุไปพร้อม oplog** ถ้า consumer ออฟไลน์นานจนจุด resume หลุดออกไปจากปลาย oplog แล้ว stream จะไม่สามารถ resume จากตรงนั้นได้ และคุณต้องกระทบยอดด้วยวิธีอื่น
 
 <Callout title="watch อย่า poll">
-เมื่อแอปพลิเคชันของคุณต้องตอบสนองต่อการเปลี่ยนแปลงข้อมูล ให้เปิด change stream แทนการ polling collection ด้วย timer คุณจะได้รับการเปลี่ยนแปลงตามลำดับ ทันทีที่มันเกิดขึ้น และได้ resume token เพื่อหยิบงานต่อจากจุดที่คุณค้างไว้เป๊ะ ๆ หลังจากการขัดจังหวะใด ๆ
+เมื่อแอปพลิเคชันของคุณต้องตอบสนองต่อการเปลี่ยนแปลงข้อมูล ให้เปิด change stream แทนการ polling collection ด้วย timer คุณจะได้การเปลี่ยนแปลงตามลำดับทันทีที่เกิดขึ้น และได้ resume token เพื่อหยิบงานต่อจากจุดที่คุณค้างไว้เป๊ะ ๆ หลังจากการขัดจังหวะใด ๆ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | change stream (`watch()`) | real-time ได้ event ทันทีที่เกิด resume ได้แม่นยำด้วย resume token กรองที่ต้นทางด้วย pipeline ได้ | ต้องมี replica set ต้องจัดการ resume token เอง และ token หมดอายุถ้า consumer offline นานเกินไป |
 | polling collection เป็นระยะ | เข้าใจง่าย debug ง่าย ไม่ต้องพึ่ง oplog หรือ replica set | latency สูงกว่าเพราะต้องรอรอบ poll เปลืองการ query เมื่อไม่มีอะไรเปลี่ยน และต้องเก็บ "last checked" เองซึ่งเสี่ยงพลาด event |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ไม่ handle การ resume เมื่อ token หมดอายุ (invalidate)** — คิดว่า `resumeAfter` ใช้ได้เสมอ แต่ถ้า consumer หยุดทำงานนานจน token หลุดออกจาก oplog window การเปิด stream ใหม่จะได้ error และต้อง fallback ไปทำ full re-sync ของข้อมูลแทน ถ้าไม่เตรียม logic นี้ไว้ consumer จะ crash วนซ้ำ
-- **ประมวลผล event แบบ fire-and-forget โดยไม่รอ ack ก่อน save resume token** — ถ้า consumer ล้มระหว่างประมวลผล event แต่ยังไม่ทัน save token ใหม่ event นั้นจะถูกส่งมาซ้ำเมื่อ restart ต้องออกแบบ handler ให้ idempotent ไม่ใช่ถือว่า change stream ส่ง event ให้แค่ครั้งเดียวเสมอ
+- **ประมวลผล event แบบ fire-and-forget โดยไม่รอ ack ก่อน save resume token** — ถ้า consumer ล้มระหว่างประมวลผล event แต่ยังไม่ทัน save token ใหม่ event นั้นจะวิ่งกลับมาซ้ำเมื่อ restart ต้องออกแบบ handler ให้ idempotent ไม่ใช่ถือว่า change stream ส่ง event ให้แค่ครั้งเดียวเสมอ
 - **ใช้ change stream แทน query ปกติสำหรับงานที่ต้องการ state ปัจจุบัน** — change stream บอกแค่ "เกิดอะไรขึ้น" ไม่ใช่ "สถานะตอนนี้เป็นอย่างไร" ถ้า consumer offline แล้วกลับมา ต้อง query สถานะปัจจุบันเพิ่มเพื่อ bootstrap ก่อน ไม่ใช่พึ่ง stream อย่างเดียวเพื่อสร้าง state ทั้งหมด
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Shopify** — ใช้ change stream เพื่อ sync สถานะ inventory ไปยัง search index และ cache แบบเรียลไทม์ทันทีที่มีการอัปเดต stock แทนการ poll ฐานข้อมูลทุกไม่กี่วินาที
 >
@@ -191,7 +191,7 @@ export const quizStreams = [
   {
     q: 'คุณจะรับเฉพาะ event ที่คุณสนใจได้อย่างไร?',
     options: [
-      'กรองมันในแอปพลิเคชันของคุณหลังจากรับมาทั้งหมด',
+      'รับมาทั้งหมดก่อน แล้วค่อยกรองในแอป',
       'ส่ง aggregation pipeline เช่น $match ให้ watch()',
       'เปิดหนึ่ง stream ต่อหนึ่ง document',
       'ตั้ง read concern เป็น linearizable',

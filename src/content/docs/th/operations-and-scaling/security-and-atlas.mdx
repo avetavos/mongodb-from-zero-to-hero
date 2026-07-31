@@ -11,11 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-`mongod` ใหม่ที่เริ่มด้วยการตั้งค่าเริ่มต้นไม่มี authentication และคอยฟังการเชื่อมต่อ บนเครื่องแล็ปท็อปของคุณที่ผูกกับ localhost นั่นไม่มีอันตราย แต่บนเซิร์ฟเวอร์ที่มี public IP มันคือการรั่วไหลที่รอจะเกิดขึ้น — และตลอดหลายปีที่ผ่านมา MongoDB instances ที่ไม่ปลอดภัยได้ทำให้ข้อมูลปริมาณมหาศาลรั่วไหลด้วยวิธีนี้เป๊ะ ๆ Security ใน production ไม่ใช่ฟีเจอร์เดียว แต่เป็นชั้นการป้องกันสั้น ๆ ที่ซ้อนกัน แต่ละชั้นปิดประตูคนละบาน: ใครเชื่อมต่อได้, การเชื่อมต่อได้รับการปกป้องอย่างไร, การเชื่อมต่อได้รับอนุญาตให้มาจากที่ไหนบ้าง และเกิดอะไรขึ้นกับ bytes บนดิสก์
+`mongod` ใหม่ที่เริ่มด้วยการตั้งค่าเริ่มต้นไม่มี authentication และคอยฟังการเชื่อมต่อ บนเครื่องแล็ปท็อปของคุณที่ผูกกับ localhost นั่นไม่มีอันตราย แต่บน server ที่มี public IP นี่คือข้อมูลรั่วที่รอวันเกิด — และตลอดหลายปีที่ผ่านมา MongoDB instances ที่ไม่ปลอดภัยได้ทำให้ข้อมูลปริมาณมหาศาลรั่วไหลด้วยวิธีนี้เป๊ะ ๆ 
+
+Security ใน production ไม่ใช่ฟีเจอร์เดียวจบ แต่เป็นชั้นป้องกันสั้น ๆ ที่ซ้อนกัน แต่ละชั้นปิดประตูคนละบาน: ใครเชื่อมต่อได้, การเชื่อมต่อได้รับการปกป้องอย่างไร, การเชื่อมต่อได้รับอนุญาตให้มาจากที่ไหนบ้าง และเกิดอะไรขึ้นกับ bytes บนดิสก์
 
 ## ชั้นของการป้องกัน
 
-ลองคิดว่า request เป็นสิ่งที่ผ่านชุดของประตูก่อนที่มันจะแตะต้องข้อมูลของคุณ เครือข่ายตัดสินว่าการเชื่อมต่อได้รับอนุญาตเลยหรือไม่ TLS ปกป้อง bytes ระหว่างทาง Authentication ตรวจสอบว่าคุณเป็นใคร และ authorization ตรวจสอบว่าคุณได้รับอนุญาตให้ทำอะไรได้บ้าง:
+ลองมอง request เป็นสิ่งที่ต้องผ่านประตูหลายบานก่อนจะแตะข้อมูลของคุณ เครือข่ายตัดสินว่าการเชื่อมต่อได้รับอนุญาตเลยหรือไม่ TLS ปกป้อง bytes ระหว่างทาง Authentication ตรวจสอบว่าคุณเป็นใคร และ authorization ตรวจสอบว่าคุณได้รับอนุญาตให้ทำอะไรได้บ้าง:
 
 export const securityFlow = `flowchart LR
   Client["Application"] --> Net["Network gate — firewall, bind IP, VPC"]
@@ -47,7 +49,7 @@ db.getSiblingDB("admin").createUser({
 })
 ```
 
-เมื่อเปิด auth แล้ว ทุกการเชื่อมต่อต้องแสดง credentials driver ส่งพวกมันใน connection string หรือเป็น options แยกต่างหาก:
+เมื่อเปิด auth แล้ว ทุกการเชื่อมต่อต้องแสดง credentials driver ส่ง credentials ไปใน connection string หรือแยกเป็น option ก็ได้:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -88,7 +90,7 @@ db.getSiblingDB("admin").createUser({
 
 ## TLS, network rules และ encryption at rest
 
-อีกสามชั้นทำให้ภาพสมบูรณ์ **TLS** เข้ารหัส traffic ระหว่าง client และเซิร์ฟเวอร์ เพื่อให้ credentials และข้อมูลไม่ถูกอ่านออกจากสายส่งได้; คุณชี้ `mongod` ไปที่ใบรับรองและกำหนดให้ต้องใช้มัน
+อีกสามชั้นทำให้ภาพสมบูรณ์ **TLS** เข้ารหัส traffic ระหว่าง client และ server เพื่อให้ credentials และข้อมูลไม่ถูกอ่านออกจากสายส่งได้; คุณชี้ `mongod` ไปที่ certificate แล้วบังคับให้ต้องใช้
 
 ```yaml
 # mongod.conf — require TLS and restrict where it listens
@@ -99,39 +101,39 @@ net:
     certificateKeyFile: /etc/ssl/mongodb.pem
 ```
 
-snippet เดียวกันนั้นแสดงประตู **network** การตั้งค่า `bindIp` ควบคุมว่า `mongod` รับการเชื่อมต่อบน interface ไหน — ผูกมันกับ address ส่วนตัว ไม่ใช่ `0.0.0.0` บน host สาธารณะ ในระบบคลาวด์คุณห่อเซิร์ฟเวอร์ไว้ใน VPC หรือ private subnet และใช้ firewall หรือ security group เพื่อให้มีเพียงเซิร์ฟเวอร์แอปพลิเคชันของคุณเท่านั้นที่เข้าถึงพอร์ต `27017` ได้เลย สุดท้าย **encryption at rest** สลับไฟล์ข้อมูลบนดิสก์ เพื่อให้ดิสก์หรือ backup volume ที่ถูกขโมยไปไร้ประโยชน์หากไม่มีกุญแจ; ใน deployment ที่จัดการเองนี่เป็นฟีเจอร์ระดับ storage-engine หรือ filesystem ที่คุณเปิดใช้ และใน managed services มันเปิดอยู่โดยค่าเริ่มต้น
+snippet เดียวกันนั้นแสดงประตู **network** การตั้งค่า `bindIp` ควบคุมว่า `mongod` รับการเชื่อมต่อบน interface ไหน — ให้ผูกกับ address ภายใน ไม่ใช่ `0.0.0.0` บน host สาธารณะ ในระบบคลาวด์คุณห่อ server ไว้ใน VPC หรือ private subnet และใช้ firewall หรือ security group เพื่อให้มีเพียง server แอปพลิเคชันของคุณเท่านั้นที่เข้าถึงพอร์ต `27017` ได้เลย สุดท้าย **encryption at rest** สลับไฟล์ข้อมูลบนดิสก์ เพื่อให้ดิสก์หรือ backup volume ที่ถูกขโมยไปไร้ประโยชน์หากไม่มีกุญแจ; ใน deployment ที่จัดการเองนี่เป็นฟีเจอร์ระดับ storage-engine หรือ filesystem ที่คุณเปิดใช้เอง ส่วนใน managed service เปิดมาให้ตั้งแต่ต้น
 
 ## MongoDB Atlas: เส้นทางที่ง่าย
 
-การทำทั้งหมดนี้ด้วยมือ — การ provision replica set, สร้างใบรับรอง, ตั้งค่า firewall, หมุนเวียนกุญแจ, จัดตาราง backup — เป็นงานจริงและทำผิดเล็ก ๆ น้อย ๆ ได้ง่าย **MongoDB Atlas** คือ managed cloud service ของ MongoDB และมันมีอยู่ส่วนใหญ่ก็เพื่อให้คุณไม่ต้องทำ Atlas cluster มาแบบปลอดภัยโดยค่าเริ่มต้น: ต้องมี authentication, TLS เปิดอยู่เสมอ, encryption at rest เปิดใช้งาน และฐานข้อมูล *ไม่* สามารถเข้าถึงได้จนกว่าคุณจะเพิ่ม entry ลงใน **IP access list** ของมันอย่างชัดเจน นอกเหนือจากนั้นมันยังให้ **backups** อัตโนมัติพร้อม point-in-time restore และแดชบอร์ด **monitoring** ที่มี Performance Advisor จากบทเรียนที่แล้วฝังอยู่ในตัว
+การทำทั้งหมดนี้ด้วยมือ — การ provision replica set, สร้างใบรับรอง, ตั้งค่า firewall, หมุนเวียนกุญแจ, จัดตาราง backup — เป็นงานจริงและทำผิดเล็ก ๆ น้อย ๆ ได้ง่าย **MongoDB Atlas** คือ managed cloud service ของ MongoDB ที่มีอยู่เพื่อให้คุณไม่ต้องทำงานพวกนี้เอง Atlas cluster มาแบบปลอดภัยโดยค่าเริ่มต้น: ต้องมี authentication, TLS เปิดอยู่เสมอ, encryption at rest เปิดใช้งาน และฐานข้อมูล *ไม่* สามารถเข้าถึงได้จนกว่าคุณจะเพิ่ม entry ลงใน **IP access list** เอง นอกจากนั้นยังได้ **backup** อัตโนมัติพร้อม point-in-time restore และแดชบอร์ด **monitoring** ที่มี Performance Advisor จากบทเรียนที่แล้วฝังอยู่ในตัว
 
 **ใน Compass / Atlas:** คุณเชื่อมต่อ Compass กับ Atlas cluster ด้วย connection string ที่คัดลอกมาจาก Atlas UI ซึ่งรวม TLS และผู้ใช้ฐานข้อมูลของคุณไว้แล้ว ใน Atlas เอง Database Access จัดการผู้ใช้และ roles, Network Access จัดการ IP allow-list และแท็บ Backup จัดการ snapshots — สี่ชั้นเดียวกัน นำเสนอเป็นฟอร์มแทนที่จะเป็นไฟล์ config
 
 ## เคล็ดลับและข้อควรระวัง
 
-- **อย่าเปิดพอร์ต 27017 สู่อินเทอร์เน็ตโดยไม่มี authentication เด็ดขาด** นี่คือกฎเหล็ก; มันคือวิธีที่การรั่วไหลของข้อมูลที่โด่งดังเกิดขึ้น ผูกกับ interface ส่วนตัวและกำหนดให้ต้องมี auth ก่อนสิ่งอื่นใด
+- **อย่าเปิดพอร์ต 27017 สู่อินเทอร์เน็ตโดยไม่มี authentication เด็ดขาด** นี่คือกฎเหล็ก เพราะข้อมูลรั่วครั้งดัง ๆ เกิดจากเรื่องนี้ทั้งนั้น ผูกกับ interface ส่วนตัวและกำหนดให้ต้องมี auth ก่อนสิ่งอื่นใด
 - ใช้ **least privilege** ให้ผู้ใช้แอปพลิเคชันแต่ละคนได้เฉพาะ roles ที่จำเป็นบนเฉพาะฐานข้อมูลที่ใช้ อย่ามอบ role admin ให้กับโค้ดของแอป
-- TLS ปกป้องข้อมูล *ระหว่างขนส่ง*; encryption at rest ปกป้องมัน *บนดิสก์* พวกมันเป็นคนละชั้น — เปิดทั้งสอง ไม่ใช่อย่างเดียว
+- TLS ปกป้องข้อมูล *ระหว่างขนส่ง*; encryption at rest ปกป้อง *บนดิสก์* คนละชั้นกัน — เปิดทั้งคู่ ไม่ใช่เลือกอย่างเดียว
 - การจัดการทั้งหมดนี้เองทำได้แต่มีโอกาสผิดพลาด หากคุณไม่มีเหตุผลที่หนักแน่นพอที่จะรัน cluster ของตัวเอง Atlas ให้การป้องกันเหล่านี้ที่ตั้งค่าถูกต้องมาให้พร้อมใช้
 
 <Callout title="ปลอดภัยด้วยความลึก หรือให้ Atlas จัดการให้">
-Security ใน production คือสี่ชั้น: ล็อกเครือข่าย, กำหนดให้ต้องมี TLS, กำหนดให้ต้องมี authentication และมอบ roles แบบ least-privilege — บวกกับ encryption at rest บนดิสก์ อย่าวาง MongoDB ที่ไม่มี authentication ไว้บน address สาธารณะเด็ดขาด หากคุณไม่อยากประกอบทั้งหมดนี้ด้วยตัวเอง MongoDB Atlas ส่งมอบมันแบบปลอดภัยโดยค่าเริ่มต้น
+Security ใน production คือสี่ชั้น: ล็อกเครือข่าย, กำหนดให้ต้องมี TLS, กำหนดให้ต้องมี authentication และมอบ roles แบบ least-privilege — บวกกับ encryption at rest บนดิสก์ อย่าวาง MongoDB ที่ไม่มี authentication ไว้บน address สาธารณะเด็ดขาด หากคุณไม่อยากประกอบทั้งหมดนี้ด้วยตัวเอง MongoDB Atlas จัดมาให้ครบและปลอดภัยตั้งแต่ค่า default
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | Self-hosted MongoDB | ควบคุม infrastructure และ config ได้เต็มที่ | ต้องรับผิดชอบ patch, TLS certificate rotation, backup และ security audit เองทั้งหมด |
 | MongoDB Atlas | Security เปิดโดยค่าเริ่มต้น, backup และ patch จัดการให้, ลดภาระ ops | ควบคุมรายละเอียดระดับ low-level ได้น้อยกว่า, ต้นทุนเป็นแบบ usage-based ต่างจาก self-hosted |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ใช้ database user เดียวกันสำหรับทุก service หรือทุก environment** — ถ้า credential ของ user ตัวเดียวรั่ว ทุก service ที่ใช้ user เดียวกันถูกกระทบหมด ควรแยก user ต่อ service และต่อ environment (dev/staging/prod) เพื่อจำกัดผลกระทบเมื่อเกิดปัญหา
 - **เข้าใจว่า TLS ปกป้อง data ทั้งหมดแล้วเลยข้าม encryption at rest** — TLS ปกป้องเฉพาะข้อมูลระหว่างขนส่งเท่านั้น ถ้า disk หรือ backup snapshot ถูกขโมยไปโดยไม่ได้เข้ารหัส at rest ข้อมูลก็ยังอ่านได้ตรง ๆ
 - **ตั้ง IP access list ใน Atlas เป็นเปิดกว้างทุก address เพื่อความสะดวกตอน develop แล้วลืมจำกัดก่อนขึ้น production** — เปิดกว้างขนาดนั้นเท่ากับปิด network layer ทิ้งไปทั้งอัน authentication เพียงอย่างเดียวไม่ได้ทดแทน network restriction ที่หายไป
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **เหตุการณ์ MongoDB instance ที่เปิด public โดยไม่มี authentication** ที่เป็นข่าวหลายครั้งในอดีต (เช่นคลื่นการโจมตีเรียกค่าไถ่ปี 2017 ที่ instance นับหมื่นเครื่องถูกยึดข้อมูลไป) — เป็นตัวอย่างว่าการข้ามแค่ authentication layer เดียวสร้างความเสียหายได้มากแค่ไหน
 >
@@ -161,20 +163,20 @@ export const quizSecurity = [
   {
     q: 'TLS และ encryption at rest ปกป้องสิ่งที่แตกต่างกัน อันไหนคืออันไหน?',
     options: [
-      'ทั้งคู่ปกป้องข้อมูลเฉพาะตอนที่มันอยู่ในหน่วยความจำ',
+      'ทั้งคู่ปกป้องข้อมูลเฉพาะตอนอยู่ในหน่วยความจำ',
       'TLS ปกป้องข้อมูลระหว่างขนส่งบนเครือข่าย; encryption at rest ปกป้องข้อมูลบนดิสก์',
       'TLS ปกป้องดิสก์; encryption at rest ปกป้องเครือข่าย',
-      'พวกมันเป็นสองชื่อของฟีเจอร์เดียวกัน',
+      'เป็นสองชื่อของฟีเจอร์เดียวกัน',
     ],
     answer: 1,
   },
   {
     q: 'MongoDB Atlas ช่วยเรื่อง security โดยค่าเริ่มต้นอย่างไร?',
     options: [
-      'มันปิด authentication เพื่อให้เชื่อมต่อง่ายขึ้น',
-      'มันกำหนดให้ต้องมี auth และ TLS, เข้ารหัส at rest และทำให้ cluster เข้าถึงไม่ได้จนกว่าคุณจะเพิ่ม IP ลงใน access list',
-      'มันเปิด cluster สู่สาธารณะเพื่อให้ client ใด ๆ เชื่อมต่อได้',
-      'มันขจัดความจำเป็นในการใช้ connection string',
+      'ปิด authentication เพื่อให้ต่อง่ายขึ้น',
+      'บังคับ auth และ TLS เข้ารหัส at rest และล็อก cluster ไว้จนกว่าคุณจะเพิ่ม IP ลงใน access list',
+      'เปิด cluster สู่สาธารณะให้ client ไหนก็ต่อได้',
+      'ทำให้ไม่ต้องใช้ connection string อีกต่อไป',
     ],
     answer: 1,
   },

@@ -10,13 +10,15 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การ insert คือ operation ที่ละมุนละม่อมที่สุดใน MongoDB นั่นคือ คุณยื่น document ให้ฐานข้อมูล มันจัดเก็บไว้ แล้วมันก็บอกคุณว่ามันเก็บอะไรไป ไม่มี schema ให้นิยามก่อน และไม่มีคอลัมน์ของตารางให้ต้องจัดให้ตรงกัน — ถ้า document เป็นข้อมูลที่มีลักษณะคล้าย JSON ที่ถูกต้อง มันก็เข้าไปได้เลย อิสระตรงนี้แหละคือเหตุผลว่าทำไมการมีวินัยเล็ก ๆ น้อย ๆ รอบ field `_id` ถึงคุ้มค่า ซึ่งมันคืองานเก็บบันทึกชิ้นเดียวที่ทุกการ insert เกี่ยวข้องด้วย
+การ insert คือ operation ที่ผ่อนคลายที่สุดใน MongoDB คุณยื่น document ให้ฐานข้อมูล ฐานข้อมูลเก็บไว้ แล้วตอบกลับมาว่าเก็บอะไรไป ไม่ต้องนิยาม schema ล่วงหน้า ไม่มีคอลัมน์ของตารางให้จัดให้ตรงกัน — ขอแค่ document เป็นข้อมูลคล้าย JSON ที่ถูกต้องก็เข้าได้เลย
 
-เราจะสร้างห้องสมุดในจินตนาการของเราต่อไป สมาชิกแต่ละคนคือ document หนึ่งรายการ และในบทเรียนนี้เราเพิ่มพวกเขาเข้าไปใน collection ชื่อ `members`
+อิสระตรงนี้แหละคือเหตุผลว่าทำไมวินัยเล็ก ๆ รอบ field `_id` ถึงคุ้มค่า เพราะเป็นงานเก็บบันทึกชิ้นเดียวที่ทุกการ insert ต้องยุ่งด้วย
+
+เราจะสร้างห้องสมุดสมมติกันต่อ สมาชิกแต่ละคนคือ document หนึ่งรายการ และบทเรียนนี้เราจะเพิ่มสมาชิกเข้าไปใน collection ชื่อ `members`
 
 ## การ insert document เดียว
 
-`insertOne` รับ document มาหนึ่งรายการพอดีแล้วจัดเก็บไว้ ถ้าคุณไม่ได้ระบุ `_id` มาให้ MongoDB จะสร้างขึ้นให้คุณในรูปของ **ObjectId** — ค่าขนาด 12 ไบต์ที่ไม่ซ้ำกันทั่วทั้ง collection และยังเข้ารหัสเวลาที่สร้างไว้ด้วย id ที่ถูกสร้างนั้นคือ primary key ของ document
+`insertOne` รับ document มาหนึ่งรายการพอดีแล้วเก็บลง collection ถ้าคุณไม่ได้ระบุ `_id` มาเอง MongoDB จะสร้างให้ในรูปของ **ObjectId** — ค่าขนาด 12 ไบต์ที่ไม่ซ้ำกันทั่วทั้ง collection และเข้ารหัสเวลาที่สร้างเอาไว้ในตัว ตัว id ที่ได้นี้แหละคือ primary key ของ document
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -59,13 +61,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-acknowledgement บอกคุณว่า operation สำเร็จและส่ง id ที่ถูกกำหนดให้กลับมา ในเชลล์มันมีหน้าตาแบบนี้:
+acknowledgement บอกว่า operation สำเร็จ พร้อมส่ง id ที่กำหนดให้กลับมาด้วย ในเชลล์จะหน้าตาแบบนี้:
 
 ```json
 { "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1d0" }
 ```
 
-และตอนนี้ document ที่นั่งอยู่ใน collection มีหน้าตาแบบนี้ — `_id` คือสิ่งเดียวที่คุณไม่ได้พิมพ์เอง:
+ส่วน document ที่นอนอยู่ใน collection ตอนนี้หน้าตาแบบนี้ — `_id` คือสิ่งเดียวที่คุณไม่ได้พิมพ์เอง:
 
 ```json
 {
@@ -76,11 +78,11 @@ acknowledgement บอกคุณว่า operation สำเร็จแล�
 }
 ```
 
-**ใน Compass:** เปิด collection `members` คลิกปุ่มสีเขียว **ADD DATA** เลือก **Insert Document** วาง JSON ของคุณโดยไม่ต้องมี `_id` แล้ว Compass จะเติม id ให้คุณเองเมื่อคุณบันทึก
+**ใน Compass:** เปิด collection `members` คลิกปุ่มสีเขียว **ADD DATA** เลือก **Insert Document** วาง JSON ลงไปโดยไม่ต้องใส่ `_id` แล้ว Compass จะเติม id ให้เองตอนกดบันทึก
 
 ## การ insert หลายรายการในครั้งเดียว
 
-เมื่อคุณมี document หนึ่งชุด `insertMany` ส่งพวกมันไปในการเดินทางไปกลับครั้งเดียวแทนที่จะเป็นการเรียกหนึ่งครั้งต่อ document หนึ่งรายการ คุณส่ง array เข้าไป แล้วคุณได้ id ของทุกอย่างที่ถูก insert กลับมา โดยมี key เป็นตำแหน่งของพวกมันใน array
+เมื่อมี document เป็นชุด `insertMany` ส่งทั้งชุดไปใน round trip เดียว แทนที่จะเรียกทีละครั้งต่อหนึ่ง document คุณส่ง array เข้าไป แล้วได้ id ของทุกรายการที่ insert สำเร็จกลับมา โดยใช้ตำแหน่งใน array เป็น key
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -139,7 +141,7 @@ acknowledgement บอกคุณว่า operation สำเร็จแล�
   </TabItem>
 </Tabs>
 
-acknowledgement จับคู่ index ของแต่ละรายการใน array กับ id ที่ถูกสร้างให้กับมัน:
+acknowledgement จับคู่ index ของแต่ละรายการใน array เข้ากับ id ที่สร้างให้:
 
 ```json
 {
@@ -154,29 +156,29 @@ acknowledgement จับคู่ index ของแต่ละรายกา
 
 ## เคล็ดลับและจุดที่ต้องระวัง
 
-- คุณสามารถระบุ `_id` ของคุณเอง (เป็น string, number หรือค่าใด ๆ) แทนที่จะปล่อยให้ MongoDB สร้าง ObjectId — แต่มันต้องไม่ซ้ำกัน การ insert document ที่มี `_id` อยู่แล้วจะล้มเหลวพร้อม error แบบ **duplicate key**
-- `insertMany` เป็นแบบ **ordered** โดยปริยาย นั่นคือ มันหยุดที่ document แรกที่ล้มเหลว ดังนั้น document ที่อยู่หลังจาก error เรื่อง id ซ้ำจะไม่มีวันได้ถูก insert ส่ง option แบบ unordered เข้าไปเพื่อให้มันเดินหน้าต่อแม้มีความล้มเหลวและ insert ทุก document ที่ไม่ชนกัน
-- เพราะไม่มี schema document สองรายการใน collection เดียวกันสามารถมี field ที่ต่างกันโดยสิ้นเชิงได้ การ insert นั้นให้อภัย นั่นเป็นฟีเจอร์ ไม่ใช่บั๊ก — แค่ตั้งใจรักษาความสม่ำเสมอเอาไว้
+- คุณกำหนด `_id` เองได้ (เป็น string, number หรือค่าอะไรก็ได้) แทนการปล่อยให้ MongoDB สร้าง ObjectId — แต่ค่าต้องไม่ซ้ำ ถ้า insert document ที่ `_id` มีอยู่แล้ว จะล้มเหลวพร้อม error แบบ **duplicate key**
+- `insertMany` เป็นแบบ **ordered** โดยปริยาย คือหยุดทันทีที่ document ตัวแรกล้มเหลว ตัวที่อยู่ถัดจาก error เรื่อง id ซ้ำจึงไม่ได้เข้า collection เลย ถ้าอยากให้ไปต่อแม้เจอตัวที่ล้มเหลว แล้ว insert ทุกตัวที่ไม่ชนกัน ให้ส่ง option แบบ unordered เข้าไป
+- ไม่มี schema มาบังคับ ทำให้ document สองรายการใน collection เดียวกันมี field ต่างกันคนละเรื่องได้ การ insert ใจดีแบบนี้ถือเป็นฟีเจอร์ ไม่ใช่บั๊ก — แต่คุณต้องตั้งใจรักษาความสม่ำเสมอเอง
 
 <Callout title="ปล่อยให้ MongoDB เป็นเจ้าของ id">
-ยกเว้นว่าคุณมีตัวระบุในโลกจริงที่รับประกันว่าไม่ซ้ำกัน (อย่าง ISBN) ก็ปล่อยให้ MongoDB สร้าง ObjectId มันไม่ซ้ำกัน เรียงลำดับตามเวลาที่สร้างได้ และเป็นอีกหนึ่งสิ่งที่คุณไม่ต้องเสี่ยงทำพลาด
+ถ้าไม่ได้มีตัวระบุในโลกจริงที่การันตีว่าไม่ซ้ำ (อย่าง ISBN) ก็ปล่อยให้ MongoDB สร้าง ObjectId ไปเถอะ ค่าไม่ซ้ำกัน เรียงตามเวลาที่สร้างได้ และเป็นอีกหนึ่งเรื่องที่คุณไม่ต้องเสี่ยงทำพลาดเอง
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | `insertOne` | เรียบง่าย จัดการ error ของแต่ละ document ตรงไปตรงมา | หนึ่ง round trip ต่อหนึ่ง document ช้าเมื่อมีจำนวนมาก |
-| `insertMany` (ordered) | batch เดียว ลด round trip | document ที่ error ตัวแรกหยุดทั้งชุด ตัวที่เหลือไม่ถูก insert |
-| `insertMany` (unordered) | เดินหน้าต่อแม้มี document ที่ error insert ทุกตัวที่ไม่ชนกัน | ลำดับการ insert ไม่การันตี ต้องแกะผลลัพธ์เพื่อรู้ว่าตัวไหนล้มเหลว |
+| `insertMany` (ordered) | batch เดียว ลด round trip | document ตัวแรกที่ error หยุดทั้งชุด ตัวที่เหลือไม่ได้เข้า |
+| `insertMany` (unordered) | ไปต่อแม้เจอ document ที่ error แล้ว insert ทุกตัวที่ไม่ชนกัน | ลำดับการ insert ไม่การันตี ต้องแกะผลลัพธ์เพื่อรู้ว่าตัวไหนล้มเหลว |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **insert document ทีละตัวในลูปแทนที่จะใช้ `insertMany`** — เสีย round trip โดยไม่จำเป็น ยิ่งจำนวน document เยอะยิ่งช้าเห็นได้ชัด ควรรวมเป็น array แล้วเรียก `insertMany` ครั้งเดียว
-- **คิดว่า `insertOne` คืนค่า document ที่ถูก insert กลับมาเต็ม ๆ** — จริง ๆ แล้วมันคืนแค่ acknowledgement กับ `insertedId` เท่านั้น ถ้าต้องการ document เต็ม ต้อง `findOne` ตามด้วย `_id` นั้นเอง
+- **คิดว่า `insertOne` คืน document ที่ insert ไปกลับมาเต็ม ๆ** — จริง ๆ คืนแค่ acknowledgement กับ `insertedId` เท่านั้น ถ้าอยากได้ document เต็ม ต้อง `findOne` ด้วย `_id` นั้นอีกที
 - **ไม่ตรวจ `insertedCount` ของ `insertMany` แบบ unordered** — เข้าใจว่า "ไม่มี error โยนขึ้นมา" แปลว่า document ทุกตัวถูก insert ครบ ทั้งที่ unordered อาจข้าม document ที่ล้มเหลวไปเงียบ ๆ ต้องเทียบ `insertedCount` กับจำนวนที่ส่งเข้าไป
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **ระบบ import สินค้าเข้าคลัง (e-commerce)** — เมื่อ merchant อัปโหลดไฟล์ CSV สินค้าหลายพันรายการ ระบบแปลงแต่ละแถวเป็น document แล้วส่งเข้า `insertMany` เป็นชุด (batch) ละ 500 รายการ แทนที่จะ `insertOne` ทีละแถว
 >
@@ -186,20 +188,20 @@ export const quizInsert = [
   {
     q: 'ถ้าคุณ insert document โดยไม่มี field _id จะเกิดอะไรขึ้น?',
     options: [
-      'การ insert ถูกปฏิเสธ',
-      'MongoDB สร้าง ObjectId ที่ไม่ซ้ำกันให้มัน',
+      'ระบบปฏิเสธการ insert',
+      'MongoDB สร้าง ObjectId ที่ไม่ซ้ำให้เอง',
       'field นั้นว่างเปล่าจนกว่าคุณจะกำหนดค่าให้',
-      'document ถูกจัดเก็บโดยไม่มี primary key ใด ๆ',
+      'MongoDB เก็บ document โดยไม่มี primary key เลย',
     ],
     answer: 1,
   },
   {
     q: 'โดยปริยาย insertMany แบบ ordered ทำอย่างไรเมื่อ document หนึ่งมี _id ซ้ำ?',
     options: [
-      'มันข้าม document นั้นไปและ insert ที่เหลือ',
-      'มันหยุดที่ความล้มเหลว ทำให้ document ที่ตามมายังไม่ถูก insert',
-      'มัน roll back ทุก document ในชุด',
-      'มันเขียนทับ document ที่มีอยู่',
+      'ข้าม document นั้นไปแล้ว insert ที่เหลือต่อ',
+      'หยุดตรงจุดที่ล้มเหลว document ที่ตามมาจึงไม่ได้ insert',
+      'roll back ทุก document ในชุด',
+      'เขียนทับ document ที่มีอยู่เดิม',
     ],
     answer: 1,
   },
@@ -208,7 +210,7 @@ export const quizInsert = [
     options: [
       'เพียงแค่แฟล็กสำเร็จ true/false เท่านั้น',
       'ข้อความเต็มของทุก document ที่ถูก insert',
-      'id ที่ถูกสร้างขึ้นโดยมี key เป็นตำแหน่งของพวกมันใน array ที่ป้อนเข้าไป',
+      'id ที่สร้างขึ้น โดยใช้ตำแหน่งใน array ที่ส่งเข้าไปเป็น key',
       'cursor ครอบ document ใหม่',
     ],
     answer: 2,

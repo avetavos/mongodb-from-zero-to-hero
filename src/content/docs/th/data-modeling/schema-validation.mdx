@@ -11,7 +11,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-MongoDB เป็นแบบ schema-flexible โดยปริยาย: collection จะยอมรับ document ที่มีรูปร่างต่างกันอย่างมากอย่างเต็มใจ ซึ่งให้อิสระระหว่างการ prototype และอันตรายใน production **Schema validation** ให้คุณเลือกกลับเข้าสู่การบังคับใช้ — เพื่อประกาศ สำหรับ collection หนึ่ง ว่า field ใดต้องมี ต้องเป็นชนิดใด และค่าใดที่อนุญาต — โดยไม่ต้องสละความยืดหยุ่นของ document model ในที่ที่คุณยังต้องการมัน คุณแนบกฎด้วย **`$jsonSchema`** validator และจากนั้นเซิร์ฟเวอร์จะตรวจทุกการเขียนเทียบกับมัน มันคือราวกันตกที่คุณเพิ่มเมื่อรูปร่างของ collection ลงตัวแล้ว
+MongoDB เป็นแบบ schema-flexible โดยปริยาย: collection จะยอมรับ document ที่มีรูปร่างต่างกันอย่างมากอย่างเต็มใจ ซึ่งให้อิสระระหว่างการ prototype และอันตรายใน production **Schema validation** ให้คุณเลือกกลับเข้าสู่การบังคับใช้ — เพื่อประกาศ สำหรับ collection หนึ่ง ว่า field ใดต้องมี ต้องเป็นชนิดใด และค่าใดที่อนุญาต — โดยไม่ต้องทิ้งความยืดหยุ่นของ document model ในจุดที่ยังต้องใช้ คุณแนบกฎผ่าน **`$jsonSchema`** validator แล้ว server จะตรวจทุกการเขียนเทียบกับกฎนั้น ถือเป็นราวกันตกที่ค่อยเพิ่มทีหลังตอนรูปร่างของ collection ลงตัวแล้ว
 
 ## validator หน้าตาเป็นอย่างไร
 
@@ -21,7 +21,7 @@ validator คือ query expression ที่ทุก document ต้องเ
 - **`required`** — array ของชื่อ field ที่ต้องมีอยู่
 - **`properties`** — map ต่อ field ที่อธิบายชนิดและข้อจำกัดของแต่ละ field
 
-นี่คือ validator สำหรับ `members` collection: สมาชิกทุกคนต้องมี `name` เป็น string และปี `joined` เป็น integer ที่อย่างน้อย 1900 และถ้า `fines` มีอยู่ มันต้องเป็นตัวเลขที่ไม่เป็นลบ
+นี่คือ validator สำหรับ `members` collection: สมาชิกทุกคนต้องมี `name` เป็น string และปี `joined` เป็น integer ที่อย่างน้อย 1900 และถ้ามี `fines` ก็ต้องเป็นตัวเลขที่ไม่ติดลบ
 
 export const validationFlowDiagram = `flowchart LR
   W["Incoming write"] --> V{"Matches $jsonSchema?"}
@@ -29,7 +29,7 @@ export const validationFlowDiagram = `flowchart LR
   V -->|"No, action error"| R["Rejected with a validation error"]
   V -->|"No, action warn"| L["Stored but logged as a warning"]`
 
-<Mermaid code={validationFlowDiagram} title="ทุกการเขียนถูกตรวจเทียบกับ validator; validationAction ตัดสินว่าความล้มเหลวจะถูกปฏิเสธหรือเพียงแค่บันทึก log" />
+<Mermaid code={validationFlowDiagram} title="ทุกการเขียนต้องผ่าน validator ก่อน แล้ว validationAction ตัดสินว่าจะ reject ทิ้งหรือแค่บันทึก log" />
 
 ## การสร้าง collection พร้อม validator
 
@@ -139,13 +139,13 @@ export const validationFlowDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-document ที่เป็นไปตามทุกกฎจะถูกเก็บโดยไม่มีคำตำหนิ:
+document ที่ผ่านครบทุกกฎจะบันทึกลงไปได้เลย ไม่มีเสียงบ่น:
 
 ```json
 { "name": "Ada", "joined": 2024, "fines": 0 }
 ```
 
-document ที่ทำผิดกฎจะถูกปฏิเสธ อันนี้ขาด field `joined` ที่ required และให้ `name` ผิดชนิด ดังนั้นการเขียนจึงล้มเหลวด้วย validation error แทนที่จะถูกเก็บแบบเงียบ ๆ:
+ส่วน document ที่ผิดกฎจะโดน reject อันนี้ขาด field `joined` ที่ required และใส่ `name` ผิด type การเขียนจึงล้มเหลวด้วย validation error แทนที่จะบันทึกเงียบ ๆ:
 
 ```json
 { "name": 42 }
@@ -153,7 +153,7 @@ document ที่ทำผิดกฎจะถูกปฏิเสธ อั�
 
 ## validationLevel และ validationAction
 
-มีปุ่มสองตัวควบคุมว่ากฎจะกัดแรงแค่ไหน **`validationLevel`** ตัดสินว่า *การเขียนใด* ที่จะถูกตรวจ: `"strict"` (ค่าปริยาย) validate ทุก insert และ update ส่วน `"moderate"` validate insert และ update ต่อ document ที่เป็นไปตาม schema อยู่แล้ว แต่ปล่อย document ที่ invalid เดิมไว้เฉย ๆ — มีประโยชน์เมื่อคุณเพิ่ม validation ให้กับ collection ที่มีข้อมูลรกอยู่แล้ว **`validationAction`** ตัดสินว่าจะเกิดอะไรขึ้นเมื่อล้มเหลว: `"error"` (ค่าปริยาย) ปฏิเสธการเขียน ส่วน `"warn"` อนุญาตให้เขียนแต่บันทึก warning ไว้ใน server log — วิธีอ่อนโยนในการค้นหาการละเมิดโดยไม่ทำให้การเขียนพังระหว่างการ migration
+มีปุ่มสองตัวควบคุมว่ากฎจะกัดแรงแค่ไหน **`validationLevel`** ตัดสินว่าจะตรวจ *การเขียนแบบไหนบ้าง*: `"strict"` (ค่าปริยาย) validate ทุก insert และ update ส่วน `"moderate"` validate insert และ update ต่อ document ที่เป็นไปตาม schema อยู่แล้ว แต่ปล่อย document ที่ invalid เดิมไว้เฉย ๆ — มีประโยชน์เมื่อคุณเพิ่ม validation ให้กับ collection ที่มีข้อมูลรกอยู่แล้ว **`validationAction`** ตัดสินว่าจะเกิดอะไรขึ้นเมื่อล้มเหลว: `"error"` (ค่าปริยาย) ปฏิเสธการเขียน ส่วน `"warn"` อนุญาตให้เขียนแต่บันทึก warning ไว้ใน server log — วิธีอ่อนโยนในการค้นหาการละเมิดโดยไม่ทำให้การเขียนพังระหว่างการ migration
 
 การ rollout ที่พบบ่อยคือเริ่มด้วย `validationAction: "warn"` และ `validationLevel: "moderate"` เฝ้าดู log เพื่อเรียนรู้ว่าข้อมูลเดิมละเมิดกฎใหม่มากแค่ไหน แก้ไขตัวที่ผิด แล้วค่อยเข้มขึ้นเป็น `"error"` และ `"strict"`
 
@@ -163,28 +163,28 @@ document ที่ทำผิดกฎจะถูกปฏิเสธ อั�
 
 - Validation เป็นแบบ opt-in และต่อ collection collection ที่ไม่มี validator ทำงานเหมือนเดิมทุกประการ — ไม่มีการบังคับใช้อะไร
 - `bsonType` เข้มงวดกว่าการจัดการตัวเลขแบบหลวม ๆ ของ JSON: `"int"`, `"long"`, `"double"` และ `"decimal"` แยกจากกัน ถ้า driver ส่งค่าเป็น double ในที่ที่คุณ required เป็น int การเขียนจะล้มเหลว — เป็นเรื่องที่ทำให้แปลกใจกันบ่อย
-- `required` ตรวจแค่ว่า field *มีอยู่* เท่านั้น ส่วนกฎต่อ field ใน `properties` ตรวจชนิดและค่าของมัน ใช้ทั้งสองด้วยกันเพื่อปักหมุด field ให้แน่นสมบูรณ์
+- `required` ตรวจแค่ว่า field *มีอยู่* เท่านั้น ส่วนกฎราย field ใน `properties` ตรวจ type และค่า ใช้ทั้งสองด้วยกันเพื่อปักหมุด field ให้แน่นสมบูรณ์
 - ใช้ `"moderate"` บวก `"warn"` เมื่อเพิ่ม validation ให้กับ collection ที่มีอยู่ เพื่อที่คุณจะไม่ทำให้การเขียนต่อ document ที่มีมาก่อนกฎพัง
 - คุณสามารถเปลี่ยนหรือลบ validator ทีหลังด้วยคำสั่ง `collMod` — validation ไม่ใช่ประตูทางเดียว
 
 <Callout title="ยืดหยุ่นโดยปริยาย เข้มงวดอย่างตั้งใจ">
-MongoDB ให้คุณเริ่มต้นโดยไม่มี schema และเพิ่มมันเมื่อรูปร่างลงตัว `$jsonSchema` validator พร้อม `required` และ `properties` เปลี่ยน "อะไรก็ได้" ให้เป็น "field เหล่านี้ ชนิดเหล่านี้" และ `validationLevel` บวก `validationAction` ให้คุณ rollout มันอย่างอ่อนโยน — warn ก่อน บังคับใช้เมื่อข้อมูลสะอาดแล้ว
+MongoDB ให้เริ่มต้นแบบไม่มี schema แล้วค่อยเพิ่มทีหลังเมื่อรูปร่างลงตัว `$jsonSchema` validator พร้อม `required` และ `properties` เปลี่ยน "อะไรก็ได้" ให้เป็น "field เหล่านี้ ชนิดเหล่านี้" และ `validationLevel` บวก `validationAction` ให้คุณ rollout ได้แบบนุ่มนวล คือ warn ก่อน แล้วค่อยบังคับตอนข้อมูลสะอาดแล้ว
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | ใช้ `$jsonSchema` validation | จับการเขียนที่ผิดรูปแบบได้ตั้งแต่ระดับ database เหมือนมี schema แบบเบา ๆ คอยกันตก | เพิ่มขั้นตอนตอนเขียน ต้องคอย sync กฎกับโค้ดฝั่งแอปพลิเคชันเสมอ |
 | ไม่ใช้ validator (พึ่ง schema flexibility เดิมของ MongoDB) | ยืดหยุ่นเต็มที่ เขียนอะไรก็ได้โดยไม่มีแรงเสียดทาน | ข้อมูลผิดรูปแบบหลุดเข้า production ได้ง่าย กว่าจะรู้ก็สายเกินไปแล้ว |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **คิดว่า `$jsonSchema` validator แทนที่การ validate ฝั่งแอปพลิเคชันได้ทั้งหมด** — validator เช็คแค่ shape พื้นฐานตอนเขียนเข้า database เท่านั้น ไม่รู้ business rule เชิงลึก เช่น "email นี้ต้องไม่ซ้ำกับ user อื่น" ยังต้องใช้ unique index หรือ logic แยกต่างหาก
 - **เพิ่ม validator เข้ม ๆ ทันทีบน collection ที่มีข้อมูลเก่าอยู่แล้ว** — ถ้าไม่ผ่าน `"moderate"` กับ `"warn"` ก่อน การเปิด `"strict"` กับ `"error"` ทันทีจะทำให้การเขียนต่อ document เก่าที่ไม่ตรง schema ล้มเหลวโดยไม่ทันตั้งตัว
 - **ลืมอัปเดต validator เมื่อ schema ของแอปพลิเคชันเปลี่ยน** — validator ไม่ sync กับโค้ดอัตโนมัติ ถ้าเพิ่ม field ใหม่ในแอปแต่ลืมแก้ `$jsonSchema` การเขียนอาจถูกปฏิเสธโดยไม่คาดคิด
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Toyota Connected** — validate payload telemetry จากรถยนต์ที่เชื่อมต่อด้วย `$jsonSchema` ก่อนเก็บ เพื่อกัน sensor ที่ส่งข้อมูลผิดรูปแบบไม่ให้ปนเข้าไปใน collection หลัก
 >
@@ -207,7 +207,7 @@ export const quizValidation = [
     answer: 1,
   },
   {
-    q: 'validator ใช้ validationAction ตั้งเป็น "warn" จะเกิดอะไรขึ้นกับ document ที่ละเมิดมัน?',
+    q: 'validator ตั้ง validationAction เป็น "warn" แล้ว document ที่ผิดกฎจะเป็นอย่างไร?',
     options: [
       'การเขียนถูกปฏิเสธด้วย error',
       'การเขียนถูกเก็บ และการละเมิดถูกบันทึกเป็น warning',
@@ -219,10 +219,10 @@ export const quizValidation = [
   {
     q: 'ทำไมคุณอาจเลือก validationLevel "moderate" เมื่อเพิ่มกฎให้กับ collection ที่มีอยู่?',
     options: [
-      'มัน validate เร็วกว่า strict',
-      'มันปล่อย document ที่ invalid เดิมไว้เฉย ๆ ขณะตรวจการเขียนใหม่',
-      'มันปิดการใช้งาน validator ทั้งหมด',
-      'มันจำเป็นสำหรับ $jsonSchema',
+      'validate เร็วกว่าแบบ strict',
+      'ปล่อย document เดิมที่ invalid ไว้เฉย ๆ แต่ยังตรวจการเขียนใหม่',
+      'ปิดการใช้งาน validator ทั้งหมด',
+      'จำเป็นต้องใช้คู่กับ $jsonSchema',
     ],
     answer: 1,
   },

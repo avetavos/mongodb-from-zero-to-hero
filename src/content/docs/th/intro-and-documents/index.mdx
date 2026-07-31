@@ -10,9 +10,9 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ยินดีต้อนรับสู่ **MongoDB — From Zero to Hero** คอร์สนี้จะพาคุณจากคนที่ไม่เคยแตะ database มาก่อนเลย ไปสู่การออกแบบโมเดลข้อมูล query ข้อมูล สร้าง index เพื่อความเร็ว รวมข้อมูลด้วย aggregation ให้กลายเป็นรายงาน และรันมันบน production ได้อย่างสบายมือ เราจะทำงานผ่านตัวอย่างที่จับต้องได้ตลอดทาง: โลกจำลองเล็ก ๆ ของสมาชิกห้องสมุดและหนังสือที่พวกเขายืม ตั้งใจให้เล็กไว้เพื่อให้แนวคิดหลักยังคงเป็นจุดเด่น ทุก operation จะถูกแสดงห้าแบบ — ใน shell **mongosh** และใน driver ของ **Node.js**, **Python**, **Go**, และ **Rust** — เพื่อให้บทเรียนนำไปใช้ได้กับ stack ที่คุณทำงานจริง
+ยินดีต้อนรับสู่ **MongoDB — From Zero to Hero** คอร์สนี้จะพาคุณจากคนที่ไม่เคยแตะ database มาก่อนเลย ไปสู่การออกแบบโมเดลข้อมูล query ข้อมูล สร้าง index เพื่อความเร็ว รวมข้อมูลด้วย aggregation ให้กลายเป็นรายงาน ไปจนถึงรันบน production ได้อย่างสบายมือ เราจะทำงานผ่านตัวอย่างที่จับต้องได้ตลอดทาง: โลกจำลองเล็ก ๆ ของสมาชิกห้องสมุดและหนังสือที่พวกเขายืม ตั้งใจให้เล็กไว้เพื่อให้แนวคิดหลักยังคงเป็นจุดเด่น ทุก operation จะถูกแสดงห้าแบบ — ใน shell **mongosh** และใน driver ของ **Node.js**, **Python**, **Go**, และ **Rust** — เพื่อให้บทเรียนนำไปใช้ได้กับ stack ที่คุณทำงานจริง
 
-MongoDB เป็น **document database**: แทนที่จะเก็บข้อมูลของคุณเป็น row ในตารางที่ตายตัว มันเก็บข้อมูลเป็น **document** — object คล้าย JSON ที่มี field, object ซ้อนใน และ array — จัดกลุ่มอยู่ใน **collection** document หน้าตาเป็นยังไงก็ได้ตามที่ข้อมูลของคุณเป็นโดยธรรมชาติ ดังนั้นรูปร่างของข้อมูลใน database จึงมักจะตรงกับรูปร่างของ object ในโค้ดของคุณ โดยไม่มีชั้นแปลงข้อมูลคั่นกลาง
+MongoDB เป็น **document database**: แทนที่จะเก็บข้อมูลของคุณเป็น row ในตารางที่ตายตัว MongoDB เก็บข้อมูลเป็น **document** — object คล้าย JSON ที่มี field, object ซ้อนใน และ array — จัดกลุ่มอยู่ใน **collection** document หน้าตาเป็นยังไงก็ได้ตามที่ข้อมูลของคุณเป็นโดยธรรมชาติ ดังนั้นรูปร่างของข้อมูลใน database จึงมักจะตรงกับรูปร่างของ object ในโค้ดของคุณ โดยไม่มีชั้นแปลงข้อมูลคั่นกลาง
 
 ## เส้นทางข้างหน้า
 
@@ -60,20 +60,20 @@ export const journeyDiagram = `flowchart TD
 ตลอดคอร์สเราจะกลับมาที่ห้องสมุดในจินตนาการเดิมซ้ำ ๆ: สมาชิก ค่าปรับที่พวกเขาค้างชำระ และหนังสือที่พวกเขายืม การใช้ชุดข้อมูลเล็ก ๆ ชุดเดียวซ้ำหมายความว่าคุณจะใช้สมาธิไปกับ database ไม่ใช่การเรียนรู้ตัวอย่างใหม่ในทุกบทเรียน
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | schema ที่ยืดหยุ่นของ document model | เริ่มเขียนโค้ดและ ship ฟีเจอร์ได้เร็วโดยไม่ต้องออกแบบ schema ให้สมบูรณ์ตั้งแต่วันแรก | ไม่มีการรับประกันตอน compile time ว่าทุก document ใน collection จะมีรูปร่างเดียวกัน ความสม่ำเสมอเป็นหน้าที่ของทีมคุณเอง |
 | BSON ที่มี type มากกว่า JSON | เก็บ Date, ObjectId, Decimal128 ได้แม่นยำโดยไม่ต้องแปลงค่าเอง | driver แต่ละภาษา map type พวกนี้เข้ากับ native type ของตัวเองต่างกัน ต้องเข้าใจ mapping ก่อนใช้งานจริง |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **คิดว่า "ไม่มี schema" แปลว่าไม่ต้องออกแบบอะไรเลย** — schema ที่ยืดหยุ่นยังต้องการวินัย ทีมที่ปล่อยให้ document แต่ละใบมีรูปร่างต่างกันไปเรื่อย ๆ โดยไม่ตั้งใจจะเจอ bug ตอน query ทีหลัง
 - **ข้ามลำดับโมดูลเพราะคิดว่าแต่ละโมดูลแยกอิสระเต็มที่** — โมดูลต่อยอดจากกัน โดยเฉพาะคำศัพท์ใน Intro & Documents ที่โมดูลหลัง ๆ ใช้ซ้ำตลอด การข้ามไปเรียน Aggregation ก่อนอาจทำให้งงกับคำว่า document, field, BSON
 - **มองว่า MongoDB คือ database เดียวที่เหมาะกับทุกงาน** — โมดูลนี้จะพูดถึงเมื่อไร document database เหมาะและเมื่อไร relational database ยังเป็นตัวเลือกที่ดีกว่า การเลือกอย่างตั้งใจสำคัญกว่าการใช้เพราะกระแส
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **eBay** — ใช้ MongoDB เป็น metadata store สำหรับข้อมูลที่มีรูปร่างหลากหลายมากในแต่ละหมวดสินค้า ซึ่ง schema ที่ยืดหยุ่นของ document model รองรับได้โดยไม่ต้องมี table แยกสำหรับทุกหมวด
 >
@@ -81,7 +81,7 @@ export const journeyDiagram = `flowchart TD
 
 export const quizIndex = [
   {
-    q: 'What is the basic unit of data MongoDB stores?',
+    q: 'หน่วยข้อมูลพื้นฐานที่ MongoDB เก็บคืออะไร?',
     options: [
       'row ในตารางที่ตายตัว',
       'document — object คล้าย JSON ภายใน collection',
@@ -91,12 +91,12 @@ export const quizIndex = [
     answer: 1,
   },
   {
-    q: 'How many modules make up this course?',
+    q: 'คอร์สนี้มีทั้งหมดกี่โมดูล?',
     options: ['สี่', 'หก', 'แปด', 'สิบสอง'],
     answer: 2,
   },
   {
-    q: 'Which module teaches making queries fast?',
+    q: 'โมดูลไหนสอนเรื่องการทำให้ query เร็วขึ้น?',
     options: ['Querying', 'Indexes', 'Aggregation', 'Operations & Scaling'],
     answer: 1,
   },

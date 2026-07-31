@@ -11,15 +11,17 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-MongoDB เก็บข้อมูลที่เกี่ยวข้องกันไว้ใน collection แยกกันบ่อยพอที่บางครั้งคุณจะต้องเย็บสอง collection กลับเข้าด้วยกัน stage `$lookup` join นั้นภายใน aggregation pipeline: สำหรับแต่ละ document ที่เข้ามา มันค้นหา document ที่ตรงกันในอีก collection หนึ่ง แล้วแนบเข้ามาเป็นฟิลด์ **array** มันคือ left outer join — ทุก document อินพุตจะผ่านมา พร้อม array ว่างเมื่อไม่มีอะไรตรงกัน
+MongoDB เก็บข้อมูลที่เกี่ยวข้องกันไว้คนละ collection บ่อยพอที่บางครั้งคุณต้องเย็บสอง collection กลับเข้าด้วยกัน stage `$lookup` ทำ join นั้นให้ในระหว่าง aggregation pipeline: ทุก document ที่ไหลเข้ามา จะไปหา document ที่ match ในอีก collection แล้วแนบผลกลับมาเป็นฟิลด์ **array**
 
-เราเพิ่ม collection ที่สองเข้ามาในร้าน นอกจาก `sales` แล้ว ตอนนี้มี collection `books` ที่อธิบายแต่ละชื่อเรื่อง:
+โดยธรรมชาติแล้วนี่คือ left outer join ทุก document ที่เข้ามาจะผ่านออกไปหมด ถ้าไม่เจอคู่ก็ได้ array ว่างติดไปแทน
+
+เราเพิ่ม collection ที่สองเข้ามาในร้าน นอกจาก `sales` ตอนนี้มี `books` ที่อธิบายหนังสือแต่ละเล่ม:
 
 ```json
 { "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
 ```
 
-ออเดอร์ใน sales อ้างถึงหนังสือด้วย `title` ของมัน:
+ออเดอร์ใน sales อ้างถึงหนังสือด้วย `title`:
 
 ```json
 { "_id": "a1", "title": "Dune", "quantity": 3, "price": 12 }
@@ -27,14 +29,14 @@ MongoDB เก็บข้อมูลที่เกี่ยวข้องก
 
 ## รูปแบบความเท่ากัน: localField และ foreignField
 
-`$lookup` แบบที่ง่ายที่สุดจับคู่ฟิลด์ในเครื่องหนึ่งฟิลด์กับฟิลด์ต่างถิ่นหนึ่งฟิลด์ คุณระบุชื่อ collection ที่จะ join (`from`) ฟิลด์บน document ที่เข้ามา (`localField`) ฟิลด์บน document ต่างถิ่น (`foreignField`) และชื่อของฟิลด์ array ที่จะเพิ่ม (`as`)
+`$lookup` แบบง่ายที่สุดคือจับคู่ฟิลด์ฝั่ง local หนึ่งฟิลด์กับฟิลด์ฝั่ง foreign หนึ่งฟิลด์ คุณระบุ collection ที่จะ join (`from`) ฟิลด์บน document ที่เข้ามา (`localField`) ฟิลด์บน document ฝั่ง foreign (`foreignField`) และชื่อฟิลด์ array ที่จะเพิ่มเข้าไป (`as`)
 
 export const joinFlow = `flowchart LR
   S["sales: title = Dune"] --> L["$lookup from books on title"]
   B["books: _id = Dune"] --> L
   L --> O["sales doc with book array attached"]`
 
-<Mermaid code={joinFlow} title="document sales แต่ละอันถูก join เข้ากับ books ที่ตรงกัน และพามันไปในฟิลด์ array ใหม่" />
+<Mermaid code={joinFlow} title="document ใน sales แต่ละอัน join เข้ากับ books ที่ match แล้วพาผลไปในฟิลด์ array ใหม่" />
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -104,7 +106,7 @@ export const joinFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
-ตอนนี้ document sales แต่ละอันพา array `book` ที่เก็บ document book ที่ตรงกัน:
+ตอนนี้ document ใน sales แต่ละอันพา array `book` ที่เก็บ document book ที่ match ติดมาด้วย:
 
 ```json
 [
@@ -120,13 +122,13 @@ export const joinFlow = `flowchart LR
 ]
 ```
 
-ผลลัพธ์เป็น **array เสมอ** แม้ว่าจะมี document ตรงกันอย่างมากที่สุดเพียงหนึ่งอัน เพราะโดยทั่วไปการ join อาจตรงกันหลายอัน ขั้นถัดไปที่พบบ่อยคือ `$unwind` (บทเรียนถัดไป) เพื่อแบน array หนึ่งสมาชิกนั้นให้เป็นออบเจกต์ธรรมดา
+ผลลัพธ์เป็น **array เสมอ** ต่อให้ match ได้มากสุดแค่อันเดียว เพราะโดยทั่วไปการ join match ได้หลายอัน ขั้นถัดไปที่ใช้บ่อยคือ `$unwind` (บทเรียนหน้า) เพื่อแบน array หนึ่งสมาชิกนั้นให้เป็น object ธรรมดา
 
-**ใน Compass:** แท็บ **Aggregations** มี `$lookup` ให้เลือกจาก dropdown และให้คุณเลือก collection ต่างถิ่นและฟิลด์ด้วยช่องกรอกฟอร์ม การดูตัวอย่างแสดงฟิลด์ array ใหม่ที่ถูกต่อท้ายแต่ละ document ซึ่งทำให้พฤติกรรม "join แนบ array" เป็นรูปธรรม
+**ใน Compass:** แท็บ **Aggregations** มี `$lookup` ให้เลือกจาก dropdown เลือก collection ฝั่ง foreign และฟิลด์ได้จากช่องกรอก ตัวอย่างผลลัพธ์จะโชว์ฟิลด์ array ใหม่ที่ต่อท้ายแต่ละ document ทำให้เห็นภาพพฤติกรรม "join แล้วแนบ array" ชัดขึ้น
 
 ## รูปแบบ pipeline สำหรับ join ที่ซับซ้อนขึ้น
 
-เมื่อคุณต้องการมากกว่าความเท่ากันของฟิลด์เดียว — ฟิลเตอร์ document ต่างถิ่น project พวกมัน หรือจับคู่ตามหลายเงื่อนไข — ให้ใช้ **รูปแบบ pipeline** คุณประกาศตัวแปร `let` จาก document ในเครื่องและรัน sub-pipeline กับ collection ต่างถิ่น โดยเปรียบเทียบด้วย `$expr` ที่นี่เราแนบเฉพาะหนังสือที่ตีพิมพ์หลังปี 1950 โดยเปิดเผยแค่ author และ year:
+เมื่อต้องการมากกว่าการเทียบ equality ฟิลด์เดียว — จะ filter document ฝั่ง foreign, project ให้เหลือบางฟิลด์ หรือ match หลายเงื่อนไข — ให้ใช้ **แบบ pipeline** คุณประกาศตัวแปรด้วย `let` จาก document ฝั่ง local แล้วรัน sub-pipeline บน collection ฝั่ง foreign โดยเทียบด้วย `$expr` ตรงนี้เราแนบเฉพาะหนังสือที่ตีพิมพ์หลังปี 1950 และเอามาแค่ author กับ year:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -216,7 +218,7 @@ export const joinFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
-ตอนนี้ array ที่แนบมาเก็บเฉพาะ document ต่างถิ่นที่ถูกตัดทอนและกรองแล้ว:
+ตอนนี้ array ที่แนบมาเก็บเฉพาะ document ฝั่ง foreign ที่กรองและตัดฟิลด์แล้ว:
 
 ```json
 [
@@ -230,35 +232,35 @@ export const joinFlow = `flowchart LR
 ]
 ```
 
-สังเกตไวยากรณ์ `$$t`: `$` ตัวเดียวอ้างถึงฟิลด์ของ document ต่างถิ่น ส่วน `$$` อ้างถึงตัวแปร `let` ที่พามาจาก document ในเครื่อง
+สังเกต syntax `$$t`: `$` ตัวเดียวหมายถึงฟิลด์ของ document ฝั่ง foreign ส่วน `$$` หมายถึงตัวแปร `let` ที่ส่งเข้ามาจาก document ฝั่ง local
 
 ## ทิปและกับดัก
 
-- `$lookup` รันเคียวรีกับ collection ต่างถิ่นสำหรับทุก document อินพุต **สร้าง index บน `foreignField`** (หรืออะไรก็ตามที่ sub-pipeline จับคู่ด้วย) ไม่เช่นนั้นการ join อาจช้าลงเมื่อขนาดข้อมูลในโลกจริง
-- มันคือ left outer join: document อินพุตที่ไม่มีคู่ตรงกันก็ยังผ่านมา พร้อม array `as` ว่าง ฟิลเตอร์พวกนั้นทิ้งภายหลังด้วย `$match` ถ้าคุณต้องการเฉพาะแถวที่ join แล้ว
-- การ join ทรงพลังแต่ไม่ฟรี ถ้าคุณพบว่าตัวเองกำลัง join สอง collection เดิมในทุกการอ่าน นั่นอาจเป็นสัญญาณว่าข้อมูลอยากถูก **ฝัง** (embedded) มากกว่าถูกอ้างอิง — เป็นคำถามเรื่องการออกแบบข้อมูลที่จะกล่าวถึงในภายหลัง
-- ฟิลด์ผลลัพธ์ที่ตั้งชื่อใน `as` เป็น array เสมอ จับคู่ `$lookup` กับ `$unwind` เมื่อคุณคาดว่าจะตรงกันอันเดียวและต้องการออบเจกต์แบนราบ
+- `$lookup` ยิง query ไปที่ collection ฝั่ง foreign หนึ่งครั้งต่อ document ที่เข้ามา **สร้าง index บน `foreignField`** (หรือฟิลด์ที่ sub-pipeline ใช้ match) ไม่งั้น join จะช้าลงทันทีเมื่อข้อมูลโตขนาดจริง
+- อย่าลืมว่านี่คือ left outer join: document ที่ไม่มีคู่ก็ยังหลุดผ่านมาพร้อม array `as` ว่าง ถ้าอยากได้เฉพาะแถวที่ join ติด ให้ `$match` กรองทิ้งทีหลัง
+- join ทรงพลังแต่ไม่ฟรี ถ้าพบว่าตัวเอง join สอง collection เดิมทุกครั้งที่อ่าน นั่นคือสัญญาณว่าข้อมูลชุดนั้นน่าจะ embed ไว้ด้วยกันมากกว่าแยกแล้ว reference เป็นเรื่องการออกแบบ schema ที่จะพูดถึงต่อไป
+- ฟิลด์ผลลัพธ์ที่ตั้งชื่อใน `as` เป็น array เสมอ ถ้าคุณรู้ว่าจะ match ได้อันเดียวและอยากได้ object แบน ๆ ให้ต่อ `$unwind` ท้าย `$lookup`
 
 <Callout title="lookup แนบ array">
-$lookup คือ left outer join ที่แขวน document ต่างถิ่นที่ตรงกันไว้บนฟิลด์ array ใหม่ รูปแบบความเท่ากัน join หนึ่งฟิลด์กับหนึ่งฟิลด์ ส่วนรูปแบบ pipeline ให้คุณฟิลเตอร์และจัดรูปฝั่งต่างถิ่นใหม่ได้ สร้าง index บนฟิลด์ต่างถิ่น เพราะการ join เคียวรีมันหนึ่งครั้งต่อ document อินพุต
+$lookup คือ left outer join ที่แขวน document ฝั่ง foreign ที่ match ไว้บนฟิลด์ array ใหม่ แบบ equality join หนึ่งฟิลด์ต่อหนึ่งฟิลด์ ส่วนแบบ pipeline ให้คุณกรองและจัดรูปฝั่ง foreign ได้เอง และอย่าลืมสร้าง index บนฟิลด์ฝั่ง foreign เพราะ join ยิง query ไปหนึ่งครั้งต่อ document ที่เข้ามา
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `$lookup` (อ้างอิงข้ามหลาย collection) | ข้อมูลไม่ซ้ำซ้อน อัปเดตที่เดียว แชร์ข้อมูลระหว่าง document ได้ | ทุกครั้งที่อ่านต้องเสีย cost ของการ join เพิ่มงานให้ query engine ต่อ document อินพุตแต่ละตัว |
-| Embedding (ฝังข้อมูลไว้ใน document เดียว) | อ่านครั้งเดียวจบ ไม่ต้อง join เลย เร็วที่สุดสำหรับ read-heavy workload | ข้อมูลซ้ำซ้อนถ้าถูกอ้างจากหลายที่ อัปเดตต้องไล่แก้หลาย document และ document อาจโตจนเกิน limit |
-| รูปแบบ pipeline ของ `$lookup` (`let` + sub-pipeline) | ฟิลเตอร์/จัดรูป document ต่างถิ่นได้ก่อน join จับคู่ด้วยเงื่อนไขซับซ้อนหลายฟิลด์ได้ | เขียนซับซ้อนกว่า อ่านยากกว่า และปรับ index ให้ sub-pipeline ใช้ได้เต็มที่ยากกว่า |
-| รูปแบบความเท่ากันของ `$lookup` (`localField`/`foreignField`) | เขียนสั้น เข้าใจง่าย ปรับ index ตรงไปตรงมา | จับคู่ได้แค่เงื่อนไขเท่ากันเงื่อนไขเดียว ทำอะไรซับซ้อนกว่านั้นไม่ได้ |
+| `$lookup` (reference ข้ามหลาย collection) | ข้อมูลไม่ซ้ำซ้อน อัปเดตที่เดียวจบ แชร์ข้าม document ได้ | ทุกครั้งที่อ่านต้องจ่ายค่า join เพิ่มงานให้ query engine หนึ่งรอบต่อ document ที่เข้ามา |
+| Embedding (เก็บข้อมูลไว้ใน document เดียว) | อ่านครั้งเดียวจบ ไม่ต้อง join เร็วที่สุดสำหรับงาน read-heavy | ข้อมูลซ้ำถ้ามีหลายที่อ้างถึง อัปเดตต้องไล่แก้หลาย document และ document อาจโตจนชน limit |
+| `$lookup` แบบ pipeline (`let` + sub-pipeline) | กรองและจัดรูป document ฝั่ง foreign ได้ก่อน join match ด้วยเงื่อนไขซับซ้อนหลายฟิลด์ได้ | เขียนซับซ้อนกว่า อ่านยากกว่า และปรับ index ให้ sub-pipeline ใช้ได้เต็มที่ยากกว่า |
+| `$lookup` แบบ equality (`localField`/`foreignField`) | เขียนสั้น เข้าใจง่าย ปรับ index ตรงไปตรงมา | match ได้แค่เงื่อนไข equality เดียว ซับซ้อนกว่านั้นทำไม่ได้ |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
-- **ไม่สร้าง index บน `foreignField`** — `$lookup` เคียวรี collection ต่างถิ่นให้ทุก document อินพุตหนึ่งครั้ง ถ้าไม่มี index บนฟิลด์ที่จับคู่ การ join จะช้าลงอย่างมากเมื่อข้อมูลโต
-- **ลืมว่า `$lookup` เป็น left outer join เสมอ** — document อินพุตที่ไม่มีคู่ตรงกันยังผ่านมาพร้อม array ว่างใน `as` ไม่ใช่ถูกกรองทิ้ง ถ้าต้องการเฉพาะแถวที่ join สำเร็จ ต้องเติม `$match` กรอง array ว่างเอง
-- **สับสนระหว่าง `$` กับ `$$` ใน pipeline-style lookup** — `$` ตัวเดียวอ้างถึงฟิลด์ของ document ต่างถิ่นใน sub-pipeline ส่วน `$$` อ้างถึงตัวแปรที่ประกาศด้วย `let` จาก document ในเครื่อง สลับกันแล้ว query จะพังเงียบ ๆ หรือ error
+- **ไม่สร้าง index บน `foreignField`** — `$lookup` ยิง query ไปที่ collection ฝั่ง foreign หนึ่งครั้งต่อ document ที่เข้ามา ถ้าไม่มี index บนฟิลด์ที่ใช้ match การ join จะช้าลงมากเมื่อข้อมูลโต
+- **ลืมว่า `$lookup` เป็น left outer join เสมอ** — document ที่ไม่มีคู่ยังผ่านมาพร้อม array ว่างใน `as` ไม่ได้โดนกรองทิ้ง ถ้าอยากได้เฉพาะแถวที่ join ติด ต้องเติม `$match` กรอง array ว่างเอง
+- **สับสน `$` กับ `$$` ใน lookup แบบ pipeline** — `$` ตัวเดียวหมายถึงฟิลด์ของ document ฝั่ง foreign ใน sub-pipeline ส่วน `$$` หมายถึงตัวแปรที่ประกาศด้วย `let` จากฝั่ง local สลับกันเมื่อไร query พังเงียบ ๆ หรือไม่ก็ error
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Analytics dashboard** — รายงานยอดขายที่ต้องโชว์ชื่อสินค้าและหมวดหมู่ควบคู่กับตัวเลขยอดขาย มักเก็บ `sales` กับ `products` แยก collection แล้วใช้ `$lookup` join ตอน query แทนที่จะฝังข้อมูลสินค้าไว้ในทุก order เพราะข้อมูลสินค้าเปลี่ยนบ่อยกว่า order
 >
@@ -266,42 +268,42 @@ $lookup คือ left outer join ที่แขวน document ต่างถ
 
 export const quizLookup = [
   {
-    q: 'ในรูปแบบความเท่ากันของ $lookup, ตัวเลือก "as" ตั้งชื่ออะไร?',
+    q: 'ใน $lookup แบบ equality option "as" ใช้ตั้งชื่ออะไร?',
     options: [
-      'collection ต่างถิ่นที่จะ join',
-      'ฟิลด์ในเครื่องที่จะจับคู่',
-      'ฟิลด์ array ใหม่ที่เก็บ document ที่ตรงกัน',
+      'collection ฝั่ง foreign ที่จะ join',
+      'ฟิลด์ฝั่ง local ที่ใช้ match',
+      'ฟิลด์ array ใหม่ที่เก็บ document ที่ match',
       'ลำดับการเรียงของการ join',
     ],
     answer: 2,
   },
   {
-    q: 'document sales หนึ่งอันตรงกับ book พอดีหนึ่งอัน ฟิลด์ที่ $lookup เพิ่มเข้ามามีชนิดเป็นอะไร?',
+    q: 'document ใน sales หนึ่งอัน match กับ book พอดีหนึ่งอัน ฟิลด์ที่ $lookup เพิ่มเข้ามาเป็น type อะไร?',
     options: [
-      'ออบเจกต์ฝังตัวธรรมดา',
-      'array ที่บรรจุ document ที่ตรงกัน',
-      'สตริงที่มี _id ที่ตรงกัน',
+      'object ธรรมดาที่ embed อยู่ข้างใน',
+      'array ที่บรรจุ document ที่ match',
+      'string ที่เก็บ _id ที่ match',
       'ค่า null',
     ],
     answer: 1,
   },
   {
-    q: 'index ใดช่วยปรับปรุงประสิทธิภาพของ $lookup ได้มากที่สุด?',
+    q: 'index แบบไหนช่วย performance ของ $lookup ได้มากที่สุด?',
     options: [
       'index บน localField',
-      'index บน foreignField ใน collection ที่ถูก join',
+      'index บน foreignField ใน collection ที่ join เข้ามา',
       'index บนฟิลด์ as',
-      'ไม่มี index ใดช่วย $lookup ได้',
+      'ไม่มี index อะไรช่วย $lookup ได้',
     ],
     answer: 1,
   },
   {
-    q: 'ในรูปแบบ pipeline, $$t อ้างถึงอะไร?',
+    q: 'ในแบบ pipeline $$t หมายถึงอะไร?',
     options: [
-      'ฟิลด์บน document ต่างถิ่น',
-      'ตัวแปร let ที่พามาจาก document ในเครื่อง',
-      'ชื่อของ collection ต่างถิ่น',
-      'สตริงตัวอักษร',
+      'ฟิลด์บน document ฝั่ง foreign',
+      'ตัวแปร let ที่ส่งเข้ามาจาก document ฝั่ง local',
+      'ชื่อ collection ฝั่ง foreign',
+      'string ธรรมดา',
     ],
     answer: 1,
   },
