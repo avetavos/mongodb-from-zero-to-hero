@@ -25,7 +25,7 @@ docker run -d \
   -v mongo-data:/data/db \
   -e MONGO_INITDB_ROOT_USERNAME=root \
   -e MONGO_INITDB_ROOT_PASSWORD=secret \
-  mongo:7
+  mongo:8
 ```
 
 มีบางอย่างในคำสั่งนั้นที่ควรทำความเข้าใจ:
@@ -42,7 +42,7 @@ docker run -d \
 ```yaml
 services:
   mongo:
-    image: mongo:7
+    image: mongo:8
     container_name: mongo-dev
     restart: unless-stopped
     ports:
@@ -116,7 +116,7 @@ mongosh "mongodb://localhost:27017"
 - **ความคงอยู่ของข้อมูลอยู่ใน volume ไม่ใช่ใน container** ตราบใดที่คุณเก็บ volume `mongo-data` ไว้ คุณสามารถหยุด ลบ และสร้าง container ใหม่ได้โดยไม่สูญเสียอะไร การรัน `docker volume rm mongo-data` ต่างหากที่ลบข้อมูลจริง ๆ
 - **root user ถูกสร้างเฉพาะตอน init ครั้งแรก** ตัวแปร `MONGO_INITDB_ROOT_*` มีผลเมื่อไดเรกทอรีข้อมูลว่างเปล่า ถ้าไปแก้ทีหลังบน volume ที่มีข้อมูลอยู่แล้ว ค่าใหม่จะไม่มีผล user เดิมยังอยู่เหมือนเดิม
 - **พอร์ต `27017` เป็นค่าเริ่มต้นของ MongoDB** ถ้ามีอย่างอื่นจองพอร์ตนี้อยู่ ให้เปลี่ยนฝั่ง host ของการ map เช่น `-p 27018:27017` และเชื่อมต่อไปที่ `27018`
-- **ปักหมุดเวอร์ชันหลัก** อย่าง `mongo:7` แทนที่จะเป็น `mongo:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณตกใจด้วยเวอร์ชัน server ที่ต่างออกไป
+- **ปักหมุดเวอร์ชันหลัก** อย่าง `mongo:8` แทนที่จะเป็น `mongo:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณตกใจด้วยเวอร์ชัน server ที่ต่างออกไป
 
 <Callout title="คำสั่งเดียว MongoDB จริง ๆ">
 Docker เปลี่ยน "ติดตั้งและตั้งค่า database" ให้เป็น "รัน image" เก็บข้อมูลของคุณใน named volume ปักหมุด version tag แล้วคุณจะได้ MongoDB ที่ทิ้งได้แต่ก็คงทน ซึ่งคุณล้างและสร้างใหม่ได้ตามใจ
@@ -131,7 +131,7 @@ Docker เปลี่ยน "ติดตั้งและตั้งค่�
 
 ## ข้อผิดพลาดที่พบบ่อย
 
-- **ลืมปักหมุด image tag แล้วใช้ `mongo:latest`** — เวลา pull image ใหม่ เวอร์ชัน server อาจเปลี่ยนแบบไม่ตั้งใจและพัง config หรือ behavior ที่เคยพึ่งพา ควรปักหมุดเวอร์ชันหลักอย่าง `mongo:7` เสมอ
+- **ลืมปักหมุด image tag แล้วใช้ `mongo:latest`** — เวลา pull image ใหม่ เวอร์ชัน server อาจเปลี่ยนแบบไม่ตั้งใจและพัง config หรือ behavior ที่เคยพึ่งพา ควรปักหมุดเวอร์ชันหลักอย่าง `mongo:8` เสมอ
 - **ลบ container ด้วย `docker rm` แล้วคิดว่าข้อมูลหายไปด้วย** — ถ้า data อยู่ใน named volume การลบ container ไม่กระทบข้อมูล; กลับกัน คนที่ไม่ mount volume เลยแล้วแปลกใจว่าทำไม data หายทุกครั้งที่ restart container
 - **เปิดพอร์ต `27017` แบบไม่ตั้ง password แล้วเข้าใจว่าเครื่อง dev "ไม่มีใครมาแตะอยู่แล้ว"** — ถ้าเครื่องมีการ expose พอร์ตออก network ภายนอกโดยไม่ตั้งใจ (เช่น cloud VM) การไม่ตั้ง authentication เปิดช่องให้คนนอกต่อเข้ามาได้ตรง ๆ
 

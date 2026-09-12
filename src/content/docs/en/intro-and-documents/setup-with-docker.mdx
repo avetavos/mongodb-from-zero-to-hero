@@ -25,7 +25,7 @@ docker run -d \
   -v mongo-data:/data/db \
   -e MONGO_INITDB_ROOT_USERNAME=root \
   -e MONGO_INITDB_ROOT_PASSWORD=secret \
-  mongo:7
+  mongo:8
 ```
 
 A few things worth understanding in that command:
@@ -42,7 +42,7 @@ For anything beyond a quick test, a `docker-compose.yml` is nicer: the configura
 ```yaml
 services:
   mongo:
-    image: mongo:7
+    image: mongo:8
     container_name: mongo-dev
     restart: unless-stopped
     ports:
@@ -116,7 +116,7 @@ A successful connection drops you at a `test>` prompt. From there, typing `db.ru
 - **Data persistence lives in the volume, not the container.** As long as you keep the `mongo-data` volume, you can stop, remove, and recreate the container without losing anything. Running `docker volume rm mongo-data` is what actually deletes the data.
 - **The root user is created only on first init.** The `MONGO_INITDB_ROOT_*` variables take effect when the data directory is empty. If you change them later against an existing volume, they are ignored — the existing user stays.
 - **Port `27017` is the MongoDB default.** If something else already uses it, change the host side of the mapping, for example `-p 27018:27017`, and connect to `27018`.
-- **Pin a major version** like `mongo:7` rather than `mongo:latest` so an image update does not surprise you with a different server version.
+- **Pin a major version** like `mongo:8` rather than `mongo:latest` so an image update does not surprise you with a different server version.
 
 <Callout title="One command, real MongoDB">
 Docker turns "install and configure a database" into "run an image." Keep your data in a named volume, pin a version tag, and you have a disposable yet persistent MongoDB you can wipe and recreate at will.
