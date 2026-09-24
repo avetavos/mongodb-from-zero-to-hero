@@ -96,6 +96,25 @@ The guiding question is *how do I read this data?* If you almost always want the
 Most relational vocabulary maps straight onto MongoDB — table to collection, row to document, column to field. The one habit to unlearn is reflexive normalisation: in a document database, data you read together often belongs together.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Denormalized document model (embed) | Reading one document gets you everything, no join needed — fast for workloads that always read parent and child together | Data duplicated across documents must be updated in multiple places when it changes, and a document can grow toward its size limit if an array is unbounded |
+| Normalized relational model (foreign key) | No duplicated data, one place to fix, and foreign keys give you referential integrity from the database | Nearly every query needs to join multiple tables, which costs more as the number of related tables grows |
+
+## Common mistakes
+
+- **Assuming `$lookup` gives every guarantee of a SQL JOIN** — `$lookup` has no foreign-key-style referential integrity. If a referenced document is deleted, `$lookup` just returns an empty array, with no error raised.
+- **Embedding everything because you believe embedding is always faster** — if the child data grows without bound (such as an ever-growing activity log), embedding will eventually hit the document size limit and make the parent document slow to read and write. Keep it separate from the start.
+- **Assuming sorting a collection by `_id` is the same as sorting by an exact time field** — an ObjectId's creation-time ordering is only accurate to the second, not a millisecond-precise timestamp, and it is not guaranteed to be exactly ordered across multiple processes. If you need an exact order, keep your own time field.
+
+> 💡 Real-world example
+>
+> **A team consolidating customer data from many legacy systems** — merged customer data from dozens of legacy relational systems into one document per customer (a single customer view) instead of joining across separate legacy databases.
+>
+> **A typical e-commerce system** — usually embeds an order's line items inside the order document itself (denormalized), because reading an order almost always needs to see its line items together, but keeps the product catalogue in a separate collection because one product is referenced by many orders.
+
 export const quizMap = [
   {
     q: 'What is the MongoDB counterpart of a relational table?',

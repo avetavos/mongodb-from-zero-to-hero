@@ -171,6 +171,25 @@ A common rollout is to begin with `validationAction: "warn"` and `validationLeve
 MongoDB lets you start without a schema and add one once the shape settles. A `$jsonSchema` validator with `required` and `properties` turns "anything goes" into "these fields, these types," and `validationLevel` plus `validationAction` let you roll it out gently — warn first, enforce once the data is clean.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Use `$jsonSchema` validation | Catches malformed writes at the database level, like a lightweight built-in safety rail | Adds a write-time step, and the rules must be kept in sync with application code |
+| No validator (rely on MongoDB's default schema flexibility) | Fully flexible, write anything with no friction | Malformed data can slip into production easily, often not discovered until too late |
+
+## Common mistakes
+
+- **Assuming a `$jsonSchema` validator fully replaces application-side validation** — the validator only checks basic shape on write into the database; it does not know deeper business rules such as "this email must be unique among users." That still needs a unique index or separate logic.
+- **Adding a strict validator immediately to a collection that already has old data** — without going through `"moderate"` plus `"warn"` first, switching straight to `"strict"` and `"error"` will make writes to old documents that do not match the schema fail unexpectedly.
+- **Forgetting to update the validator when the application's schema changes** — the validator does not sync with code automatically. If you add a new field in the app but forget to update `$jsonSchema`, writes can be unexpectedly rejected.
+
+> 💡 Real-world example
+>
+> **A typical connected-vehicle platform** — validates telemetry payloads from connected vehicles with `$jsonSchema` before storing them, to keep malformed sensor data out of the main collection.
+>
+> **Banking and fintech systems** — use `$jsonSchema` as a safety rail on a transactions collection, requiring fields like amount and currency to always match the right type, before bad data can flow downstream into analytics.
+
 export const quizValidation = [
   {
     q: 'Which operator expresses a MongoDB schema validation rule?',

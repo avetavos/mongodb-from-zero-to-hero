@@ -134,6 +134,25 @@ export const toolDiagram = `flowchart TD
 The shell, Compass, and every driver all open the same database through the same connection string. Learn the string once and you can reach MongoDB from anywhere.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| mongosh | Fast to script and repeat, runs over SSH on a server with no GUI, and can be automated as a `.js` file | You need to remember command syntax and field names yourself, with no visual aid while exploring unfamiliar data |
+| Compass (GUI) | Instantly see the schema and real documents, build an aggregation pipeline stage by stage by dragging and dropping, and understand new data faster | Needs a screen — cannot be used over SSH or automated in a script — and opening the app is heavier than typing one command in a terminal |
+
+## Common mistakes
+
+- **Using Compass as a tool to automate routine jobs** — Compass is designed for click-to-explore, not for running repeatedly as an automated pipeline. Work that must run every day should be a mongosh script or driver code instead.
+- **Creating a new client in application code on every request** — drivers are meant to have one long-lived client created once, reusing its connection pool. Creating a new one per request opens and closes connections needlessly and slows everything down a lot.
+- **Assuming mongosh and a driver share 100% identical syntax** — mongosh is a JavaScript shell with its own helpers like `use`, `show dbs`, and `it`, none of which exist in a real driver. Each language driver calls methods matching its own API — you cannot copy-paste shell commands directly.
+
+> 💡 Real-world example
+>
+> **On-call / SRE teams** — connect to a production server over SSH and use mongosh to run quick status-checking queries, because there is no GUI available and speed matters when troubleshooting in the middle of the night.
+>
+> **Data / analyst teams** — use Compass to browse an unfamiliar collection first, then use the visual aggregation pipeline builder to assemble stages one at a time until the pipeline is correct, before copying it into real code.
+
 export const quizShell = [
   {
     q: 'In mongosh, what does typing "it" do after a find()?',

@@ -122,9 +122,9 @@ pattern เหล่านี้ผสมกันได้อย่างอิ
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Bosch** — ใช้ Bucket pattern เก็บข้อมูล telemetry จากอุปกรณ์ IoT โดยจัดกลุ่ม reading เป็น document ต่อช่วงเวลา (เช่นต่อชั่วโมง) แทนที่จะสร้าง document ใหม่ทุก reading ลดจำนวน document ลงหลายเท่าตัว
+> **Bucket pattern สำหรับข้อมูล IoT ทั่วไป** — จัดกลุ่ม telemetry reading เป็น document ต่อช่วงเวลา (เช่นต่อชั่วโมง) แทนที่จะสร้าง document ใหม่ทุก reading ลดจำนวน document ลงหลายเท่าตัว — Bosch ใช้ MongoDB เก็บและวิเคราะห์ข้อมูล IoT แบบเรียลไทม์ในลักษณะนี้ และกำลังวางแผนย้ายไปใช้ Time Series Collections ของ MongoDB แทนการจัดกลุ่มด้วยมือ ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch))
 >
-> **EA (Electronic Arts)** — ใช้แนวทางแบบ Computed pattern precompute สถิติผู้เล่นและ leaderboard ไว้ล่วงหน้า แทนที่จะ aggregate คะแนนจากทุก match ใหม่ทุกครั้งที่มีคนเปิดดู
+> **ระบบเกมออนไลน์ทั่วไป** — ใช้แนวทางแบบ Computed pattern precompute สถิติผู้เล่นและ leaderboard ไว้ล่วงหน้า แทนที่จะ aggregate คะแนนจากทุก match ใหม่ทุกครั้งที่มีคนเปิดดู
 
 export const quizPatterns = [
   {

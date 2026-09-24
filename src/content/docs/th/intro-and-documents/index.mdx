@@ -75,9 +75,9 @@ export const journeyDiagram = `flowchart TD
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **eBay** — ใช้ MongoDB เป็น metadata store สำหรับข้อมูลที่มีรูปร่างหลากหลายมากในแต่ละหมวดสินค้า ซึ่ง schema ที่ยืดหยุ่นของ document model รองรับได้โดยไม่ต้องมี table แยกสำหรับทุกหมวด
+> **eBay** — ใช้ MongoDB เป็นหนึ่งใน core enterprise data platform ขององค์กร รองรับแอปที่ลูกค้าใช้งานจริงบน ebay.com รวมถึง product catalog ที่ scale replica set ออกไปหลายสิบ node เพื่อรองรับการอ่านปริมาณมหาศาล ([mongodb.com/customers/ebay](https://www.mongodb.com/customers/ebay), 2017)
 >
-> **Forbes** — ใช้ MongoDB เป็น backend ของ CMS เพราะเนื้อหาบทความแต่ละประเภท (ข่าว, วิดีโอ, gallery) มีโครงสร้าง field ที่ต่างกัน การเก็บเป็น document เดียวต่อบทความง่ายกว่าการพยายามยัดทุกประเภทลงตาราง relational เดียว
+> **Forbes** — ใช้ MongoDB Atlas เป็น backend ของ CMS ที่ให้บริการเนื้อหาทั้งหมดบน Forbes.com schema ที่ยืดหยุ่นของ document model ช่วยให้ทีมพัฒนาฟีเจอร์ได้เร็วขึ้น ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019)
 
 export const quizIndex = [
   {

@@ -207,7 +207,7 @@ document แต่ละอันที่รอดมาตอนนี้เ�
 >
 > **Analytics dashboard** — query ที่ filter ตามช่วงวันที่และ status ก่อน (`$match` ต้น pipeline บน field ที่มี index) แล้วค่อย `$project` ให้เหลือแค่ field ที่กราฟต้องใช้ ช่วยให้ dashboard ที่อ่านข้อมูลหลายล้าน document ต่อวันตอบกลับได้ในไม่กี่ร้อย millisecond
 >
-> **Keller Williams** — รายงานอสังหาริมทรัพย์ใช้ `$match` filter บน field อย่าง region และ status ก่อนเสมอ เพื่อให้ index ตัด document ส่วนใหญ่ทิ้งได้ทันที แล้วค่อย `$project` ให้เหลือเฉพาะ field ที่ทีมขายต้องเห็นในรายงาน
+> **รายงานอสังหาริมทรัพย์ทั่วไป** — filter บน field อย่าง region และ status ด้วย `$match` ก่อนเสมอ เพื่อให้ index ตัด document ส่วนใหญ่ทิ้งได้ทันที แล้วค่อย `$project` ให้เหลือเฉพาะ field ที่ทีมขายต้องเห็นในรายงาน — Keller Williams ใช้ MongoDB aggregation pipeline ในลักษณะนี้กับข้อมูล listing บน Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
 
 export const quizBasics = [
   {

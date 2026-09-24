@@ -128,6 +128,26 @@ The lessons ahead introduce the stages you will reach for most, one idea at a ti
 An aggregation pipeline is an array of stages. Documents enter, each stage transforms the stream and passes it on, and the last stage's output is your result. Think of it as a conveyor belt, not a single query.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Aggregation pipeline | Computes and summarises data server-side, reducing what travels over the network | Harder to read than a plain query, and debugging it stage by stage takes time |
+| find + processing in application code | Simple to write and understand, fits complex logic that is hard to express as stages | Must pull every document over the network before computing, which is slow and memory-heavy at scale |
+| A pipeline with many stages | Compose stages one at a time, flexible to extend | The more stages, the more you must watch how order affects both performance and correctness |
+
+## Common mistakes
+
+- **Assuming an aggregation pipeline can always replace find** — if you just want documents matching a filter with no reshaping, a plain `find` is easier to read and often just as fast. Reach for a pipeline when you genuinely need to summarise or build new documents.
+- **Thinking every stage sees the original collection** — each stage only sees the previous stage's output, not the whole collection. If an earlier stage dropped a field, a later stage cannot reference it.
+- **Forgetting the pipeline is an array where order matters** — swapping two stages can produce a different result or run much slower. Stage order is not just a matter of code style.
+
+> 💡 Real-world example
+>
+> **A typical analytics dashboard** — a dashboard page that must show total sales, sales by category, and top products in one request commonly uses an aggregation pipeline (`$group`, `$facet`) instead of pulling every document to compute in the backend, reducing round-trips and application-server load.
+>
+> **Keller Williams (real estate)** — its data team uses the Aggregation Pipeline Builder in MongoDB Compass to build summary pipelines over more than 70 million listing records on MongoDB Atlas, instead of moving all the raw data into the application layer to process ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
 export const quizIndex = [
   {
     q: 'What does a single aggregation stage receive as its input?',

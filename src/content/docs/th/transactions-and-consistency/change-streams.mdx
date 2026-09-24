@@ -163,9 +163,9 @@ export const streamFlow = `flowchart LR
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Shopify** — ใช้ change stream เพื่อ sync สถานะ inventory ไปยัง search index และ cache แบบเรียลไทม์ทันทีที่มีการอัปเดต stock แทนการ poll ฐานข้อมูลทุกไม่กี่วินาที
+> **แพลตฟอร์มอีคอมเมิร์ซทั่วไป** — ใช้ change stream เพื่อ sync สถานะ inventory ไปยัง search index และ cache แบบเรียลไทม์ทันทีที่มีการอัปเดต stock แทนการ poll ฐานข้อมูลทุกไม่กี่วินาที
 >
-> **Uber** — ใช้กลไกแบบ change stream เพื่อ push การเปลี่ยนสถานะ trip หรือ order ไปยัง service อื่น ๆ แบบ event-driven ลด latency ระหว่างสถานะจริงกับตอนที่ระบบปลายทางรับรู้
+> **ระบบ ride-hailing/booking ทั่วไป** — ใช้กลไกแบบ change stream เพื่อ push การเปลี่ยนสถานะ trip หรือ order ไปยัง service อื่น ๆ แบบ event-driven ลด latency ระหว่างสถานะจริงกับตอนที่ระบบปลายทางรับรู้
 
 export const quizStreams = [
   {

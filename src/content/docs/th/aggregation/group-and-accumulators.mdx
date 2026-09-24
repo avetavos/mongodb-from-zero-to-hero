@@ -300,7 +300,7 @@ document สรุปเดียวแทนทั้ง collection:
 >
 > **Analytics dashboard** — การคำนวณ "ยอดขายรวมต่อวัน" หรือ "จำนวนผู้ใช้ที่ active ต่อสัปดาห์" มักทำด้วย `$group` ที่มี `_id` เป็นวันที่/สัปดาห์ และ accumulator อย่าง `$sum` แทนที่จะดึง event ดิบทั้งหมดมานับใน application server
 >
-> **Keller Williams** — รายงานยอดขายอสังหาริมทรัพย์ต่อนายหน้าใช้ `$group` พร้อม `$sum` และ `$avg` เพื่อสรุปมูลค่าธุรกรรมและราคาขายเฉลี่ยต่อคน โดยไม่ต้องดึงประวัติธุรกรรมทั้งหมดออกมาคำนวณนอกฐานข้อมูล
+> **รายงานยอดขายอสังหาริมทรัพย์ทั่วไป** — สรุปยอดขายต่อนายหน้าใช้ `$group` พร้อม `$sum` และ `$avg` เพื่อสรุปมูลค่าธุรกรรมและราคาขายเฉลี่ยต่อคน โดยไม่ต้องดึงประวัติธุรกรรมทั้งหมดออกมาคำนวณนอกฐานข้อมูล — Keller Williams ใช้ MongoDB aggregation pipeline ในลักษณะนี้เพื่อสรุปข้อมูล listing กว่า 70 ล้านระเบียนบน Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
 
 export const quizGroup = [
   {

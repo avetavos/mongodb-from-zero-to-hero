@@ -154,9 +154,9 @@ transaction ที่ถูกที่สุดคือ transaction ที่�
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Shopify** — เก็บ inventory count ไว้เป็น field เดียวใน product document แล้วใช้ `$inc` แบบ atomic ลด/เพิ่ม stock เมื่อมีออเดอร์ แทนที่จะเปิด transaction ทุกครั้ง ทำให้ throughput สูงและไม่มี overselling จาก race condition
+> **แพลตฟอร์มอีคอมเมิร์ซทั่วไป** — เก็บ inventory count ไว้เป็น field เดียวใน product document แล้วใช้ `$inc` แบบ atomic ลด/เพิ่ม stock เมื่อมีออเดอร์ แทนที่จะเปิด transaction ทุกครั้ง ทำให้ throughput สูงและไม่มี overselling จาก race condition
 >
-> **Instagram** — เก็บ like count เป็น field ใน post document เดียวกับเนื้อหาโพสต์ การกดไลก์แต่ละครั้งคือ `$inc` แบบ atomic ครั้งเดียว ไม่ต้องมี session หรือ transaction แม้จะมีคนกดพร้อมกันหลายพันครั้งต่อวินาที
+> **โซเชียลแอปทั่วไป** — เก็บ like count เป็น field ใน post document เดียวกับเนื้อหาโพสต์ การกดไลก์แต่ละครั้งคือ `$inc` แบบ atomic ครั้งเดียว ไม่ต้องมี session หรือ transaction แม้จะมีคนกดพร้อมกันหลายพันครั้งต่อวินาที
 
 export const quizSingle = [
   {

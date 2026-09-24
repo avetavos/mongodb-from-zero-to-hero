@@ -90,6 +90,25 @@ The honest summary: pick the database whose natural shape matches your data and 
 MongoDB stores your data as documents — flexible, JSON-like objects grouped into collections — so the database tends to mirror the objects in your code instead of scattering them across joined tables.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Document database (MongoDB) | Flexible data shapes, a natural fit for hierarchical or varied data; reads and writes a whole object fast without a join | Schema is not automatically enforced — document consistency is the team's job, and ad-hoc joins across collections are more limited than SQL |
+| Relational database (PostgreSQL, MySQL) | Strict schema from the start, strong support for complex many-to-many joins, and a mature tooling/reporting ecosystem | Changing the schema requires a migration touching every existing row, and related data is often spread across many tables that then need joining back together |
+
+## Common mistakes
+
+- **Choosing MongoDB because of hype, not because the access pattern fits** — if your workload is heavy, consistent many-to-many joins, a relational database is usually the better fit, not because a document database is inherently better.
+- **Thinking "flexible schema" means "no schema"** — in practice most documents in the same collection should have a similar shape. The schema is just not enforced by the database itself (unless you add validation).
+- **Assuming the whole system must pick one or the other** — many systems use MongoDB for the parts that need flexibility and a relational database for the parts that need multi-row transactions or complex joins. Using both at once is fine.
+
+> 💡 Real-world example
+>
+> **Forbes** — migrated its CMS from a fixed relational schema to MongoDB Atlas; the document model's flexible schema let the team ship features faster ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019).
+>
+> **A team consolidating customer data from many legacy systems** — built a "single customer view" on MongoDB, merging customer data from dozens of legacy relational systems into one document per customer instead of joining across the separate legacy systems.
+
 export const quizWhat = [
   {
     q: 'What does MongoDB store as its basic unit of data?',

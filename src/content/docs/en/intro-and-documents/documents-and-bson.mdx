@@ -94,6 +94,25 @@ You can also set `_id` yourself to any unique value — a string, a number, an e
 You think in JSON, but MongoDB stores BSON — a binary format with real numbers, dates, and ObjectIds. Knowing which type a field actually holds, especially for numbers and dates, prevents a whole class of quiet bugs.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| BSON (extra types like Date, ObjectId, Decimal128, Binary) | Stores values as their real type; queries and sorts behave correctly for that type, such as sorting by a real date or computing money exactly with Decimal128 | Not as instantly portable as plain JSON — external systems that only accept JSON text must convert these types first, which can lose precision if done carelessly |
+| Plain JSON | Instantly portable across systems, easy to read, tooling supports it everywhere | Only a handful of basic types (string, number, boolean, null, array, object) — you must encode Date and high-precision numbers as strings yourself, risking misinterpretation on the other side |
+
+## Common mistakes
+
+- **Storing an ObjectId as a plain string instead of the BSON ObjectId type** — this throws away type-aware querying and the free chronological ordering that comes with ObjectId. Stored as a string, comparisons become lexical, not by actual value.
+- **Assuming BSON and JSON are the same thing** — you *write* and *read* JSON through the shell or a driver, but what is stored on disk is BSON. Not knowing this difference causes confusion when a number or date type appears to change shape while moving through a system that only speaks JSON text.
+- **Using Double to store money because it "looks like a decimal"** — Double cannot represent a value like `0.10` exactly, so totals drift over many additions. Use Decimal128 for monetary amounts.
+
+> 💡 Real-world example
+>
+> **Fintech / e-commerce systems that total money amounts** — commonly force Decimal128 for every monetary field, to avoid accumulated floating-point rounding errors when summing large numbers of invoices.
+>
+> **A typical large-scale metadata system** — uses ObjectId as both the primary key and a rough creation-time sort key across huge volumes of documents, skipping a separate `created_at` field for use cases that do not need millisecond precision.
+
 export const quizBson = [
   {
     q: 'What does BSON stand for, and why does MongoDB use it?',

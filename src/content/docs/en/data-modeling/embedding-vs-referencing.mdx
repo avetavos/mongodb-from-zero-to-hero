@@ -90,6 +90,27 @@ A useful rule of thumb: embed data that is **read together, written together, an
 The clearest signal for embedding is co-access: if your application almost always reads two pieces of data in the same breath, and the child is bounded and owned by exactly one parent, embed it. If the data is shared, large, or grows without limit, reference it instead.
 </Callout>
 
+## Trade-offs
+
+| Scenario | Benefit of the recommended choice | Cost |
+|---------|---------|------|
+| 1:1 (e.g. user + profile) — embed | One read, atomic write | Slightly larger document; harder to split out later if that part needs to scale on its own |
+| 1:many bounded (e.g. post + tags) — embed | Fast, simple, no join | Must be confident the bound is real, or it is hard to walk back later |
+| 1:many unbounded (e.g. user + posts) — reference from the child side | Parent stays small forever; children can be queried and paginated independently | Needs a second query to fetch all children; no atomic write across parent and child |
+| many:many (e.g. student ↔ course) — reference arrays on both sides | Fast reads in both directions with no `$lookup` | Double the writes; both sides must always be kept in sync |
+
+## Common mistakes
+
+- **Assuming embedding is always faster than referencing** — if the embedded array grows without bound, reads and writes get progressively slower because the server must handle the whole document every time, eventually becoming slower than referencing would have been.
+- **Assuming `$lookup` behaves exactly like a SQL JOIN** — `$lookup` has no relational-database-style query optimizer choosing a join strategy for you. Firing `$lookup` frequently on a hot path performs far worse than expected.
+- **Applying the same embed-or-reference rule to every relationship in a schema** — each relationship must be decided on its own access pattern and growth, not one policy applied to every field.
+
+> 💡 Real-world example
+>
+> **A typical large e-commerce platform** — manages a huge volume of product listings by referencing rather than embedding everything in one place, so a seller can update price or stock without touching other documents that point to the same product.
+>
+> **A typical CMS** — embeds an article's short fields, such as tags and metadata, in the same document, so the article page loads in one read without joining across several collections.
+
 export const quizEmbedRef = [
   {
     q: 'What is the main advantage of embedding related data in a document?',

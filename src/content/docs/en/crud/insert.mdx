@@ -162,6 +162,26 @@ The acknowledgement maps each array index to the id that was generated for it:
 Unless you have a real-world identifier that is guaranteed unique (like an ISBN), let MongoDB generate the ObjectId. It is unique, sortable by creation time, and one less thing for you to get wrong.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `insertOne` | Simple, straightforward per-document error handling | One round trip per document — slow at volume |
+| `insertMany` (ordered) | A single batch, fewer round trips | The first document that errors stops the whole batch; the rest never get inserted |
+| `insertMany` (unordered) | Keeps going past a failing document, inserting every document that does not collide | Insertion order is not guaranteed; you must inspect the result to know which ones failed |
+
+## Common mistakes
+
+- **Inserting documents one at a time in a loop instead of using `insertMany`** — wastes round trips needlessly; the more documents, the more noticeable the slowdown. Batch them into an array and call `insertMany` once instead.
+- **Assuming `insertOne` returns the full inserted document back** — it actually only returns an acknowledgement plus the `insertedId`. To get the full document, `findOne` by that `_id` afterward.
+- **Not checking `insertedCount` on an unordered `insertMany`** — assuming "no error was thrown" means every document was inserted, when unordered mode can silently skip failing documents. Compare `insertedCount` against the number you sent.
+
+> 💡 Real-world example
+>
+> **E-commerce inventory import** — when a merchant uploads a CSV of thousands of products, the system converts each row into a document and sends them into `insertMany` in batches of 500, instead of calling `insertOne` per row.
+>
+> **Log / event ingestion** — a service receiving many events per second typically buffers them briefly, then calls an unordered `insertMany` as one batch, so one malformed event does not block every other event.
+
 export const quizInsert = [
   {
     q: 'If you insert a document without an _id field, what happens?',

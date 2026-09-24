@@ -148,6 +148,25 @@ Networks drop and processes restart, and an event-driven system cannot afford to
 When your application needs to react to data changes, open a change stream instead of polling the collection on a timer. You get changes in order, the moment they happen, and a resume token to pick up exactly where you left off after any interruption.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Change stream (`watch()`) | Real-time — get events the moment they happen, resume precisely with a resume token, filter at the source with a pipeline | Requires a replica set, you must manage the resume token yourself, and the token expires if a consumer stays offline too long |
+| Polling the collection periodically | Simple to understand and debug, no dependency on the oplog or a replica set | Higher latency waiting for the poll interval, wastes queries when nothing changed, and you must track "last checked" yourself, risking missed events |
+
+## Common mistakes
+
+- **Not handling resume when the token is invalidated** — assuming `resumeAfter` always works, but if a consumer is down long enough for the token to fall outside the oplog window, reopening the stream errors and you must fall back to a full re-sync instead. Without that logic ready, the consumer crash-loops.
+- **Processing an event fire-and-forget without acking before saving the resume token** — if the consumer crashes mid-processing before saving the new token, that event replays on restart. Design handlers to be idempotent rather than assuming a change stream delivers each event exactly once.
+- **Using a change stream in place of a normal query for something that needs current state** — a change stream only tells you "what happened," not "what the state is right now." A consumer that comes back online after being offline still needs to query current state to bootstrap, rather than relying on the stream alone to rebuild all state.
+
+> 💡 Real-world example
+>
+> **A typical e-commerce platform** — uses a change stream to sync inventory status to a search index and cache in real time the moment stock updates, instead of polling the database every few seconds.
+>
+> **A typical ride-hailing / booking system** — uses a change-stream-style mechanism to push trip or order status changes to other services in an event-driven way, reducing the latency between the real state and when the downstream system learns about it.
+
 export const quizStreams = [
   {
     q: 'What internal structure are change streams built on?',

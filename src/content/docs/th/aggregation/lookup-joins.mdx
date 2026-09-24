@@ -264,7 +264,7 @@ $lookup คือ left outer join ที่แขวน document ฝั่ง fo
 >
 > **Analytics dashboard** — รายงานยอดขายที่ต้องโชว์ชื่อสินค้าและหมวดหมู่ควบคู่กับตัวเลขยอดขาย มักเก็บ `sales` กับ `products` แยก collection แล้วใช้ `$lookup` join ตอน query แทนที่จะฝังข้อมูลสินค้าไว้ในทุก order เพราะข้อมูลสินค้าเปลี่ยนบ่อยกว่า order
 >
-> **Keller Williams** — รายงานอสังหาริมทรัพย์ที่ต้อง join ธุรกรรมกับข้อมูลนายหน้าและข้อมูล listing ใช้ `$lookup` แบบ pipeline-style เพื่อกรองเฉพาะธุรกรรมในช่วงเวลาที่ต้องการก่อน join ลดขนาดข้อมูลที่ engine ต้องประมวลผลข้าม collection
+> **รายงานอสังหาริมทรัพย์ทั่วไป** — ระบบที่ต้อง join ธุรกรรมกับข้อมูลนายหน้าและข้อมูล listing มักใช้ `$lookup` แบบ pipeline-style เพื่อกรองเฉพาะธุรกรรมในช่วงเวลาที่ต้องการก่อน join ลดขนาดข้อมูลที่ engine ต้องประมวลผลข้าม collection — Keller Williams ใช้ MongoDB aggregation ในลักษณะนี้กับข้อมูล listing บน Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
 
 export const quizLookup = [
   {

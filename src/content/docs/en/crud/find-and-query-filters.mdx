@@ -245,6 +245,26 @@ Now each result carries only the requested field:
 A query filter is a document that describes the documents you want. List several fields and MongoDB requires all of them to match — that implicit AND is the workhorse behind most everyday reads.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| A plain equality filter (`field: value`) | Simple to write and read, uses an index directly and efficiently | Limited to answering "equals" questions only |
+| A multi-field filter with implicit AND | Sharper, more precise filtering without extra operators | The more fields, the more you need a compound index matching that field order, or the query slows down |
+| A filter using richer operators (`$gt`, `$in`, `$regex`, etc.) | Highly flexible, can answer range or pattern questions | Harder to design a covering index for; some operators (like an unanchored `$regex`) cannot use an index fully, or at all |
+
+## Common mistakes
+
+- **Assuming `find` returns results the instant you call it** — it actually returns only a lazy cursor. Forgetting `toArray()`/iteration produces no error, but no data either.
+- **Calling `find({})` and filtering the whole collection in client code** — send the filter you need to MongoDB so it can filter at the query level instead, reducing data sent over the wire and letting an index help.
+- **Confusing `find` with `findOne` when expecting a single document** — accidentally calling `find` and reading the first element from the array, when `findOne` fits the intent better and returns a plain null when nothing is found.
+
+> 💡 Real-world example
+>
+> **An e-commerce product search page** — users filter by several fields at once (category + price range + in-stock status). The system composes a filter document with multiple fields and operators, then relies on a compound index to keep the query fast even with millions of products in the collection.
+>
+> **An admin dashboard** — uses `findOne({ email })` to check a user at login and `find({ status: "active" })` to pull the list of active users for a reporting table.
+
 export const quizFind = [
   {
     q: 'What does find return, compared with findOne?',

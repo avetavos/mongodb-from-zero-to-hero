@@ -152,6 +152,25 @@ A useful way to remember it: a range "spends" all the ordering of the fields tha
 Order compound index fields by how the query uses them: exact matches first, the sort field next, range comparisons last. That single ordering lets one index narrow, order, and scan without a separate sort.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Order fields strictly by ESR | One index can serve several query shapes with a similar filter/sort/range pattern, fewer indexes to maintain | Requires discipline to re-check every time the query pattern changes, not just build once and forget |
+| Order fields ad hoc to match whatever query is in front of you | Fast to write, little upfront thought | The index is tied to one query shape; every new query shape means another index |
+
+## Common mistakes
+
+- **Placing a range field before the sort field** — a range breaks the continuity of the index fields that follow it, so MongoDB must sort the results in memory even with an index present.
+- **Treating ESR as an absolute rule for every query** — ESR is only a good starting point for the common filter-sort-range pattern. Always confirm with `explain()`, especially for more complex queries.
+- **Mixing several equality fields with sort fields without grouping them** — all equality fields must sit together at the very front of the index. Inserting a sort or range field between equality fields breaks the prefix that multi-field equality queries need.
+
+> 💡 Real-world example
+>
+> **An order management system querying `{ status: equality, createdAt: sort, totalAmount: range }`** — the team designed the index by ESR as `{ status: 1, createdAt: 1, totalAmount: 1 }`, so a dashboard that filters by order status, sorts by date, and filters by amount range runs with no in-memory sort stage at all.
+>
+> **A team debugging a query that slowed down after a requirement changed** — the query originally only filtered on equality and sorted, and ran fast, but after adding a new range condition without revisiting the index order, the query went back to showing an explicit sort stage in `explain()`. They had to build a new ESR-ordered index matching the changed query pattern.
+
 export const quizEsr = [
   {
     q: 'What does ESR stand for, in field order?',

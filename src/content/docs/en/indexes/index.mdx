@@ -107,6 +107,26 @@ The lessons build from one field to the full toolbox:
 An index trades a little extra write cost and storage for the ability to find documents by seeking through sorted values instead of scanning every document. The rest of this module is just choosing which fields to sort.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Index the fields your queries use often | Turns a query from a COLLSCAN into a fast seek | Adds work to every insert/update/delete and consumes disk and RAM |
+| Create no indexes at all | No extra write-time cost, nothing to maintain | Every query risks a COLLSCAN as the collection grows |
+| A compound index covering several query shapes | One index can serve multiple queries if the field order is right | Bigger and more expensive to maintain than a single-field index |
+
+## Common mistakes
+
+- **Indexing every field "just in case"** — every index adds cost to every write and consumes RAM, since MongoDB must keep it in the working set. Index only the fields your queries actually use.
+- **Never running `explain()` before deciding to add an index** — guessing which index will help is usually wrong. Look at real `explain()` output before creating or dropping any index.
+- **Reaching for a wildcard index as the default instead of a targeted one** — a wildcard index is convenient to start with, but bigger and slower than an index designed for the real query shape. Use it only when the schema is genuinely unpredictable.
+
+> 💡 Real-world example
+>
+> **MongoDB Atlas Performance Advisor** — analyzes a collection's slow query log and automatically suggests indexes to create. Real teams often use it as a starting point instead of guessing, then confirm with `explain()` before applying.
+>
+> **A large e-commerce team** — indexed every field in the products collection while migrating from a legacy system, then found write throughput collapse. They had to drop unused indexes one at a time, guided by `$indexStats`.
+
 export const quizIndex = [
   {
     q: 'What does MongoDB do to answer a query when no useful index exists?',

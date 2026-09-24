@@ -182,6 +182,25 @@ Most slow queries are cured by one of a small handful of moves:
 Turn on the profiler to find the queries that are actually slow, read system.profile for a high docsExamined-to-nreturned ratio, confirm with explain, and fix it — usually by adding the right index, projecting less, and bounding the result. Never guess at performance.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Profiler level `2` (log every operation) | Catches every slow query, including intermittent ones | High overhead, and the capped `system.profile` collection fills fast, rolling off old entries before you can inspect them |
+| Profiler level `1` with a `slowms` threshold | Low overhead, safe to leave running continuously in production | Intermittently slow queries, or ones only slightly over the threshold, can escape notice |
+
+## Common mistakes
+
+- **Setting `slowms` too low in production without considering the consequences** — too low a threshold logs nearly every query, effectively becoming level `2` by accident. Overhead rises and the capped collection cycles so fast the data you need is gone before you look.
+- **Assuming an existing index must always be chosen by the planner** — the planner can still pick a `COLLSCAN` even with an index present, if selectivity is low or the index does not match the query pattern, such as a wrong field order on a compound index. Check real `explain` output, do not assume from an index merely existing.
+- **Looking only at average latency instead of tail latency (p95/p99)** — an average easily hides occasional slow queries. The users who hit the slowest queries are the ones who actually feel the problem, not the average.
+
+> 💡 Real-world example
+>
+> **MongoDB Atlas Performance Advisor** — continuously scans real traffic and automatically suggests indexes to create, instead of a team manually combing through `system.profile` every day.
+>
+> **An e-commerce team during Black Friday** — temporarily enables profiler level `1` with a low `slowms` during peak traffic, to catch slow queries that only appear under high load, then reverts to the normal threshold afterward to control overhead.
+
 export const quizPerf = [
   {
     q: 'What does the database profiler do?',

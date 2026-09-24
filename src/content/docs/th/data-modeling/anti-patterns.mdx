@@ -96,9 +96,9 @@ anti-pattern ไม่ใช่ความผิดพลาดพิสดา�
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Wordnik** — กรณีศึกษาที่รู้จักกันดีเรื่อง unbounded array: เก็บทุก occurrence ของคำในประโยคตัวอย่างไว้ใน array เดียวของ document คำศัพท์ จนบาง document โตจนเป็นปัญหา ต้องย้ายไป reference แยก collection ภายหลัง
+> **พจนานุกรมออนไลน์ขนาดใหญ่ทั่วไป** — กรณีคลาสสิกของ unbounded array: เก็บทุก occurrence ของคำในประโยคตัวอย่างไว้ใน array เดียวของ document คำศัพท์ จนบาง document โตจนเป็นปัญหา ต้องย้ายไป reference แยก collection ภายหลัง
 >
-> **Parse** (แพลตฟอร์ม backend-as-a-service เดิมของ Facebook) — เจอปัญหา performance เสื่อมจาก document ที่อ้วนเกินและ query pattern ที่ over-reference ข้าม collection มากเกินไป จนต้อง refactor schema กลางคัน
+> **แพลตฟอร์ม backend-as-a-service ทั่วไป** — เจอปัญหา performance เสื่อมจาก document ที่อ้วนเกินและ query pattern ที่ over-reference ข้าม collection มากเกินไป จนต้อง refactor schema กลางคัน
 
 export const quizAntiPatterns = [
   {

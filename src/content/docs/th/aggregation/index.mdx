@@ -146,7 +146,7 @@ aggregation pipeline คือ array ของ stage ตัว document ไห�
 >
 > **Analytics dashboard ทั่วไป** — หน้า dashboard ที่ต้องแสดงยอดขายรวม ยอดขายแยกตามหมวด และ top product ในคำขอเดียว มักใช้ aggregation pipeline (`$group`, `$facet`) แทนการดึง document ทั้งหมดมาคำนวณใน backend เพราะลด round-trip และภาระของ application server
 >
-> **Keller Williams (real estate)** — ระบบรายงานอสังหาริมทรัพย์ที่ต้องสรุปยอดขาย นายหน้า และพื้นที่ ใช้ aggregation pipeline เพื่อคำนวณสรุปจากข้อมูลธุรกรรมจำนวนมากฝั่ง server แทนที่จะย้ายข้อมูลดิบทั้งหมดมาประมวลผลที่ application layer
+> **Keller Williams (real estate)** — ทีมข้อมูลใช้ Aggregation Pipeline Builder ใน MongoDB Compass เพื่อสร้าง pipeline สรุปข้อมูลจากข้อมูล listing กว่า 70 ล้านระเบียนบน MongoDB Atlas แทนที่จะย้ายข้อมูลดิบทั้งหมดมาประมวลผลที่ application layer ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
 
 export const quizIndex = [
   {

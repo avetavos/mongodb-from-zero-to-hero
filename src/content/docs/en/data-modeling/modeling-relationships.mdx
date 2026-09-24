@@ -115,6 +115,26 @@ The rule that follows: **never embed an array that can grow without bound.** If 
 Let the relationship's shape rule out the obviously-wrong options, then let your access pattern and the growth question pick between what remains. And whatever you do, never embed an array that has no natural limit — that is how an embedding decision becomes a 16 MB cliff.
 </Callout>
 
+## Trade-offs
+
+| Pattern | Benefit | Cost |
+|---------|---------|------|
+| One-to-few embedding | Reads the parent and child in one shot, atomic write | Works well only when the number of children is genuinely bounded |
+| One-to-many referencing (from the child side) | Parent stays small forever; children can grow without limit and be queried independently | Needs a second query to fetch all of a parent's children |
+| Many-to-many with reference arrays on both sides | Fast reads in both directions with no `$lookup` | Every write must update two documents at once, risking inconsistency if it fails partway |
+
+## Common mistakes
+
+- **Assuming cardinality (one-to-many, many-to-many) automatically decides embed or reference for you** — cardinality only tells you the possible shapes; access pattern and growth decide between what remains.
+- **Overlooking that a one-to-many that "looks small" today may be unbounded tomorrow** — a post's tags do not grow, but a post's comments can grow without limit. Always ask "can this grow without bound," not just look at the current count.
+- **Referencing both sides of a many-to-many relationship unnecessarily** — if you mainly read from one direction, a reference array on just that side is enough. Keeping both sides adds write cost for no benefit if nobody reads the other direction.
+
+> 💡 Real-world example
+>
+> **A team consolidating customer data from many legacy systems** — merged customer data from several legacy systems into a "single view" by embedding data related to one customer (one-to-few) in a single document, instead of spreading it across many tables as before.
+>
+> **A typical online learning platform** — models the many-to-many relationship between learners and courses with reference arrays on both sides, so querying both "courses this learner is enrolled in" and "learners enrolled in this course" is fast in both directions.
+
 export const quizRelationships = [
   {
     q: 'For a one-to-one relationship where the related data is small and read together, what is usually best?',

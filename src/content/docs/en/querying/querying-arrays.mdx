@@ -269,6 +269,26 @@ The same dot path works when the array holds sub-documents — `reviews.0.rating
 The defining question for every array query is: must the conditions hold on the same element, or merely somewhere in the array? Plain multi-condition filters spread across elements; $elemMatch locks them to one. Choosing wrong is the single most common array-query bug.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `$elemMatch` for multiple conditions | Forces every condition true on the same element, matching real intent almost always | Slightly more to write; you must think about "same element" up front |
+| Separate operators on the same field (no `$elemMatch`) | Shorter to write, reads like an ordinary scalar query | Each condition can pass on a different element, producing unintended matches — a common silent bug |
+| Positional/length queries (`$size`, `"field.0"`) | Targets a specific position or length directly in one call | Fragile to array reordering, and `$size` only accepts a literal value, not a range |
+
+## Common mistakes
+
+- **Assuming a filter on an array field trims the result to only the matching elements** — a query only decides whether to return the whole document or not; the returned array field still holds every element as before. To get only matching elements, use the positional projection operator `$` or a separate `$elemMatch` in the projection.
+- **Using a positional dot path like `borrowed.0` as if that position had fixed business meaning** — array order can change any time the app does `$push`, `$pull`, or overwrites the whole array. Relying on position is more fragile than querying by value condition.
+- **Confusing a plain `$all` with `$all` wrapping multiple `$elemMatch`** — `$all: [{ $elemMatch: {...} }, { $elemMatch: {...} }]` checks that some element (possibly a different one for each) satisfies each condition separately, not that all conditions hold on one element.
+
+> 💡 Real-world example
+>
+> **A shopping cart with conditional promotions** — a rule like "one item priced over 1000 with quantity at least 2" needs `$elemMatch`, because separate conditions could wrongly apply a discount to a cart with one expensive item and a different item with a high quantity.
+>
+> **An article or product tagging system** — finding articles carrying every tag a user selected (say, "javascript" and "backend" together) uses `$all` directly, while a recommendation engine that only checks which tags are "present at all" can use a plain single-value containment query.
+
 export const quizArrays = [
   {
     q: 'You filter an array field borrowed against the plain value "Compilers". What matches?',

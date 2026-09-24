@@ -91,6 +91,27 @@ The lessons that follow take each family in turn, then finish with the two power
 CRUD is just four verbs over a bag of documents. Master the singular form of each verb first; the plural form is the same call with a filter that happens to match more than one document.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Singular methods (insertOne/updateOne/deleteOne) | Precise control, affects one document, easy to predict | Must be called repeatedly to handle many documents, causing frequent round trips |
+| Plural methods (insertMany/updateMany/deleteMany) | Handles many documents in one call, much faster | A mistaken filter or array affects a much wider scope than intended |
+| Hard delete | Reclaims storage immediately, simplest | Permanent, no audit trail |
+| Soft delete (update a flag) | Recoverable, has an audit trail | Must filter the flag out of every subsequent query |
+
+## Common mistakes
+
+- **Writing insert code that loops one document at a time** — use `insertMany` to send them as a single batch, reducing the number of round trips to the server.
+- **Calling `updateMany`/`deleteMany` without carefully checking the filter first** — forgetting the filter or making it too broad unintentionally affects the whole collection.
+- **Not checking the result (acknowledgement) after a write** — seeing no error thrown and assuming success, when `matchedCount`/`modifiedCount`/`deletedCount` could be 0.
+
+> 💡 Real-world example
+>
+> **An e-commerce ordering system** — when a customer clicks checkout, the system `insertOne`s a new order, then `updateMany`s to reduce stock for every item in the cart, then finally `deleteMany`s carts abandoned for over 30 days. All four CRUD families work together in one pipeline.
+>
+> **A web app's session system** — uses `findOne` to check the session on every request, `updateOne` to renew its TTL, and `deleteOne` on logout.
+
 export const quizIndex = [
   {
     q: 'Which method reads back the first document that matches a filter?',

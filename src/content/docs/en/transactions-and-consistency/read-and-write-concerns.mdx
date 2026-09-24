@@ -174,6 +174,27 @@ export const ackFlow = `flowchart TD
 Stronger concerns cost latency, so do not reach for linearizable reads or journalled majority writes everywhere by reflex. Choose the lightest setting that still meets the correctness your use case demands, and spend the latency only where it buys you something.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Write concern `w: "majority"` | A write survives a failover because most members have confirmed it | Higher latency, since it waits for a network round trip to secondaries |
+| Write concern `w: 1` | Fastest, acknowledges as soon as the primary accepts | If the primary fails before replicating, that write can be lost |
+| Read concern `majority` | No dirty reads, no chance of seeing data later rolled back | Data can lag slightly, since it waits for replication to a majority first |
+| Read concern `local` | Fastest, freshest data from the queried node | Can read data not yet permanently committed, which can later be rolled back after a failover |
+
+## Common mistakes
+
+- **Using `w: "majority"` with `j: false` and assuming it is as safe as having the journal** — `majority` only says how many members confirmed, not that each one has flushed to disk. To truly survive a crash, always set `j: true` alongside it.
+- **Treating read concern and read preference as the same thing** — read concern controls how "fresh and committed" the data is; read preference controls "which member" answers. Setting only one does not solve the other's problem — reading from a secondary with a majority read concern still returns data that is behind, even if not dirty.
+- **Setting the strongest write concern as the default for every operation regardless of use case** — writing logs or easily-regenerated data with `w: "majority", j: true` just like financial data unnecessarily drops throughput, when those operations can tolerate a small amount of data loss.
+
+> 💡 Real-world example
+>
+> **Banking and payment systems** — use `w: "majority", j: true` for every financial transaction, because added latency is acceptable, but losing data is not, ever.
+>
+> **A typical digital asset exchange platform** — uses read concern `majority` when reading a balance to decide whether to approve a transaction, so it never reads a value that could later be rolled back after a failover and wrongly approves a transaction.
+
 export const quizConcerns = [
   {
     q: 'What does a write concern of w: "majority" guarantee?',

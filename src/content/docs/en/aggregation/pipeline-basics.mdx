@@ -189,6 +189,26 @@ Put `$match` *after* a heavy stage and you pay to process documents you were goi
 The first instinct for any pipeline should be: can I $match sooner? An early filter is the cheapest performance win in aggregation, because it can lean on an index and shrinks everything that follows.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `$match` early in the pipeline | Can use an index, drops documents before the heavy work, saves CPU and memory | The filter conditions must target fields that have not been reshaped yet, sometimes more awkward than filtering after computing |
+| `$match` late in the pipeline (after computing) | Filter conditions can target computed fields directly | Cannot use an index, and CPU is spent processing documents that end up discarded anyway |
+| `$project` listing fields explicitly | Precise control over the output shape, reduces the size of documents passed downstream | When the schema changes (fields added/removed), every place that lists fields needs updating |
+
+## Common mistakes
+
+- **Placing `$match` after `$group` or `$project` and expecting an index to still help** — the moment documents pass through `$group`/`$project`, they are no longer the documents stored on disk, so the collection's indexes no longer apply.
+- **Forgetting a `$project` at the end of the pipeline** — without reshaping the final result, the client receives documents with more fields than necessary, including internal fields only meant for computing, needlessly bloating the payload.
+- **Mixing inclusion (`1`) and exclusion (`0`) in the same `$project` and being confused by the error** — MongoDB only allows mixing them for `_id`; every other field must pick one or the other.
+
+> 💡 Real-world example
+>
+> **A typical analytics dashboard** — a query that filters by date range and status first (`$match` early in the pipeline, on an indexed field), then `$project`s down to only the fields a chart needs, lets a dashboard reading millions of documents a day respond in a few hundred milliseconds.
+>
+> **A typical real estate report** — always filters on fields like region and status with `$match` first, so an index can drop most documents immediately, then `$project`s down to only the fields the sales team needs to see in the report. Keller Williams uses this style of MongoDB aggregation pipeline with its listing data on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
 export const quizBasics = [
   {
     q: 'Why is it best to place $match as the first stage of a pipeline?',

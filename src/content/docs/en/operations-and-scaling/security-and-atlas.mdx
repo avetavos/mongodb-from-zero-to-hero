@@ -118,6 +118,25 @@ Doing all of this by hand — provisioning a replica set, generating certificate
 Production security is four layers: lock down the network, require TLS, require authentication, and grant least-privilege roles — plus encryption at rest on disk. Never put an unauthenticated MongoDB on a public address. If you would rather not assemble all of this yourself, MongoDB Atlas ships it secure by default.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Self-hosted MongoDB | Full control over infrastructure and configuration | You own every patch, TLS certificate rotation, backup, and security audit yourself |
+| MongoDB Atlas | Secure by default, backup and patching handled for you, less operational burden | Less low-level control; usage-based cost instead of self-hosted's fixed infrastructure cost |
+
+## Common mistakes
+
+- **Using the same database user across every service or environment** — if that one user's credentials leak, every service sharing it is affected. Separate users per service and per environment (dev/staging/prod) to limit the blast radius.
+- **Assuming TLS protects all your data, so skipping encryption at rest** — TLS only protects data in transit. If a disk or backup snapshot is stolen without at-rest encryption, the data is still readable directly.
+- **Leaving the Atlas IP access list wide open to any address for development convenience, then forgetting to restrict it before production** — that wide an opening effectively removes the network layer entirely; authentication alone does not substitute for the missing network restriction.
+
+> 💡 Real-world example
+>
+> **The pattern of unauthenticated public MongoDB instances making the news** — most notably the January 2017 wave of ransom attacks that wiped and ransomed tens of thousands of exposed instances — shows how much damage skipping just one authentication layer can cause ([Krebs on Security, "Extortionists Wipe Thousands of Databases, Victims Who Pay Up Get Stiffed", Jan 2017](https://krebsonsecurity.com/2017/01/extortionists-wipe-thousands-of-databases-victims-who-pay-up-get-stiffed/)).
+>
+> **A startup team moving from self-hosted to Atlas** — uses Atlas's Database Access and Network Access instead of managing `mongod.conf` and firewall rules on every machine themselves, cutting the time a small team spends on security down to configuration in a UI.
+
 export const quizSecurity = [
   {
     q: 'What is the cardinal production security rule for MongoDB?',

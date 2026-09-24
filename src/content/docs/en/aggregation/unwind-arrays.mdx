@@ -253,6 +253,26 @@ An order with no items still appears once, simply without an `items` field:
 $unwind turns one document with an N-element array into N documents. On its own it just inflates the stream. Its real power shows when a $group follows to summarise across all those flattened elements. Set preserveNullAndEmptyArrays when documents with empty arrays must survive.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `$unwind` to analyse array elements one at a time | Lets `$group`/`$match` see and summarise across individual elements, which is not possible directly on the whole array | The number of documents in the stream grows with the array size — the bigger the array, the more CPU/memory between stages |
+| Skip unwinding; process the array as a whole with operators like `$reduce`/`$map` | Document count stays the same, no stream inflation | More complex expressions, harder to read and debug than unwind-then-`$group` |
+| Set `preserveNullAndEmptyArrays: true` | Documents with an empty or missing array stay in the results, improving report accuracy | Requires the longer object-form syntax instead of the short string form, and you must handle a field that may be absent in later stages |
+
+## Common mistakes
+
+- **Placing `$unwind` before a `$match` that filters on a field outside the array** — documents explode unnecessarily early. `$match` as much as possible before `$unwind` to reduce how many documents need flattening.
+- **Forgetting that `$unwind`'s default silently drops documents with an empty or missing array** — if your row count after an unwind comes up short, suspect this first, since nothing raises an error.
+- **Unwinding without a following `$group`** — if nothing summarises the result back down, you have simply multiplied the data for nothing; the client receives many duplicate-looking documents with no added benefit.
+
+> 💡 Real-world example
+>
+> **An analytics dashboard for multi-item orders** — before summarising "sales per product," the system must `$unwind` the line-items array in each order, then `$group` by product name, to see true sales at the item level rather than the order level.
+>
+> **A typical real estate bundle contract** — a contract tied to multiple properties (a bundle listing) uses `$unwind` to break out each property so the report can count them as separate line items, then uses `preserveNullAndEmptyArrays` so contracts with no properties attached yet do not disappear from the report.
+
 export const quizUnwind = [
   {
     q: 'A document has an items array with 3 elements. What does $unwind on items produce?',

@@ -105,6 +105,25 @@ These patterns combine freely. A time-series application might bucket its readin
 Each pattern trades something — a copy to maintain, a little write-time work — for a faster or simpler read. Learn the problem each one solves so that when you meet the symptom, you already know the cure. Use a pattern because you have its problem, never just because it exists.
 </Callout>
 
+## Trade-offs
+
+| Pattern | Benefit | Cost |
+|---------|---------|------|
+| Bucket pattern | Far fewer documents per read, much lower index overhead | Requires designing the bucket size in advance, and cross-bucket queries get more complex |
+| Computed pattern | Very fast reads, no need to recompute the same value on every read | Adds write-time work, and risks a stale computed field if you forget to refresh it |
+
+## Common mistakes
+
+- **Applying a pattern before you actually have the problem** — Bucket, Computed, Subset, and Extended Reference all add schema complexity. Do not reach for one speculatively before measuring the real workload.
+- **Using the Computed pattern and forgetting to refresh the computed value** — a precomputed field goes stale immediately if the source changes with no job or trigger keeping it updated.
+- **Picking the wrong bucket size in the Bucket pattern** — too small and it is barely different from not bucketing at all; too large and it risks hitting the document size limit just like the original unbounded array.
+
+> 💡 Real-world example
+>
+> **A typical Bucket pattern for IoT data** — groups telemetry readings into one document per time window (say, per hour) instead of creating a new document per reading, cutting the document count by a large factor. Bosch uses MongoDB to store and analyze IoT data in real time this way, and is planning to move to MongoDB's Time Series Collections instead of grouping data by hand ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)).
+>
+> **A typical online game backend** — uses a Computed-pattern approach to precompute player stats and leaderboards ahead of time, instead of re-aggregating scores from every match each time someone views them.
+
 export const quizPatterns = [
   {
     q: 'Which pattern keeps only the few frequently-read elements in the main document and stores the full list elsewhere?',

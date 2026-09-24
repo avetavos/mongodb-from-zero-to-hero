@@ -76,6 +76,26 @@ The lessons build from the core choice outward into reusable structure:
 The relational reflex asks "where does this data belong so I never repeat it." The document reflex asks "what does my application read together, so it can read it in one shot." Start every schema from the queries, and the embed-or-reference decision follows naturally.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Embedding | Everything in one read, no join, atomic writes | Documents can grow without bound if you are not careful, risking the 16 MB ceiling, and data is duplicated |
+| Referencing | Small, stable documents, no duplicated data, shareable across many parents | Requires an extra query or `$lookup` to resolve the data, adding read latency |
+| Bucket pattern (for high-volume time-series-style data) | Fewer documents per unit of time, lower index overhead | Requires designing the bucket size in advance, adding grouping logic |
+
+## Common mistakes
+
+- **Thinking MongoDB has no schema at all** — every document already has a shape, driven by how the application writes it. The difference is only that the database does not enforce that shape unless you add validation yourself.
+- **Assuming there is "one correct schema" per entity** — a good schema depends on each application's access patterns, so the same entity can be modeled completely differently in two projects.
+- **Assuming a schema cannot change later because MongoDB has no built-in migration tool** — it can always change; you just write the migration script yourself and plan the rollout with an appropriate `validationLevel`.
+
+> 💡 Real-world example
+>
+> **Bosch** — uses MongoDB (via Bosch IoT Insights) to store and analyze IoT data in real time, such as torque data from aircraft assembly tools and data from vehicle ECUs. It currently manages time-sequenced data manually and plans to adopt MongoDB's Time Series Collections in the future for automatic grouping, rather than a hand-rolled bucket pattern as sometimes assumed ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)).
+>
+> **A typical large retail group** — uses MongoDB to manage a large product catalogue, deciding for every relationship whether to embed the fields it displays often or reference a source that changes more frequently.
+
 export const quizIndex = [
   {
     q: 'What is the central question that drives MongoDB data modeling?',

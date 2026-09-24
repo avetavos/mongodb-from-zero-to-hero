@@ -184,7 +184,7 @@ export const txnFlow = `flowchart TD
 >
 > **ธนาคาร/fintech ทั่วไป** — ใช้ multi-document transaction สำหรับการโอนเงินระหว่างบัญชี หัก balance จากบัญชีต้นทางและเพิ่มให้บัญชีปลายทางต้อง commit พร้อมกันเสมอ เพื่อไม่ให้เงิน "หาย" หรือ "งอก" ระหว่างทาง
 >
-> **Coinbase** — ใช้ transaction ที่ผูกกับ session เพื่อรักษาความถูกต้องของยอดเงินดิจิทัลข้าม ledger document หลายฉบับ เพราะข้อผิดพลาดด้าน consistency ในระบบการเงินมีต้นทุนสูงกว่าการแลก latency ที่เพิ่มขึ้นจาก transaction มาก
+> **แพลตฟอร์มแลกเปลี่ยนสินทรัพย์ดิจิทัลทั่วไป** — ใช้ transaction ที่ผูกกับ session เพื่อรักษาความถูกต้องของยอดเงินดิจิทัลข้าม ledger document หลายฉบับ เพราะข้อผิดพลาดด้าน consistency ในระบบการเงินมีต้นทุนสูงกว่าการแลก latency ที่เพิ่มขึ้นจาก transaction มาก
 
 export const quizMulti = [
   {

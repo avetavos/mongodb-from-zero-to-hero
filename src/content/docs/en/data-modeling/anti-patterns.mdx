@@ -70,6 +70,24 @@ Notice that every fix is just the disciplined application of the earlier lessons
 Anti-patterns are not exotic mistakes; they are ordinary decisions that did not survive growth. The defenses are the habits from this whole module: bound your arrays, reference what is shared and large, embed what is read together, give each entity its own collection, and use collation — not regex — for case-insensitive matching.
 </Callout>
 
+## Trade-offs
+
+| Approach | Benefit | Cost |
+|---------|---------|------|
+| Disciplined modeling up front (bound arrays, choose embed/reference by access pattern) | Fewer anti-patterns, much easier to fix problems at scale | More upfront design time before writing code |
+| Model quickly without planning ahead | Fast to start, ships sooner | Anti-patterns accumulate quietly, then hurt badly at scale, forcing a schema migration under pressure later |
+
+## Common mistakes
+
+- **Thinking anti-patterns are only beginner mistakes** — most were reasonable decisions at the original design point that degraded as the data grew, not carelessness.
+- **Fixing an anti-pattern by changing the schema immediately with no migration plan** — moving from an embedded array to a reference on a collection that already has production data needs a staged rollout (dual-write, then backfill), not a single deploy.
+
+> 💡 Real-world example
+>
+> **A large online dictionary** — a classic unbounded-array case: storing every occurrence of a word across example sentences in a single array on the word's document, until some documents grew large enough to cause problems, eventually requiring a move to a separate referenced collection.
+>
+> **A typical backend-as-a-service platform** — hit degrading performance from overly bloated documents and an over-referenced query pattern spanning too many collections, forcing a mid-flight schema refactor.
+
 export const quizAntiPatterns = [
   {
     q: 'A document embeds an array that grows without limit. What is the recommended fix?',

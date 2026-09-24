@@ -122,6 +122,25 @@ A successful connection drops you at a `test>` prompt. From there, typing `db.ru
 Docker turns "install and configure a database" into "run an image." Keep your data in a named volume, pin a version tag, and you have a disposable yet persistent MongoDB you can wipe and recreate at will.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Run MongoDB via Docker | Fast to wipe and recreate, nothing permanent left on the machine, and an environment close to production where teams typically run the same container | Requires a running Docker engine at all times, and a container adds a little overhead compared to running directly on the host |
+| Install MongoDB directly on the machine | No container layer in between; connect through `localhost` directly | Harder to reset or change versions, and different machines on the team can end up with mismatched versions or config |
+
+## Common mistakes
+
+- **Forgetting to pin the image tag and using `mongo:latest`** — the next time you pull the image, the server version can change unexpectedly and break config or behavior you relied on. Always pin a major version like `mongo:8`.
+- **Removing a container with `docker rm` and assuming the data is gone too** — if the data lives in a named volume, removing the container does not touch it; conversely, someone who never mounted a volume at all is surprised the data disappears every time the container restarts.
+- **Exposing port `27017` with no password set and assuming a "dev machine nobody touches"** — if the machine unintentionally exposes that port to an outside network (such as a cloud VM), skipping authentication lets outsiders connect directly.
+
+> 💡 Real-world example
+>
+> **Many teams' CI pipelines** — create and tear down a fresh `mongo` container on every integration test run, so every test starts from the same empty database with no state carried over between runs.
+>
+> **A backend team working across machines** — commit a `docker-compose.yml` file into the project so everyone on the team (and CI) gets the exact same MongoDB version with a single command, instead of everyone installing it themselves and ending up with mismatched versions.
+
 export const quizDocker = [
   {
     q: 'Why mount a named volume at /data/db when running the mongo container?',

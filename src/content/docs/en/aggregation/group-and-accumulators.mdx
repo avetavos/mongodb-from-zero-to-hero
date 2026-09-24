@@ -280,6 +280,26 @@ A single summary document represents the whole collection:
 Picture $group as folding the stream by a key: one output document per distinct key. The accumulators decide what each fold remembers — a sum, an average, a set of values. Set _id to null to fold everything into one grand total.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `$group` in the pipeline | Computes the summary server-side, returning only the collapsed result — saves bandwidth and client-side memory | Must be expressed as MongoDB expressions (accumulators), which can be more limited than logic written in application code |
+| Grouping in application code (pull everything, summarise yourself) | Fully flexible, use any library or logic you want | Must send every raw document over the network first — slow and memory-heavy at scale |
+| Exact accumulators like `$sum`, `$avg` | 100% accurate results, suitable for financial figures or reporting | Must scan/process every document in the group, heavier than an approximation |
+
+## Common mistakes
+
+- **Assuming original fields automatically survive after `$group`** — after `$group`, only `_id` and the accumulators you declared exist. Every other original field is gone unless pulled forward with `$first`, `$last`, or `$push`.
+- **Using `$push` when you actually want distinct values** — `$push` keeps duplicates and preserves order. For a list with no duplicates, use `$addToSet` instead of deduplicating afterward yourself.
+- **Expecting `$group` output to be sorted** — `$group` makes no promise about the order of the groups it produces. Append your own `$sort` afterward if you need a specific order.
+
+> 💡 Real-world example
+>
+> **A typical analytics dashboard** — computing "total sales per day" or "weekly active users" is commonly done with `$group` keyed by date/week and an accumulator like `$sum`, instead of pulling every raw event to count in the application server.
+>
+> **A typical real estate sales report** — summarising sales per broker uses `$group` with `$sum` and `$avg` to compute transaction value and average sale price per person, without pulling the entire transaction history out to compute outside the database. Keller Williams uses this style of MongoDB aggregation pipeline to summarise more than 70 million listing records on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
 export const quizGroup = [
   {
     q: 'What does the _id field of a $group stage specify?',

@@ -424,6 +424,26 @@ The counts now reflect everyone who was touched in this single operation:
 The single rule that prevents the worst update bug: to change part of a document, wrap your change in $set (or $inc, $push, $unset, …). A bare document with no operators replaces the whole thing.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `updateOne` | Affects a single document, precise and easy to reason about what changed | Must be called repeatedly to change many documents, costing multiple round trips |
+| `updateMany` | Changes many documents in one call, much faster at scale | Only atomic "per document," not across documents — another reader can see a partially-updated state while the operation is still running |
+| Update via operator (partial `$set`) | Changes only the fields you want; the rest of the document stays safe | You must always remember to include an operator, or risk a full replacement |
+
+## Common mistakes
+
+- **Forgetting to await the result of `updateOne`/`updateMany` and moving straight to the next logic** — code proceeds assuming the update succeeded without ever checking `matchedCount`/`modifiedCount`, making it hard to debug when the update did not actually take effect.
+- **Looping `updateOne` when you really need `updateMany`** — wanting to change every document matching one filter but calling `updateOne` in a loop, when `updateMany` does the same job in one call and is much faster.
+- **Assuming `updateMany` is one atomic transaction across the whole batch** — it is only atomic per individual document. If you need atomicity across documents, you need a multi-document transaction, not just `updateMany`.
+
+> 💡 Real-world example
+>
+> **Stock deduction on order confirmation** — when an order is confirmed, the system calls `updateOne` to set the order's `status` field to `"confirmed"` with `$set`, then separately calls `updateMany` (`$inc: { stock: -qty }`) for the several products in that cart, aware the two operations are not atomic together, so it wraps them in a transaction when correctness matters most.
+>
+> **Batch notifications** — running a flash sale and needing to flag `notified: true` for every user subscribed to that category at once, using a single `updateMany({ subscribedCategory: "electronics" }, { $set: { notified: true } })` instead of looping an update per person.
+
 export const quizUpdate = [
   {
     q: 'You call updateOne with a plain document and no operators. What happens?',

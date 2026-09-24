@@ -193,6 +193,25 @@ The document is still there, just flagged — your reads filter it out, and you 
 Run your delete filter through find first. If the documents it returns are exactly the ones you mean to lose, swap find for deleteMany. If not, fix the filter — there is no undo on a hard delete.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Hard delete (`deleteOne`/`deleteMany`) | Reclaims storage immediately, leaves nothing behind, simplest to reason about | Permanent — no audit trail, no undo |
+| Soft delete (update a flag such as `deleted: true`) | Recoverable, keeps a full audit trail and historical data | Every read query must filter out the flag, or "deleted" documents reappear, and the collection keeps growing |
+
+## Common mistakes
+
+- **Using `deleteOne` when you actually need to remove every matching document** — assuming everything is gone when `deleteOne` only ever stopped at the first match, leaving other matching documents behind in the collection.
+- **Not checking `deletedCount` after a delete** — assuming success just because no error was thrown, when `deletedCount` could be 0 from a misspelled filter or field name.
+- **Doing a soft delete and forgetting to update normal queries to exclude flagged documents** — writing a plain find without adding a `deleted: { $ne: true }` condition, so "deleted" data reappears in search results users see.
+
+> 💡 Real-world example
+>
+> **Abandoned carts** — a daily job calls `deleteMany({ status: "cart", updatedAt: { $lt: thirtyDaysAgo } })` to sweep out carts with no activity for over 30 days, so the collection does not bloat with data nobody will ever check out.
+>
+> **User accounts** — when a user clicks "delete account," the system does not call `deleteOne` immediately. It soft-deletes with `updateOne` setting `deleted: true` and `deletedAt`, giving a recovery window (say, 30 days) before a background job calls the real `deleteOne` once that window passes.
+
 export const quizDelete = [
   {
     q: 'What does deleteMany with an empty filter do?',

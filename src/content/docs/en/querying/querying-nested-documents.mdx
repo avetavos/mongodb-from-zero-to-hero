@@ -221,6 +221,26 @@ Only members whose *same* review names that book and clears the rating bar match
 To match one buried field, use a quoted dot path — partial and order-free. To match an entire embedded document, hand the field a complete document — but know it is an exact, ordered comparison that breaks the moment the stored keys are reordered or a field is added.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Dot-notation query on a shallow, stable nested field | Easy to read, indexes well — a compound index on a dot path behaves like a normal field | You must know the exact path in advance; a schema change means updating every query that references it |
+| Deeply nested or per-document varying shape | Flexible for data whose shape differs document to document | Hard to build a covering index for, worse selectivity, and queries must handle missing fields or differing types |
+| Matching a whole sub-document exactly | Checks "identical in every way" in one call | Sensitive to field order and extra fields, far narrower than dot notation |
+
+## Common mistakes
+
+- **Expecting an index on a deeply nested dot path to always perform as well as one on a top-level field** — the deeper the nesting and the less uniform each document's shape, the worse the selectivity, and the index ends up covering broader cases than necessary.
+- **Using dot notation on a field that some documents store as a nested object but others store differently or omit entirely** — the query does not error, but results quietly come up short, since differently-shaped documents simply do not match. This makes debugging hard.
+- **Letting a schema nest deeper and deeper (four or five levels) without reconsidering whether to flatten it or split into a separate collection** — the deeper the nesting, the longer and more fragile the dot paths become every time the data is restructured.
+
+> 💡 Real-world example
+>
+> **An e-commerce app's user profile system** — indexes `address.zipcode` and `address.country` because the address schema is stable and shallow, making queries for users by shipping area fast and fully indexed.
+>
+> **A CMS storing content blocks as nested JSON that varies shape per page** — different page types (articles, landing pages, product pages) store nested fields to different depths. Backend teams commonly avoid querying deep into these blocks directly and instead keep summary fields at the top level, to keep queries and indexes simple.
+
 export const quizNested = [
   {
     q: 'How do you match the city field inside an embedded address object?',

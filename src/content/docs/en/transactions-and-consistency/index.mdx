@@ -41,6 +41,27 @@ export const overview = `flowchart TD
 The most common consistency mistake is reaching for a multi-document transaction when a better document design would have made one atomic write enough. Always ask whether the data that must change together could live together first.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Design documents so single-document atomicity covers the need | Atomicity for free, no session or commit overhead, lowest latency | Requires upfront schema thought; does not fit data that truly must stay independent entities |
+| Multi-document transaction (full ACID) | Guarantees correctness across documents and collections | Higher latency, requires a replica set, and risks aborting under a write conflict |
+| Write concern `w: "majority"` | A write survives a failover because most members have confirmed it | Slower than `w: 1`, since it waits for replication to other members |
+| Read concern `majority` | No dirty reads, no chance of seeing data that later gets rolled back | Data can lag slightly compared with `local` |
+
+## Common mistakes
+
+- **Reaching for a transaction the moment an operation touches more than one document** — without first asking whether redesigning the documents so the data that changes together lives together would remove the need for a transaction entirely.
+- **Conflating durability with visibility** — treating write concern and read concern as the same knob, when write concern controls how well a write survives losing members, and read concern controls how fresh and committed the data you read is. They are different axes.
+- **Setting the strongest possible concern as the default for every operation** — without differentiating by use case, so an operation that could tolerate more uncertainty pays latency for nothing, when it should use the weakest guarantee that is still correct for that job.
+
+> 💡 Real-world example
+>
+> **A typical bank or fintech system** — uses a multi-document transaction for transfers between accounts, so debiting the source account and crediting the destination account always commit together, with no way for money to disappear or appear out of nowhere in between.
+>
+> **A typical digital asset exchange platform** — combines both a multi-document transaction and majority write concern when handling digital balances, because a consistency error in a financial system costs far more than the added latency.
+
 export const quizIndex = [
   {
     q: 'What is the unit of atomicity in MongoDB by default?',

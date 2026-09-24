@@ -51,6 +51,27 @@ Every lesson shows the same query five ways — in `mongosh`, then the Node.js, 
 Most application code reads far more than it writes. Time spent learning to write precise filters and lean projections pays back on every page load — a good query returns exactly the documents and fields you need, and nothing you have to throw away on the client.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Filter only, no projection specified | Fast to write, query works right away | Returns unused fields every time, wasting bandwidth and client-side memory |
+| Filter + a projection listing explicit fields | Reduces data sent over the network, forces the team to see the exact fields the app relies on | Must be kept in sync as the schema evolves |
+| An exact-match filter | Always fast and indexable | Cannot answer range/set/complex expression questions |
+| A complex filter with several operators and `$and`/`$or` | Answers much more detailed questions | Harder to read, and risks pushing the query planner toward the wrong index |
+
+## Common mistakes
+
+- **Using `$where` to write a condition standard operators cannot express** — `$where` runs JavaScript per document, so it is very slow, cannot use an index at all, and opens a security risk if it takes user input. Always look for a standard operator or aggregation first.
+- **Writing an unanchored regex like `/foo/` instead of `/^foo/`** — a regex without `^` forces MongoDB to scan every document in the collection, unable to use an index even if that field has one. If you mean "starts with," always anchor at the start.
+- **Assuming skipping the projection has no cost** — every field you do not exclude travels over the network, and the application must serialize all of it. For documents with large fields (a long description, or a big array), a forgotten projection is a common cause of latency.
+
+> 💡 Real-world example
+>
+> **An e-commerce product filter page** — a sidebar filtering by category, price range, brand, and rating maps directly onto comparison/logical operators (`$gte`, `$lte`, `$in`), and uses a projection to return only the fields a product card needs (name, price, main image), not the whole document.
+>
+> **An internal admin search panel** — a tool for searching users or orders internally often accidentally lets users type their own regex straight into the query with no anchor, making the search page get slower and slower as the data grows.
+
 export const quizIndex = [
   {
     q: 'In MongoDB, what is a query filter?',

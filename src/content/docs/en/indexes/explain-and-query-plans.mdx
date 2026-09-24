@@ -220,6 +220,25 @@ The plan goes straight from `IXSCAN` to the results with no `FETCH` in between, 
 Run explain("executionStats") and compare totalDocsExamined with nReturned. A COLLSCAN or a large gap between the two is the proof you need a better index — and a totalDocsExamined of zero is the proof your query is covered.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Read `explain()` before adding/dropping an index | See real evidence of how much a query scans and which index it uses; precise decisions | Requires running the real query and reading the output — extra time before acting |
+| Guess which index helps and create it | Fast, no analysis needed | Often wrong — you end up with an index the query never uses, still paying its write cost with no benefit |
+
+## Common mistakes
+
+- **Creating an index and never checking whether the query actually uses it** — an index existing does not mean the planner picks it. Run `explain()` to confirm the `winningPlan` is really an `IXSCAN` on that index.
+- **Looking only at `nReturned` without checking `totalDocsExamined`** — a query returning few results but with a very high `totalDocsExamined` is still an inefficient query, even if the result looks correct and fast enough by eye.
+- **Running `explain("executionStats")` carelessly against production** — this mode actually runs the query, not just estimates a plan. For a write-heavy or expensive read query, running it repeatedly against production adds real load to the server.
+
+> 💡 Real-world example
+>
+> **A platform team that sets a slow-query threshold in MongoDB Atlas** — every query slower than the threshold gets logged with a plan summary, and engineers re-run `explain("executionStats")` to confirm before deciding to add an index, instead of guessing from a dashboard alone.
+>
+> **A backend team debugging an API endpoint that keeps slowing down as data grows** — used `explain()` to discover a query that used to be covered had gained a `FETCH` stage after a small projection change, then fixed the index to cover the fields the new query needed.
+
 export const quizExplain = [
   {
     q: 'In explain output, what does a COLLSCAN stage indicate?',

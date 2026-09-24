@@ -60,6 +60,25 @@ This first module gives you everything you need before the real work begins:
 Throughout the course we keep returning to the same imaginary library: members, the fines they owe, and the books they borrow. Reusing one tiny dataset means you spend your attention on the database, not on re-learning a new example every lesson.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| The document model's flexible schema | Start writing code and shipping features fast, without fully designing a schema on day one | No compile-time guarantee that every document in a collection shares the same shape — consistency becomes your team's own responsibility |
+| BSON with more types than JSON | Store Date, ObjectId, and Decimal128 exactly, without converting values yourself | Each language driver maps these types onto its own native types differently — you need to understand the mapping before relying on it |
+
+## Common mistakes
+
+- **Thinking "no schema" means no design at all** — a flexible schema still needs discipline. Teams that let each document's shape drift unintentionally run into query bugs later.
+- **Skipping the module order because you assume each module is fully independent** — later modules build on earlier ones, especially the vocabulary from Intro & Documents. Jumping straight to Aggregation can leave you confused by terms like document, field, and BSON.
+- **Treating MongoDB as the one database that fits every job** — this module covers when a document database fits and when a relational database is still the better tool. A deliberate choice matters more than following a trend.
+
+> 💡 Real-world example
+>
+> **eBay** — uses MongoDB as one of its core enterprise data platform standards, powering customer-facing applications on ebay.com, including a product catalog scaled across large replica sets for massive read volume ([mongodb.com/customers/ebay](https://www.mongodb.com/customers/ebay), 2017).
+>
+> **Forbes** — uses MongoDB Atlas as the backend for the CMS that serves all content on Forbes.com; the document model's flexible schema let the team ship features faster ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019).
+
 export const quizIndex = [
   {
     q: 'What is the basic unit of data MongoDB stores?',

@@ -105,9 +105,9 @@ MongoDB เก็บข้อมูลของคุณเป็น document �
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Forbes** — ย้าย CMS จาก relational schema ที่ตายตัวมาเป็น MongoDB เพราะบทความแต่ละประเภทมี field ไม่เหมือนกัน การบังคับทุกประเภทให้อยู่ใน table เดียวกันทำให้ schema ซับซ้อนขึ้นเรื่อย ๆ เมื่อเนื้อหาใหม่ ๆ เพิ่มเข้ามา
+> **Forbes** — ย้าย CMS จาก schema แบบ relational เดิมมาเป็น MongoDB Atlas เพราะ schema ที่ยืดหยุ่นของ document model ช่วยให้ทีมพัฒนาฟีเจอร์ได้เร็วขึ้น ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019)
 >
-> **MetLife** — สร้างระบบ "single customer view" ด้วย MongoDB โดยรวมข้อมูลลูกค้าจากระบบ relational เดิมหลายสิบระบบให้เป็น document เดียวต่อลูกค้าหนึ่งคน แทนที่จะพยายาม join ข้ามระบบเดิมที่แยกกันอยู่
+> **ทีมที่รวมข้อมูลลูกค้าจากหลายระบบเดิม** — สร้างระบบ "single customer view" ด้วย MongoDB โดยรวมข้อมูลลูกค้าจากระบบ relational เดิมหลายสิบระบบให้เป็น document เดียวต่อลูกค้าหนึ่งคน แทนที่จะพยายาม join ข้ามระบบเดิมที่แยกกันอยู่
 
 export const quizWhat = [
   {

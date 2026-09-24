@@ -139,6 +139,25 @@ export const embedDiagram = `flowchart LR
 The cheapest transaction is the one you never need. Model data that changes together into a single document and one ordinary update keeps it consistent, with no session, no commit, and no extra cost.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Embed data in a single document | Free atomicity, no session, no commit, the lowest latency possible | The document grows with the embedded data, potentially approaching the 16MB BSON limit or slowing reads/writes that must move the whole thing |
+| Split data across documents/collections, using a multi-document transaction when they must change together | Flexible to query and scale each part independently | Loses the free atomicity, paying session and commit overhead every time a joint change is needed |
+
+## Common mistakes
+
+- **Assuming an application-level read-then-write is atomic because it ends in a single document write** — it is not. The gap between reading a value, computing on it, and writing it back always leaves room for a race condition. Use an atomic operator like `$inc` or `findOneAndUpdate` that does the read-modify-write on the server in one step instead.
+- **Treating "atomic" as meaning "isolated from other documents" too** — atomicity only guarantees your own document. If business logic must read another document to decide what to write, there is still a race against that document. That is a different problem from multi-document consistency, solved with different tools.
+- **Embedding everything without watching the data's growth rate** — seeing that embedding gives free atomicity and then embedding an unbounded array, such as logging every event a member does, pushes the document toward the size limit and needlessly slows down every operation on it.
+
+> 💡 Real-world example
+>
+> **A typical e-commerce platform** — keeps an inventory count as a single field in the product document and uses an atomic `$inc` to decrement/increment stock on each order, instead of opening a transaction every time, giving high throughput with no overselling from a race condition.
+>
+> **A typical social app** — keeps a like count as a field in the same post document as its content. Each like is a single atomic `$inc`, needing no session or transaction even with thousands of concurrent taps per second.
+
 export const quizSingle = [
   {
     q: 'An update sets two fields and pushes onto an array in one document. What can another reader observe?',

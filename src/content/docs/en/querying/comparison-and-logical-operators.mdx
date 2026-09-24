@@ -271,6 +271,26 @@ db.members.find({ joined: { $type: "int" } })
 Comparison and element operators ($gt, $in, $exists, $type) sit inside a field's value. Logical operators ($and, $or, $not, $nor) sit at the top level of the filter and take whole sub-filters. Keeping that split straight in your head prevents most malformed queries.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Equality filter (`$eq` or a plain value) | Fastest, always fully uses an index | Cannot answer range or set questions |
+| Range/set operators (`$gt`, `$gte`, `$lt`, `$lte`, `$in`) | Answers range/set questions, still indexable if the field has a matching index | Lower selectivity than equality, especially for wide ranges — can read more documents than necessary |
+| Combining with `$and`/`$or`/`$nor` | Answers complex logical questions in one call | Harder to plan indexes for, especially `$or`, which can force scanning multiple paths or the whole collection |
+
+## Common mistakes
+
+- **Assuming `$ne`/`$nin` use an index as efficiently as `$eq`** — in practice `$ne` usually has low selectivity (it must consider nearly every document that does not match), so the query planner often chooses not to use an index at all, even if one exists on that field.
+- **Using `$or` across different fields per clause and expecting one index to cover all of them** — MongoDB must run a separate index scan for each `$or` clause and merge the results. If a clause has no suitable index, that clause falls back to scanning the whole collection.
+- **Wrapping `$not` around a plain value instead of an operator expression** — `{ field: { $not: { $eq: 5 } } }` is correct, but `{ field: { $not: 5 } }` is not a form `$not` supports. `$not` must always wrap an operator expression, never a bare value.
+
+> 💡 Real-world example
+>
+> **An e-commerce price-range filter** — a min/max price slider on a product page translates directly into `{ price: { $gte: min, $lte: max } }`, and a multi-select brand dropdown translates into `$in`.
+>
+> **A fintech fraud-detection system** — rules flagging suspicious transactions are commonly written with `$or` combining several conditions, such as an unusually large amount, or a country the account has never transacted from before, or an unusually high frequency in a short time.
+
 export const quizComparison = [
   {
     q: 'How do you find documents where fines is greater than 2?',

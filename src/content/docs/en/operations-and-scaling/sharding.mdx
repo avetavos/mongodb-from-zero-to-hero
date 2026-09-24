@@ -115,6 +115,25 @@ A bad shard key cannot be quietly fixed later, so this choice deserves care up f
 Sharding spreads one collection across many shards, and a router uses the config servers' map to send each request to the right one. Everything depends on the shard key: pick one with high cardinality and even distribution, and avoid monotonically increasing keys that hotspot a single shard.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Ranged sharding | Serves range queries fast — targeted to contiguous chunks | Risks a hotspot if writes cluster at one end of the range |
+| Hashed sharding | Spreads writes evenly across shards, reducing hotspots | Destroys range locality — a range query becomes scatter-gather across every shard |
+
+## Common mistakes
+
+- **Picking a monotonically increasing field (like a timestamp or auto-increment `_id`) directly as the shard key** — every new write lands on the top chunk of one range, hammering a single shard while others sit idle. This is the most common hotspot in a newly launched sharded cluster.
+- **Forgetting the balancer needs I/O and network during chunk migration** — migration runs in the background but still competes with real traffic for resources. Latency-sensitive clusters should schedule a balancing window during low-traffic periods.
+- **Assuming sharding fixes a query with no supporting index** — sharding spreads data, it does not speed up a query that scans a whole collection. A query without a proper index will scan every shard at once instead of one machine, which is worse.
+
+> 💡 Real-world example
+>
+> **A typical large-scale search and log system** — uses a MongoDB sharded cluster to hold billions of documents, spread across many shards.
+>
+> **MongoDB Atlas** — helps recommend when to shard through its Shard Key Advisor and automatically manages the balancer and chunk migration, reducing the operational work compared with a self-hosted cluster.
+
 export const quizShard = [
   {
     q: 'What does the application connect to in a sharded cluster?',

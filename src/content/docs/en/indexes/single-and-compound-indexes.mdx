@@ -166,6 +166,25 @@ You can see in `explain` which prefix a query matched, which is the subject of a
 A compound index serves any query that uses an unbroken run of its leading fields, starting from the first. The moment a query skips the leftmost field, the index can no longer seek for it.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Single-field index | Simple, exactly covers one query shape, easy to maintain | Only covers a query that filters/sorts on that one field |
+| Compound index | Can cover several query shapes at once if the field order matches the left-prefix | Bigger, slower to write, and useless if the field order is wrong |
+
+## Common mistakes
+
+- **Assuming a compound index helps a query filtering on any field within it** — a compound index only serves left-prefixes. A query that filters on the second field alone, skipping the first, cannot seek at all.
+- **Creating a single-field index that duplicates the prefix of an existing compound index** — if `{ city: 1, joined: -1 }` already exists, a separate `{ city: 1 }` index is completely redundant, wasting space and write cost for nothing.
+- **Reversing the field order in a compound index without checking the effect on other queries using it** — field order is a design decision. Change it, and a query shape that used to seek can suddenly become a COLLSCAN.
+
+> 💡 Real-world example
+>
+> **An Airbnb-style booking system** — uses a compound index on `{ city: 1, checkIn: 1, price: 1 }` to support filtering by city, sorting by check-in date, and filtering by price range with a single index, instead of three separate single-field indexes.
+>
+> **An analytics team querying many shapes on the same collection** — ran into a compound index designed for one dashboard not helping another team's query, because the field order did not match the needed left-prefix, so they had to add another index instead of relying on the existing one.
+
 export const quizCompound = [
   {
     q: 'You have a compound index on { city: 1, joined: -1 }. Which query can it serve with a seek?',

@@ -135,7 +135,7 @@ Security ใน production คือสี่ชั้น: ล็อกเคร
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **เหตุการณ์ MongoDB instance ที่เปิด public โดยไม่มี authentication** ที่เป็นข่าวหลายครั้งในอดีต (เช่นคลื่นการโจมตีเรียกค่าไถ่ปี 2017 ที่ instance นับหมื่นเครื่องถูกยึดข้อมูลไป) — เป็นตัวอย่างว่าการข้ามแค่ authentication layer เดียวสร้างความเสียหายได้มากแค่ไหน
+> **เหตุการณ์ MongoDB instance ที่เปิด public โดยไม่มี authentication** ที่เป็นข่าวหลายครั้งในอดีต — โดยเฉพาะคลื่นโจมตีเรียกค่าไถ่เดือนมกราคม 2017 ที่ instance หลายหมื่นเครื่องถูกลบข้อมูลและเรียกค่าไถ่ เป็นตัวอย่างว่าการข้ามแค่ authentication layer เดียวสร้างความเสียหายได้มากแค่ไหน ([Krebs on Security, "Extortionists Wipe Thousands of Databases, Victims Who Pay Up Get Stiffed", ม.ค. 2017](https://krebsonsecurity.com/2017/01/extortionists-wipe-thousands-of-databases-victims-who-pay-up-get-stiffed/))
 >
 > **ทีมสตาร์ทอัพที่ย้ายจาก self-hosted ไป Atlas** — ใช้ Database Access และ Network Access ของ Atlas แทนการจัดการ `mongod.conf` และ firewall rule เองทุกเครื่อง ลดเวลาที่ทีมเล็ก ๆ ต้องใช้ดูแล security ให้เหลือแค่การตั้งค่าในหน้า UI
 

@@ -126,6 +126,26 @@ A trimmed reply shows each member with its role in the `stateStr` field:
 A replica set keeps many copies of your data in sync through the oplog and elects a new primary by majority vote when the old one fails. Use an odd number of voters so a single failure never produces a tie.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Replica set (vs. a single `mongod`) | Automatic failover, no long downtime when the primary fails | At least three nodes to run; writes are always still bottlenecked on one primary |
+| Reading from secondaries | Spreads read load off the primary | Data returned can be stale due to replication lag |
+| Reading from the primary only | Maximum consistency, always reads the latest write | No benefit from spreading load; the primary carries the full burden |
+
+## Common mistakes
+
+- **Assuming writes scale by adding secondaries** — secondaries only help spread reads. Every write still goes to the single primary. Scaling writes means sharding, not adding secondaries.
+- **Placing every member in the same availability zone or data center** — a replica set protects against a node failing, but if every node is in one place, the whole set goes down when that AZ does. Spread members across real AZs or data centers.
+- **Assuming a write is safe the instant the primary accepts it** — since MongoDB 5.0 (2021), the default write concern is `w: "majority"`, which waits for most voting members to confirm, not just the primary. The mistake is believing a write is durable the moment the primary accepts it — the default already waits for the majority. If you explicitly set `w: 1` yourself, an unreplicated write can be lost in an election. Keep `{ w: "majority" }` for important data.
+
+> 💡 Real-world example
+>
+> **A typical ride-hailing / booking system** — relies on a replica set with automatic failover so trip data can keep being written even if a node fails in the middle of the night, with no one needing to wake up and fix it.
+>
+> **MongoDB Atlas** — every cluster is a replica set of at least three nodes, automatically spread across availability zones, with a button to test failover so you can see the real result without waiting for a real incident.
+
 export const quizReplica = [
   {
     q: 'How do secondaries keep their data in sync with the primary?',

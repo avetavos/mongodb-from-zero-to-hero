@@ -111,7 +111,7 @@ export const bsonDiagram = `flowchart TD
 >
 > **ระบบ fintech / e-commerce ที่ต้องคำนวณยอดเงิน** — มักบังคับใช้ Decimal128 สำหรับทุก field ที่เป็นเงิน เพื่อไม่ให้เกิดข้อผิดพลาดสะสมจากการปัดเศษแบบ floating-point เวลารวมยอด invoice จำนวนมาก
 >
-> **eBay** — ใช้ ObjectId เป็นทั้ง primary key และตัวช่วยเรียงลำดับคร่าว ๆ ตามเวลาสร้างของ metadata document จำนวนมหาศาล โดยไม่ต้องเก็บ field `created_at` แยกต่างหากสำหรับ use case ที่ไม่ต้องการความแม่นยำระดับมิลลิวินาที
+> **ระบบ metadata สเกลใหญ่ทั่วไป** — ใช้ ObjectId เป็นทั้ง primary key และตัวช่วยเรียงลำดับคร่าว ๆ ตามเวลาสร้างของ document จำนวนมหาศาล โดยไม่ต้องเก็บ field `created_at` แยกต่างหากสำหรับ use case ที่ไม่ต้องการความแม่นยำระดับมิลลิวินาที
 
 export const quizBson = [
   {

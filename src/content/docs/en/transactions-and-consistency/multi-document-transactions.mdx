@@ -167,6 +167,25 @@ After a successful commit, the three units have moved and the total is preserved
 Before writing a transaction, ask whether the documents could be reshaped so the change fits in one of them. A single-document write is simpler, faster, and atomic for free. Transactions are the answer only when the data truly cannot be brought together.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Use a multi-document transaction | Full ACID across documents and collections, guarantees they commit or abort together | Locks resources for the transaction's lifetime, adds latency, and consumes more WiredTiger cache holding a snapshot until commit |
+| Avoid a transaction by redesigning the documents | Faster, no long-lived locks, no extra cache pressure | You accept the data model's limits, such as duplication or eventual consistency between collections |
+
+## Common mistakes
+
+- **Not handling transient transaction errors with your own retry** — believing `withTransaction` handles every retry case, but a manually written transaction that does not catch error labels like `TransientTransactionError` or `UnknownTransactionCommitResult` and retry will silently fail on an ordinary write conflict that should have succeeded on retry.
+- **Letting a transaction run past the default time limit (60 seconds)** — putting logic that calls an external API or does heavy computation inside the transaction, so it stays open too long, hits `transactionLifetimeLimitSeconds`, and gets aborted automatically. That heavy work should finish first, then a short transaction opens.
+- **Reaching for a transaction before checking whether embedding already solves it** — seeing an operation touch two documents and immediately opening a transaction, when those two pieces of data could be redesigned to live in one document, paying lock and latency cost for nothing.
+
+> 💡 Real-world example
+>
+> **A typical bank or fintech system** — uses a multi-document transaction for transfers between accounts, debiting the source account and crediting the destination account so they always commit together, so money can never "disappear" or "appear" in between.
+>
+> **A typical digital asset exchange platform** — uses a session-bound transaction to maintain correctness of digital balances across several ledger documents, because a consistency error in a financial system costs far more than the added latency from a transaction.
+
 export const quizMulti = [
   {
     q: 'What binds an operation to a multi-document transaction?',

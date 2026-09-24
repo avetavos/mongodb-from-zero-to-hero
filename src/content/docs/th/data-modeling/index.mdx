@@ -96,9 +96,9 @@ document ก้อนเดียวนั้นคือทุกอย่า�
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Bosch** — แพลตฟอร์ม IoT ของ Bosch เก็บข้อมูล sensor จากอุปกรณ์นับล้านชิ้นด้วย Bucket pattern แทนที่จะสร้างหนึ่ง document ต่อหนึ่ง reading เพื่อจำกัดการเติบโตของ document และลด overhead ของ index
+> **Bosch** — ใช้ MongoDB (ผ่าน Bosch IoT Insights) เก็บและวิเคราะห์ข้อมูล IoT แบบเรียลไทม์ เช่น ข้อมูลแรงบิดจากเครื่องมือประกอบเครื่องบินและข้อมูลจาก ECU ของรถยนต์ ปัจจุบันยังจัดการข้อมูลตามลำดับเวลาด้วยมือ และมีแผนย้ายไปใช้ Time Series Collections ของ MongoDB ในอนาคตเพื่อจัดกลุ่มข้อมูลอัตโนมัติ ไม่ใช่ Bucket pattern ที่ทำเองอย่างที่เคยเข้าใจกัน ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch))
 >
-> **ADEO** (กลุ่มค้าปลีกที่เป็นเจ้าของ Leroy Merlin) — ใช้ MongoDB จัดการ product catalog ขนาดใหญ่ ที่ต้องตัดสินใจในทุกความสัมพันธ์ว่าจะ embed field ที่แสดงบ่อย หรือ reference ไปยัง source ที่เปลี่ยนแปลงบ่อยกว่า
+> **กลุ่มค้าปลีกขนาดใหญ่ทั่วไป** — ใช้ MongoDB จัดการ product catalog ขนาดใหญ่ ที่ต้องตัดสินใจในทุกความสัมพันธ์ว่าจะ embed field ที่แสดงบ่อย หรือ reference ไปยัง source ที่เปลี่ยนแปลงบ่อยกว่า
 
 export const quizIndex = [
   {

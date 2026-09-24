@@ -333,6 +333,27 @@ The boundaries are computed for you, each bucket carrying its range and a count:
 $facet computes several sub-pipelines over the same input and returns them as fields of one document — ideal for results-plus-count. $bucket and $bucketAuto group a numeric expression into ranges: you supply the boundaries for $bucket, and $bucketAuto picks them to balance the bins.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `$facet` (combine several sub-pipelines in one request) | Get results plus a count in a single request, reducing round trips between client and server | Each facet's output is capped at 16MB, and `$facet` cannot use an index on its sub-pipelines |
+| Separate queries (instead of `$facet`) | Each query can use an index fully, with no `$facet` limit | More round trips to the server, and you must manage consistency across multiple queries yourself |
+| `$bucket` (explicit boundaries) | Precise control over each bucket's range to match business logic, such as company-defined price bands | You must know the boundaries in advance; if the data distribution shifts, you have to adjust the boundaries yourself |
+| `$bucketAuto` (automatically computed boundaries) | No need to know the data distribution in advance; document counts per bucket stay balanced | Bucket boundaries are not stable between runs if the data changes, making it harder to compare results across time periods |
+
+## Common mistakes
+
+- **Feeding large documents into `$facet` without filtering first, then hitting a 16MB error** — each `$facet` sub-pipeline has a 16MB output limit per facet. If the input is large, always `$match`/`$limit` before entering `$facet`.
+- **Expecting a `$facet` sub-pipeline to use an index like a normal pipeline** — `$facet` runs over documents that are already streamed in, not directly from the collection, so its inner sub-pipelines cannot use an index. Match down to a small set before this stage.
+- **Using `$bucket` without setting a `default` and being surprised the pipeline errors** — if a value falls outside the `boundaries` and no `default` is set, `$bucket` raises an error immediately rather than silently skipping the value.
+
+> 💡 Real-world example
+>
+> **A paginated analytics dashboard** — a product listing page that must show both the current page and a total count in one request uses `$facet` split into `pageResults` and `totalCount` sub-pipelines, avoiding two separate queries.
+>
+> **A typical real estate price report** — a system that groups homes into price bands (budget/mid-range/luxury) commonly uses `$bucket` with boundaries the business defines, while exploring a new market with an unknown price distribution uses `$bucketAuto` to let the system pick the groups automatically. Keller Williams uses this same aggregation-pipeline approach to summarise more than 70 million listing records on MongoDB Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
 export const quizFacets = [
   {
     q: 'What input does each sub-pipeline of a $facet stage receive?',

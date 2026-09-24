@@ -57,6 +57,28 @@ The lessons follow the same order as the four questions:
 Production MongoDB is four problems with four named solutions: replica sets for availability, sharding for scale, profiling and indexes for performance, and auth plus TLS plus network rules for security. The rest of this module takes them one at a time.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| A single `mongod` | Simplest to set up, lowest cost | No high availability — one machine is a single point of failure |
+| Replica set | Automatic failover, can spread reads across secondaries | Writes always still go to one primary; more infrastructure to maintain |
+| Sharded cluster | Scales both writes and storage horizontally | Much higher operational complexity; a badly chosen shard key is hard to fix later |
+| Self-managed | Full control over infrastructure | You own every patch, backup, and security task yourself |
+| MongoDB Atlas | Less operational burden, secure by default | Less low-level control, usage-based cost |
+
+## Common mistakes
+
+- **Assuming you must shard from day one because "the data will grow eventually"** — a single replica set handles more traffic than most people expect, and sharding adds operational complexity that is not worth it without evidence a single machine cannot keep up.
+- **Treating security as a one-time task done at deploy and forgotten** — patching, credential rotation, and access review are ongoing work, not a checklist ticked once.
+- **Never testing failover or a disaster-recovery plan before going to real production** — HA that has never been rehearsed is HA nobody actually knows works when it matters.
+
+> 💡 Real-world example
+>
+> **A typical large-scale search and log system** — uses a MongoDB sharded cluster to hold billions of documents, spreading writes and storage across many shards instead of trying to keep scaling a single machine.
+>
+> **A team on MongoDB Atlas** — relies on auto-scaling to let the cluster grow storage and compute automatically to match real load, instead of over-provisioning in advance the way a self-hosted setup requires.
+
 export const quizOverview = [
   {
     q: 'Which MongoDB feature provides high availability — surviving the failure of a single server?',

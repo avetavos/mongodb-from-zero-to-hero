@@ -243,6 +243,27 @@ Note the `$$t` syntax: a single `$` references a field of the foreign document, 
 $lookup is a left outer join that hangs the matched foreign documents on a new array field. The equality form joins one field to one field; the pipeline form lets you filter and reshape the foreign side. Index the foreign field, because the join queries it once per input document.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `$lookup` (reference across collections) | No duplicated data, one place to update, shared across documents | Every read pays the join cost — one extra query per input document for the engine |
+| Embedding (keep the data in one document) | One read, no join needed — fastest for read-heavy workloads | Data is duplicated if referenced from multiple places, updates must chase every copy, and the document can grow toward its limit |
+| `$lookup` pipeline form (`let` + sub-pipeline) | Filter and reshape the foreign side before joining, match on complex multi-field conditions | More complex to write and read, and harder to fully index the sub-pipeline |
+| `$lookup` equality form (`localField`/`foreignField`) | Short to write, easy to understand, straightforward to index | Can only match a single equality condition — nothing more complex |
+
+## Common mistakes
+
+- **Not indexing `foreignField`** — `$lookup` queries the foreign collection once per input document. Without an index on the matched field, the join gets much slower as data grows.
+- **Forgetting `$lookup` is always a left outer join** — documents with no match still come through with an empty `as` array; they are not filtered out. If you want only joined rows, add a `$match` to filter out the empty array yourself.
+- **Confusing `$` with `$$` in the pipeline form** — a single `$` refers to a field on the foreign document inside the sub-pipeline, while `$$` refers to a variable declared with `let` from the local side. Mixing them up breaks the query silently or throws an error.
+
+> 💡 Real-world example
+>
+> **A typical analytics dashboard** — a sales report that must show product names and categories alongside sales figures commonly keeps `sales` and `products` in separate collections and joins them at query time with `$lookup`, rather than embedding product data into every order, because product data changes more often than an order does.
+>
+> **A typical real estate report** — a system that must join transactions with broker and listing data commonly uses a pipeline-style `$lookup` to filter transactions down to the relevant time window before joining, reducing what the engine has to process across collections. Keller Williams uses this style of MongoDB aggregation with its listing data on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
 export const quizLookup = [
   {
     q: 'In the equality form of $lookup, what does the "as" option name?',

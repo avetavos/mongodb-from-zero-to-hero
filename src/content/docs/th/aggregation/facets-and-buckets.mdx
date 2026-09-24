@@ -352,7 +352,7 @@ $facet รันหลาย sub-pipeline บน input เดียวกัน 
 >
 > **Analytics dashboard แบบแบ่งหน้า** — หน้ารายการสินค้าที่ต้องโชว์ทั้งหน้าปัจจุบันและจำนวนรวมทั้งหมดในคำขอเดียว ใช้ `$facet` แยกเป็น sub-pipeline `pageResults` กับ `totalCount` เพื่อลด round-trip ไม่ต้องยิง query สองรอบ
 >
-> **Keller Williams** — รายงานราคาบ้านที่ต้องแบ่งกลุ่มเป็นช่วงราคา (budget/mid-range/luxury) ใช้ `$bucket` กับขอบเขตที่ทีมธุรกิจกำหนดไว้ตายตัว ส่วนการสำรวจตลาดใหม่ที่ยังไม่รู้การกระจายราคาใช้ `$bucketAuto` เพื่อให้ระบบแบ่งกลุ่มให้อัตโนมัติ
+> **รายงานราคาอสังหาริมทรัพย์ทั่วไป** — ระบบที่ต้องแบ่งกลุ่มบ้านเป็นช่วงราคา (budget/mid-range/luxury) มักใช้ `$bucket` กับขอบเขตที่ทีมธุรกิจกำหนดไว้ตายตัว ส่วนการสำรวจตลาดใหม่ที่ยังไม่รู้การกระจายราคาใช้ `$bucketAuto` เพื่อให้ระบบแบ่งกลุ่มให้อัตโนมัติ — Keller Williams ใช้แนวทาง aggregation pipeline แบบเดียวกันนี้ในการสรุปข้อมูล listing กว่า 70 ล้านระเบียนบน MongoDB Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
 
 export const quizFacets = [
   {

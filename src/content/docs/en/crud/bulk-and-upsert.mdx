@@ -302,6 +302,26 @@ By default `bulkWrite` is **ordered**: it runs the operations in sequence and st
 Upserts and bulk writes do not add new query language — they pack the inserts, updates, and deletes you already know into a single trip to the server. That is most of what "making CRUD fast" means in practice.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| `bulkWrite` | Combines many operations into one round trip, much faster than calling them separately | Results come back as one combined object — you must unpack each operation's own error yourself when some fail |
+| upsert | One round trip that covers both insert-if-missing and update-if-present | If multiple requests race with the same filter at once, a duplicate document can be created unless a unique index backs the filter |
+| Explicit check-then-insert/update (`findOne` first, then insert/update) | Fine-grained control, lets you decide extra logic before writing | Two round trips instead of one, and there is still a gap between the find and the write where another request can slip in (also a race, but harder to control) |
+
+## Common mistakes
+
+- **Believing an upsert always prevents duplicate documents** — without a unique index covering the filter fields, firing concurrent upserts with the same filter can create duplicates, because MongoDB checks "not found" and inserts separately in each request before either sees the other's result.
+- **Putting thousands of operations into a single `bulkWrite` without batching** — a payload that is too large can hit driver or server limits. Split it into reasonably sized batches and send several rounds instead.
+- **Using ordered `bulkWrite` (the default) when the operations are unrelated** — if operation 3 fails, operations 4 through 100 never run at all, even though nothing about them depended on the failed one, so work that should have succeeded is lost. Use unordered when operations are genuinely independent.
+
+> 💡 Real-world example
+>
+> **Inventory sync systems** — when syncing stock from a real warehouse every night, use an unordered `bulkWrite` combining thousands of `updateOne` operations (adjusting stock per SKU) into a handful of round trips, instead of firing an update per SKU.
+>
+> **Page-view / analytics counters** — use an upsert with `updateOne({ page, date }, { $inc: { views: 1 } }, { upsert: true })` to create that day's count row if it does not exist yet, or increment it if it does, backed by a unique compound index on `(page, date)` to prevent duplicate rows under heavy concurrent traffic.
+
 export const quizBulk = [
   {
     q: 'An upsert runs and its filter matches no existing document. What happens?',

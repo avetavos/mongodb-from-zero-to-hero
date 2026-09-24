@@ -335,6 +335,27 @@ A **sparse** index goes one step further by skipping documents that lack the ind
 Most queries want a plain index, but arrays want multikey, words want text, expiring data wants TTL, a queried subset wants partial, one-of-a-kind values want unique, and optional fields want sparse. Match the type to the job and the index stays small and fast.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Text index | Convenient full-text word search, no regex needed | A collection can have only one text index |
+| TTL index | Automatically deletes expired documents, no separate job to write | Deletion timing is imprecise, since the background sweep runs roughly once a minute |
+| Partial index | Smaller than a full index, since it only covers documents matching the filter | Only helps a query guaranteed to fall within the index's filter |
+| Unique index | Guarantees data uniqueness at the database level | An insert or update that would duplicate a value is rejected immediately — you need extra error-handling code |
+
+## Common mistakes
+
+- **Creating two text indexes on the same collection** — MongoDB allows only one text index per collection, even if it needs to cover several fields. Combine every searchable field into that single index.
+- **Expecting a TTL index to delete documents at the exact moment** — the background sweep runs roughly once a minute, so a document can linger up to a minute past its deadline. Do not rely on TTL for a use case needing second-level precision.
+- **Forgetting to pair `sparse` with `unique` when a field is optional** — a unique index treats every missing value as the same `null`, so without `sparse` only one document is allowed to lack that field.
+
+> 💡 Real-world example
+>
+> **A SaaS platform storing temporary sessions/tokens** — uses a TTL index on an `expiresAt` field so expired sessions delete themselves with no separate cron job needed to clean up old data.
+>
+> **A support ticket system doing full-text search over ticket content** — uses a text index combining the `subject` and `body` fields, so agents can search tickets by keyword without needing a separate search engine like Elasticsearch for a moderate volume of data.
+
 export const quizTypes = [
   {
     q: 'When does MongoDB make an index multikey?',

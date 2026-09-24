@@ -293,6 +293,27 @@ This always reads only the page you want, no matter how deep you are. We will re
 The server always applies a read in the same sequence: pick the matches, order them, drop the skipped prefix, then cap the count. Internalizing that order tells you why pages need a sort and why a deep skip pays for every document it walks past — the seed of range-based pagination.
 </Callout>
 
+## Trade-offs
+
+| Choice | Benefit | Cost |
+|---------|---------|------|
+| Inclusion projection (`{ name: 1, joined: 1 }`) | Explicit control over which fields go out — safe for public responses | Must update the query every time a new field is needed |
+| Exclusion projection (`{ internalNotes: 0 }`) | Convenient, short to write, no need to list every wanted field | A new field added to the schema later leaks out automatically, unintentionally |
+| skip/limit pagination | Simple to write, fine for shallow pages and page-number UIs | `skip` must walk past every skipped document every time, getting slower with deeper pages |
+| Range/cursor-based pagination | Always reads only the documents you need, no matter how deep — scales well with large data | Cannot jump directly to page N; needs a sortable, indexed field |
+
+## Common mistakes
+
+- **Using an exclusion projection for a public response and forgetting it automatically "leaks" new fields** — when the backend team later adds an internal field (like cost or an internal flag) to the schema, an existing exclusion projection sends it out immediately, unintentionally. Public APIs should use an inclusion projection for clearer control.
+- **Sorting on a field with no index on a large collection** — the server must do an in-memory sort, which has a fixed memory ceiling. If the data to sort exceeds that ceiling, the query errors outright. Back the sort key with an index as the collection grows.
+- **Assuming `limit()` alone always makes a query fast** — without a good filter or index, the server still has to scan and sort a large number of documents before trimming down to what `limit` asked for. `limit` does not reduce the scan work, only how many results come back.
+
+> 💡 Real-world example
+>
+> **A social feed's infinite scroll** — uses cursor-based pagination on a field like a timestamp or `_id` instead of skip/limit, because users can keep scrolling deeper without letting the query get slower with page depth.
+>
+> **A SaaS REST API exposing customer data** — always uses an inclusion projection for public endpoints, so internal fields like cost or an internal flag cannot leak out when the backend team adds new fields in the future.
+
 export const quizPagination = [
   {
     q: 'In a projection, what does { name: 1, _id: 0 } return?',
