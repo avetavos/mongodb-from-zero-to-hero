@@ -52,10 +52,12 @@ function countHeadings(src) {
   return (stripFrontmatter(src).match(/^## .*/gm) || []).length;
 }
 
-// Fenced code blocks tagged ```js — the only fence language this course
+// Every fence except text/mermaid/markdown counts as code and must be byte-identical EN/TH.
+// Untagged fences count as code too — tag prose-like listings ```text explicitly.
+// (historical note:) Fenced code blocks tagged ```js — the only fence language this course
 // guarantees stays English (```text fences are used for Thai-captioned
 // ASCII diagrams and are intentionally not checked here).
-const NON_CODE = new Set(['text', 'txt', 'plain', 'mermaid', 'md', 'markdown', '']);
+const NON_CODE = new Set(['text', 'txt', 'plain', 'mermaid', 'md', 'markdown']);
 function fencedJsBlocks(src) {
   return [...src.matchAll(/```(\w*)[^\n]*\n([\s\S]*?)```/g)].filter((m) => !NON_CODE.has(m[1])).map((m) => m[2]);
 }
