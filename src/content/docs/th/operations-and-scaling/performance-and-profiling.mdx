@@ -1,6 +1,6 @@
 ---
-title: Performance และ profiling
-description: หา query ที่ช้าด้วย database profiler, อ่าน explain ซ้ำ, เก็บ working set ไว้ใน RAM และใช้วิธีแก้ไขทั่วไปที่ทำให้ query กลับมาเร็วอีกครั้ง
+title: Performance and profiling
+description: หา query ช้าด้วย database profiler และ slow-query log อ่าน system.profile entry จริง ดู operation ที่กำลังรันด้วย currentOp ดู WiredTiger cache อุ่นขึ้น และแก้บั๊ก client ต่อ request ในเรื่อง pool — ทั้งหมดวัดจริง
 sidebar:
   order: 4
 ---
@@ -9,49 +9,68 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-เมื่อฐานข้อมูลรู้สึกช้า สิ่งล่อใจคือการเดา: เพิ่ม server เพิ่มหน่วยความจำ เพิ่ม index สักที่แล้วหวังว่าจะดี วิธีของมืออาชีพคือตรงกันข้าม — *วัดก่อน* MongoDB ให้เครื่องมือสองอย่างสำหรับสิ่งนั้น **database profiler** บันทึก operations ที่รันจริงและแต่ละอันใช้เวลานานเท่าไร เพื่อให้คุณเห็นว่า query ไหนคือปัญหา และ `explain` บอกคุณว่า *ทำไม* query หนึ่งจึงช้า โดยแสดง plan ที่ server เลือก ใช้สองอย่างคู่กันแล้ว งาน performance จะเปลี่ยนจากการเดาสุ่มเป็นการสืบสวนสั้น ๆ
+เมื่อฐานข้อมูลรู้สึกช้า ความล่อใจคือเดา: เพิ่ม server เพิ่มหน่วยความจำ เพิ่ม index ตรงไหนสักแห่งแล้วหวังว่าจะดีขึ้น สิ่งที่มืออาชีพทำคือตรงกันข้าม — *วัดก่อน* MongoDB มีสองเครื่องมือ **database profiler** บันทึก operation ที่รันจริงและใช้เวลาเท่าไร คุณจึงเห็นว่า query ไหนเป็นปัญหา และ `explain` บอกว่า *ทำไม* query หนึ่งจึงช้า โดยแสดง plan ที่ server เลือก
 
-## เวลาหายไปไหน
+fence ที่มี path comment รันบน replica set โหนดเดียวของคอร์ส (mongo 8.3.11, mongosh 2.11.1, Node driver 7.7.0, เครื่อง Mac นี้); fence ที่ระบุ *lab* รันบน container `mongo:8.3.11` แบบ standalone ชั่วคราว จำกัด 512 MB และ WiredTiger cache 0.25 GB (`mongodb-b3-perf` ลบทิ้งหลังใช้) เพราะมันเปลี่ยนค่าระดับ server (`slowms`), รีสตาร์ท server หรือวัดตัวนับระดับ server แท็บ Python/Go/Rust สะท้อนการเรียกที่ตรวจแล้วใน shell/Node และไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส
 
-query ที่ช้าส่วนใหญ่ลงเอยที่หนึ่งในสองสาเหตุ: query อ่าน document มากกว่าที่คืนกลับมาก หรือข้อมูลที่ต้องใช้ไม่ได้อยู่ในหน่วยความจำ เลยต้องไปดึงจากดิสก์ ภาพแรกชัดเจนที่สุด query เดียวกัน เมื่อมีและไม่มี index ที่รองรับ ทำงานในปริมาณที่แตกต่างกันอย่างมหาศาล:
+## เวลาไปอยู่ที่ไหน
+
+query ช้าส่วนใหญ่มาจากหนึ่งในสองสาเหตุ: query อ่าน document มากกว่าที่คืนมาก หรือข้อมูลที่ต้องใช้ไม่อยู่ในหน่วยความจำและต้องดึงจากดิสก์
 
 export const latencyFlow = `flowchart TB
   subgraph Slow["No index — COLLSCAN"]
-    Q1["Find members joined in 2023"] --> R1["Read all 1,000,000 docs"]
+    Q1["Find members joined in 2023"] --> R1["Read every document"]
     R1 --> F1["Discard the non-matches"]
-    F1 --> O1["Return 12 docs — slow"]
+    F1 --> O1["Return the matches — slow"]
   end
   subgraph Fast["With an index — IXSCAN"]
     Q2["Find members joined in 2023"] --> R2["Seek the index to 2023"]
-    R2 --> F2["Read only the 12 matching docs"]
-    F2 --> O2["Return 12 docs — fast"]
+    R2 --> F2["Read only the matching documents"]
+    F2 --> O2["Return them — fast"]
   end`
 
-<Mermaid code={latencyFlow} title="หากไม่มี index query จะอ่านทุกอย่างและทิ้งส่วนใหญ่ไป; เมื่อมี index จะอ่านเฉพาะสิ่งที่คืนกลับ" />
+<Mermaid code={latencyFlow} title="ไม่มี index query อ่านทุกอย่างแล้วทิ้งส่วนใหญ่; มี index มันอ่านเฉพาะสิ่งที่คืน" />
 
-สาเหตุที่สองนั้นแยบยลกว่า: **working set** นั่นคือส่วนของข้อมูลและ index ที่ query แตะต้องจริงในแต่ละวัน เมื่อ working set พอดีกับ RAM การอ่านจะได้รับการตอบจากหน่วยความจำและฐานข้อมูลบินฉิว เมื่อ working set ล้น RAM ทุกครั้งที่ miss จะกลายเป็นการอ่านดิสก์ และ latency ไต่ขึ้นแม้ว่า query เองจะไม่ได้เปลี่ยนแปลง การเก็บ working set ไว้ในหน่วยความจำ — ด้วยการเพิ่ม RAM หรือด้วยการอ่านข้อมูลน้อยลงต่อ query — คือหนึ่งในคันโยกที่ใหญ่ที่สุดที่คุณมี
+สาเหตุที่สองคือ **working set**: ส่วนของข้อมูลและ index ที่ query แตะจริง ๆ เมื่อมันพอดีใน RAM การอ่านมาจากหน่วยความจำ เมื่อไม่พอดี ทุก miss กลายเป็นการอ่านดิสก์ demo ของ cache ด้านล่างทำให้เห็นชัด
 
-## การเปิด profiler
+## เปิด profiler
 
-profiler เขียน document หนึ่งอันต่อ operation ที่ช้าหนึ่งครั้งลงใน collection พิเศษ `system.profile` ในแต่ละฐานข้อมูล คุณตั้งค่าแยกต่อฐานข้อมูล Level `1` บันทึกเฉพาะ operations ที่ช้ากว่า threshold ที่คุณเลือกเป็นมิลลิวินาที; level `2` บันทึกทุกอย่าง (มีประโยชน์ตอน development แต่ส่งเสียงรบกวนมากเกินไปใน production); level `0` ปิด profiler
+profiler เขียนหนึ่ง document ต่อหนึ่ง operation ที่บันทึกลงใน collection `system.profile` แบบ capped **ในแต่ละ database** Level `1` บันทึก operation ที่ช้ากว่า `slowms`; level `2` บันทึกทุกอย่าง (เฉพาะตอนพัฒนา); level `0` ปิด ด้านล่าง level 2 บน database ของบทเรียนที่มีสมาชิก 50 000 คน — ปลอดภัยบน server ที่ใช้ร่วมกัน เพราะกระทบเฉพาะ database นี้ — แล้วดู query ล่าสุดที่ช้าที่สุด:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    // Record every operation slower than 100 ms
-    db.setProfilingLevel(1, { slowms: 100 })
+    // mongosh/perf-profile.js
+    const docs = Array.from({ length: 50000 }, (_, i) => ({ name: "m" + i, joined: 2015 + (i % 10), city: "c" + (i % 200), fines: i % 7 }));
+    db.members.insertMany(docs);
 
-    // Check the current setting
-    db.getProfilingStatus()
+    db.setProfilingLevel(2);
+    db.members.find({ joined: 2023 }).batchSize(5000).toArray();   // no index yet; one batch = one profile entry
+    db.setProfilingLevel(0);
+
+    const e = db.system.profile.find({ op: "query", ns: db.getName() + ".members" }).sort({ ts: -1 }).limit(1).toArray()[0];
+    console.log({ op: e.op, millis: e.millis, planSummary: e.planSummary, docsExamined: e.docsExamined, keysExamined: e.keysExamined, nreturned: e.nreturned });
+    assert.strictEqual(e.planSummary, "COLLSCAN");
+    assert.ok(e.docsExamined >= 49000);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.command({ profile: 1, slowms: 100 });
-    const status = await db.command({ profile: -1 });
-    console.log(status);
+    // app/perf-profile.mjs
+    const members = db.collection("members");
+    await members.insertMany(Array.from({ length: 50000 }, (_, i) => ({ name: "m" + i, joined: 2015 + (i % 10), city: "c" + (i % 200), fines: i % 7 })));
+
+    await db.command({ profile: 2 });
+    await members.find({ joined: 2023 }, { batchSize: 5000 }).toArray();
+    await db.command({ profile: 0 });
+
+    const [e] = await db.collection("system.profile")
+      .find({ op: "query", ns: db.databaseName + ".members" }).sort({ ts: -1 }).limit(1).toArray();
+    console.log({ op: e.op, millis: e.millis, planSummary: e.planSummary, docsExamined: e.docsExamined, nreturned: e.nreturned });
+    if (e.planSummary !== "COLLSCAN" || e.docsExamined < 49000) throw new Error("expected a full collection scan");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -78,169 +97,303 @@ profiler เขียน document หนึ่งอันต่อ operation �
   </TabItem>
 </Tabs>
 
-## การอ่าน system.profile
-
-เมื่อ profiler เปิดอยู่ คุณ query `system.profile` เหมือน collection อื่น ๆ เรียงตามเวลาจากมากไปน้อยและดู operations ล่าสุดที่ช้าที่สุด ฟิลด์ที่ต้องจับตาคือ `millis` (ใช้เวลานานเท่าไร), `docsExamined` เทียบกับ `nreturned` (อ่าน document กี่อันเทียบกับที่คืน) และ `planSummary` (บอกว่าใช้ index หรือ collection scan):
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.system.profile
-      .find({}, { op: 1, ns: 1, millis: 1, planSummary: 1, docsExamined: 1, nreturned: 1 })
-      .sort({ ts: -1 })
-      .limit(5)
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const slow = await db
-      .collection("system.profile")
-      .find({})
-      .project({ op: 1, ns: 1, millis: 1, planSummary: 1 })
-      .sort({ ts: -1 })
-      .limit(5)
-      .toArray();
-    console.log(slow);
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    slow = (
-        db["system.profile"]
-        .find({}, {"op": 1, "ns": 1, "millis": 1, "planSummary": 1})
-        .sort("ts", -1)
-        .limit(5)
-    )
-    for entry in slow:
-        print(entry)
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    opts := options.Find().
-        SetSort(bson.D{{Key: "ts", Value: -1}}).
-        SetLimit(5)
-    cur, err := db.Collection("system.profile").Find(ctx, bson.M{}, opts)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let opts = FindOptions::builder()
-        .sort(doc! { "ts": -1 })
-        .limit(5)
-        .build();
-    let mut cursor = db
-        .collection::<Document>("system.profile")
-        .find(doc! {})
-        .with_options(opts)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-profile entry เดียวเล่าเรื่องราวทั้งหมดได้ในพริบตา อันนี้อ่าน document หนึ่งล้านอันเพื่อคืนสิบสองอัน โดยมี plan summary เป็น `COLLSCAN` — กรณีตัวอย่างของการขาด index:
-
-```json
+```text
 {
-  "op": "query",
-  "ns": "library.members",
-  "millis": 2143,
-  "planSummary": "COLLSCAN",
-  "docsExamined": 1000000,
-  "nreturned": 12
+  op: 'query',
+  millis: 37,
+  planSummary: 'COLLSCAN',
+  docsExamined: 49999,
+  keysExamined: 0,
+  nreturned: 5000
 }
 ```
 
-เมื่อ `docsExamined` ใหญ่กว่า `nreturned` มาก แสดงว่าคุณพบปัญหาแล้ว ขั้นตอนต่อไปคือ `explain` บน query นั้นเป๊ะ ๆ เพื่อยืนยัน plan แล้วจึงแก้ไข:
-
-```js
-db.members.find({ joined: 2023 }).explain("executionStats")
+```text
+{
+  op: 'query',
+  millis: 31,
+  planSummary: 'COLLSCAN',
+  docsExamined: 49999,
+  nreturned: 5000
+}
 ```
 
-## วิธีแก้ไขทั่วไป
+ฟิลด์ที่ต้องอ่านคือ `millis`, `docsExamined` เทียบกับ `nreturned` (อ่าน 49 999 เพื่อคืน 5 000) และ `planSummary` (`COLLSCAN` คือ scan ทั้ง collection) มีสิ่งหนึ่งที่ร่างแรกของบทเรียนนี้ประหลาดใจ: profiler บันทึก **หนึ่ง entry ต่อ batch** `find().toArray()` ธรรมดาบน collection ของ lab ที่มี 200 000 document ได้ entry `query` ที่ `nreturned: 101`, `docsExamined: 1009` (มันหยุด scan เมื่อได้ batch แรกแล้ว) และ entry `getmore` แยกต่างหากที่ `nreturned: 19899` สำหรับส่วนที่เหลือ fence จึงใช้ `batchSize(5000)` เพื่อให้ผลทั้งหมดเป็น entry เดียว เพิ่ม index แล้วรันอีกครั้ง:
 
-query ที่ช้าส่วนใหญ่หายได้ด้วยหนึ่งในไม่กี่ท่าต่อไปนี้:
+```js
+// mongosh/perf-fix.js
+db.members.createIndex({ joined: 1 });
 
-- **เพิ่ม index** บนฟิลด์ที่ query ใช้ filter หรือ sort เพื่อให้ server seek แทนที่จะ scan นี่คือการแก้ไขที่ส่งผลกระทบสูงสุดเพียงอย่างเดียวและเป็นเหตุผลที่ profiler มีอยู่
-- **Project ให้น้อยลง** ขอเฉพาะฟิลด์ที่คุณต้องการแทนที่จะเอาทั้ง document ซึ่งลด bytes ที่ต้องเคลื่อนย้ายและสามารถทำให้ query ถูกตอบจาก index ได้ทั้งหมด
-- **หลีกเลี่ยงผลลัพธ์ที่ไม่มีขอบเขต** ใช้ `limit` กับ query ที่อาจ match document จำนวนมากเสมอ; การกวาดทั้ง collection โดยไม่ตั้งใจนั้นช้าไม่ว่า index จะดีแค่ไหน
-- **ปรับขนาด connection ให้พอเหมาะ** driver ดูแล **connection pool** และนำ connection มาใช้ซ้ำแทนที่จะเปิดอันใหม่ต่อ request การใช้ client ที่แชร์กันซ้ำ — ไม่ใช่สร้างอันใหม่ต่อการเรียกแต่ละครั้ง — ทำให้ pool นั้นแข็งแรงและหลีกเลี่ยงการใช้ขีดจำกัด connection ของ server จนหมด
+db.setProfilingLevel(2);
+const n = db.members.find({ joined: 2023 }).batchSize(5000).toArray().length;
+db.setProfilingLevel(0);
 
-**ใน Compass / Atlas:** Compass มีมุมมอง *Performance Insights* และ *Explain Plan* ที่รัน `explain` ให้คุณและทำเครื่องหมาย collection scan ให้เห็นด้วยตา Atlas ไปไกลกว่าด้วย *Performance Advisor* ที่เฝ้าดู traffic จริงของคุณและแนะนำ index ที่ควรสร้าง และแท็บ *Profiler* ที่นำ operations ที่ช้าที่สุดออกมาแสดงโดยที่คุณไม่ต้องไปแตะ `system.profile` ด้วยมือ
+const e = db.system.profile.find({ op: "query", ns: db.getName() + ".members" }).sort({ ts: -1 }).limit(1).toArray()[0];
+console.log({ millis: e.millis, planSummary: e.planSummary, keysExamined: e.keysExamined, docsExamined: e.docsExamined, nreturned: e.nreturned });
+assert.strictEqual(e.planSummary, "IXSCAN { joined: 1 }");
+assert.strictEqual(e.docsExamined, n);
+```
+
+```text
+{
+  millis: 42,
+  planSummary: 'IXSCAN { joined: 1 }',
+  keysExamined: 5000,
+  docsExamined: 5000,
+  nreturned: 5000
+}
+```
+
+ตอนนี้ `docsExamined` เท่ากับ `nreturned`: index อ่านตรงกับที่ query คืน (เวลาบน collection 50 000 document เป็นระดับมิลลิวินาทีทั้งสองแบบ; *จำนวน* คือสัญญาณที่ขยายตามขนาดข้อมูล)
+
+### `slowms`, log และต้นทุนของ profiler
+
+Level `1` บันทึกเฉพาะ operation ที่ช้ากว่า `slowms` (ค่าเริ่มต้น 100 ms) เกณฑ์เดียวกันนี้ยังตัดสินว่า server จะเขียนอะไรลง log เป็นบรรทัด `"Slow query"` แม้ profiler อยู่ level `0` การรัน *lab* ด้วย `slowms: 20` บน collection 200 000 document:
+
+```js
+// mongosh/perf-slowms.js @skip-verify lab: sets the server-wide slowms on a throwaway standalone
+db.setProfilingLevel(0, { slowms: 20 });
+console.log(db.getProfilingStatus());
+db.members.find({ fines: 99 }).toArray();       // COLLSCAN over all 200 000 documents, no match
+db.members.find({ name: "m1" }).limit(1).toArray();   // stops at the first hit: fast
+console.log("profile entries at level 0:", db.system.profile.countDocuments());
+db.setProfilingLevel(1, { slowms: 20 });
+db.members.find({ fines: 99 }).toArray();
+db.members.find({ name: "m1" }).limit(1).toArray();
+console.log("profile entries at level 1:", db.system.profile.find({}, { op: 1, millis: 1, planSummary: 1 }).toArray());
+const p = db.system.profile.stats();
+console.log({ capped: p.capped, maxSizeBytes: p.maxSize });
+```
+
+```text
+{
+  was: 0,
+  slowms: 20,
+  slowinprogms: Long('5000'),
+  sampleRate: 1,
+  ok: 1
+}
+profile entries at level 0: 0
+profile entries at level 1: [ { op: 'query', millis: 103, planSummary: 'COLLSCAN' } ]
+{ capped: true, maxSizeBytes: 1048576 }
+```
+
+และบรรทัดใน log ของ server สำหรับตัวที่ช้า อ่านกลับจาก log ในหน่วยความจำของ server (`getLog`; JSON เดียวกันนี้ไปที่ไฟล์ log หรือ `docker logs`) ตัดเหลือ key ที่น่าสนใจ:
+
+```js
+// mongosh/perf-slowlog.js @skip-verify lab: reads the log of the throwaway server (real output below)
+const line = db.adminCommand({ getLog: "global" }).log.filter((l) => l.includes("Slow query") && l.includes('"fines":99')).pop();
+const j = JSON.parse(line);
+console.log({ msg: j.msg, ns: j.attr.ns, planSummary: j.attr.planSummary, keysExamined: j.attr.keysExamined, docsExamined: j.attr.docsExamined, nreturned: j.attr.nreturned, durationMillis: j.attr.durationMillis });
+```
+
+```text
+2
+{"msg":"Slow query","ns":"library.members","planSummary":"COLLSCAN","keysExamined":0,"docsExamined":200000,"nreturned":0,"durationMillis":103}
+
+```
+
+สามข้อเท็จจริง: (1) ที่ level `0` query ช้าก็ยังถูก **log** แต่ไม่ถูก profile; (2) ที่ level `1` มีเฉพาะ operation ที่ช้าถูกบันทึก การค้น `_id` ไม่ถูกบันทึก; (3) `system.profile` เป็น collection แบบ **capped** ที่มีขนาดคงที่ (1 MB โดยค่าเริ่มต้นในการรันนี้) entry เก่าจึงหลุดออก
+
+## ดู operation ที่กำลังรัน: `currentOp`
+
+profiler คือประวัติ; `currentOp` คือปัจจุบัน การรัน lab เริ่ม query ที่ช้าโดยตั้งใจ (`$where` กับ `sleep`) บน connection หนึ่งและตรวจดูจากอีกอัน แล้ว kill มัน:
+
+```js
+// mongosh/perf-currentop.js @skip-verify lab: needs two connections (real output below)
+// connection A (blocks):  db.members.find({ $where: "sleep(4000) || true" }).toArray()
+// connection B:
+const op = db.currentOp({ ns: /members/, op: "query", secs_running: { $gte: 1 } }).inprog[0];
+console.log({ op: op.op, ns: op.ns, secs_running: op.secs_running, planSummary: op.planSummary, opid: op.opid });
+db.killOp(op.opid);
+```
+
+```text
+{
+  op: 'query',
+  ns: 'library.members',
+  secs_running: Long('1'),
+  planSummary: 'COLLSCAN',
+  opid: 31745
+}
+```
+
+## WiredTiger cache และ working set
+
+storage engine เก็บ page ที่ใช้ล่าสุดใน cache ของตัวเอง ขนาดเริ่มต้นราวครึ่งหนึ่งของ RAM (ที่นี่จำกัดที่ 0.25 GB) query บนข้อมูลที่ไม่อยู่ใน cache ต้องอ่าน page จากดิสก์ lab รีสตาร์ท server (cache เย็น) รัน aggregate scan เดียวกันสองครั้ง และอ่านตัวนับของ cache รอบ ๆ:
+
+```js
+// app/perf-cache.mjs @skip-verify lab: run right after `docker restart` of the throwaway server (real output below)
+const stats = async () => {
+  const c = (await db.admin().command({ serverStatus: 1 })).wiredTiger.cache;
+  return { maxBytes: c["maximum bytes configured"], inCacheBytes: c["bytes currently in the cache"], pagesReadIntoCache: c["pages read into cache"] };
+};
+const scan = async () => { const t = Date.now(); await db.collection("members").aggregate([{ $group: { _id: "$city", n: { $sum: 1 }, fines: { $sum: "$fines" } } }]).toArray(); return Date.now() - t; };
+console.log("before", await stats());
+console.log("cold scan ms:", await scan());
+console.log("warm scan ms:", await scan());
+console.log("after ", await stats());
+```
+
+```text
+before { maxBytes: 268435456, inCacheBytes: 57465, pagesReadIntoCache: 21 }
+cold scan ms: 97
+warm scan ms: 63
+after  {
+  maxBytes: 268435456,
+  inCacheBytes: 19855589,
+  pagesReadIntoCache: 346
+}
+
+```
+
+scan แรกหลังรีสตาร์ทต้องอ่าน page เข้า cache (`pagesReadIntoCache` กระโดดขึ้น) และช้ากว่าครั้งที่สองที่ให้บริการจากหน่วยความจำ เมื่อ working set ใหญ่กว่า cache *ทุก* scan จะหน้าตาเหมือนตัวเย็น — ทางแก้คือ RAM เพิ่ม, document เล็กลง (projection, ฟิลด์น้อยลง) หรือ index ที่แตะ page น้อยลง
+
+## connection pool: client เดียว ไม่ใช่หนึ่งตัวต่อ request
+
+driver เก็บ pool ของ connection และใช้ซ้ำ ความผิดพลาดคลาสสิกคือสร้าง client ภายใน request handler ซึ่งต้องจ่าย handshake ของ TCP (และ TLS/auth) ทุกครั้ง และอาจทำให้ถึงขีดจำกัด connection ของ server
+
+<SpotTheBug lang="js" code={`// AI comment: "connect per request for isolation; the driver cleans up"
+app.get("/members/:id", async (req, res) => {
+  const client = new MongoClient(process.env.MONGO_URL);
+  await client.connect();
+  const doc = await client.db("library").collection("members").findOne({ _id: req.params.id });
+  await client.close();
+  res.json(doc);
+});`}>
+
+แต่ละ request เปิด (และปิด) connection ของตัวเอง วัดผล (*lab*, lookup ตามลำดับ 300 ครั้งกับ standalone, `serverStatus().connections.totalCreated` ก่อน/หลัง):
+
+```js
+// app/perf-pool.mjs @skip-verify lab: reads server-wide connection counters (real output below)
+import { MongoClient } from "mongodb";
+const uri = "mongodb://localhost:27303/";
+const created = async (c) => (await c.db("admin").command({ serverStatus: 1 })).connections.totalCreated;
+const watcher = new MongoClient(uri); await watcher.connect();
+
+let before = await created(watcher);
+let t = Date.now();
+for (let i = 0; i < 300; i++) {                        // the bug: a client per request
+  const c = new MongoClient(uri); await c.connect();
+  await c.db("library").collection("members").findOne({ name: "m" + i });
+  await c.close();
+}
+const perRequest = { ms: Date.now() - t, newConnections: (await created(watcher)) - before };
+
+const shared = new MongoClient(uri); await shared.connect();   // the fix: one client for the process
+before = await created(watcher);
+t = Date.now();
+for (let i = 0; i < 300; i++) await shared.db("library").collection("members").findOne({ name: "m" + i });
+const sharedRun = { ms: Date.now() - t, newConnections: (await created(watcher)) - before };
+console.log({ perRequest, shared: sharedRun });
+await shared.close(); await watcher.close();
+```
+
+```text
+{
+  perRequest: { ms: 5067, newConnections: 600 },
+  shared: { ms: 823, newConnections: 0 }
+}
+
+```
+
+</SpotTheBug>
+
+## วิธีแก้ที่ใช้บ่อย
+
+- **เพิ่ม index** สำหรับฟิลด์ที่ query filter และ sort — วิธีแก้ที่มีผลสูงสุดอย่างเดียว (`COLLSCAN` เป็น `IXSCAN`, `docsExamined` จาก 49 999 เหลือ 5 000 ข้างบน)
+- **project ให้น้อยลง** เพื่อให้ย้ายไบต์น้อยลงและ query อาจตอบจาก index ได้
+- **จำกัดผลลัพธ์** ด้วย `limit`
+- **ใช้ client เดียว** ต่อโปรเซส (วัดข้างบน)
+
+**ใน Compass / Atlas:** แท็บ Explain Plan ของ Compass รัน `explain` ให้ query และติดธง collection scan; Atlas มี Performance Advisor ที่เสนอ index จากทราฟฟิกจริง — ทั้งสองเป็น UI ที่ครอบกลไกที่แสดงในนี้ และชื่อแผงเปลี่ยนไปตามรุ่น
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ทำ profile ที่ level `1` พร้อม `slowms` ที่สมเหตุสมผลใน production ไม่ใช่ level `2` — การบันทึกทุก operation เพิ่ม overhead และท่วม collection
-- `system.profile` เป็น collection แบบ **capped**: ขนาดคงที่ และ entry เก่าจะหลุดออกไปเรื่อย ๆ ให้อ่านทันทีหลังจากทำซ้ำ query ที่ช้า ไม่อย่างนั้นหลักฐานจะหายไปก่อน
-- profiler บอกคุณว่า query *ไหน* ช้า; `explain` บอกคุณว่า *ทำไม* ใช้สองตัวนี้ตามลำดับ — หาตัวการก่อน แล้วค่อยวินิจฉัย
-- อัตราส่วน `docsExamined` ต่อ `nreturned` ที่สูงคือสัญญาณเดียวที่ชัดเจนที่สุดของการขาดหรือใช้ index ผิด ตั้งเป้าให้อ่านใกล้เคียงกับที่คุณคืน
+- ใช้ level `1` กับ `slowms` ที่เหมาะสมใน production Level `2` บันทึกทุกอย่างและบน server ที่ยุ่งจะท่วม collection แบบ capped
+- `slowms` เป็นค่า **ระดับ server**: เปลี่ยนใน database หนึ่งเปลี่ยนให้ทุกตัว (และให้ log ด้วย) ลองบน server ชั่วคราวก่อน
+- `system.profile` เป็น capped และแยกตาม database; อ่านมันเร็ว ๆ หลังทำซ้ำปัญหา
+- profiler บอก *ว่า* query ไหนช้า; `explain` บอก *ว่าทำไม*
+- อัตราส่วน `docsExamined` ต่อ `nreturned` ที่สูงคือสัญญาณเดี่ยวที่ชัดที่สุดของ index ที่ขาดหรือผิด
 
-<Callout title="วัดก่อน แล้วจึงแก้">
-เปิด profiler เพื่อหา query ที่ช้าจริง ๆ อ่าน system.profile หาอัตราส่วน docsExamined ต่อ nreturned ที่สูง ยืนยันด้วย explain แล้วค่อยแก้ — ส่วนใหญ่คือเพิ่ม index ให้ถูกตัว project ให้น้อยลง และจำกัดขอบเขตผลลัพธ์ อย่าเดาเรื่อง performance
+<Callout title="วัดก่อน แล้วค่อยแก้">
+หา operation ที่ช้า (profiler level 1 หรือบรรทัด "Slow query" ใน log), อ่าน docsExamined เทียบกับ nreturned, ยืนยันด้วย explain, แก้ — มักเป็น index — แล้ววัดอีกครั้ง ใช้ client เดียวต่อโปรเซส
 </Callout>
+
+## Mental Model
+
+งานด้าน performance คือลูปบน **ตัวนับสามตัว**: server *ตรวจ* เท่าไร (`keysExamined`, `docsExamined`), *คืน* เท่าไร (`nreturned`) และ page *อยู่ในหน่วยความจำ* หรือไม่ (ตัวนับของ cache) query ที่สุขภาพดีตรวจเท่ากับที่คืน; ที่ไม่ดีตรวจทุกอย่าง (ขาด index) หรือรอดิสก์ (cache เย็นหรือเล็กเกินไป) profiler และ `currentOp` บอกว่า operation ไหน `explain` บอกว่าทำไม และ pool บอกว่า client กำลังสร้างโหลดเองหรือไม่
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| Profiler level `2` (บันทึกทุก operation) | จับ query ช้าได้ทุกตัว รวมถึงที่เกิดเป็นครั้งคราว | overhead สูง และ `system.profile` ที่เป็น capped collection เต็มเร็ว ทำให้ entry เก่าหลุดก่อนได้ตรวจสอบ |
-| Profiler level `1` พร้อม `slowms` threshold | overhead ต่ำ เหมาะกับการเปิดทิ้งไว้ต่อเนื่องใน production | query ที่ช้าแบบ intermittent หรือช้ากว่า threshold แค่นิดเดียวอาจหลุดจากการสังเกต |
+| Profiler level `2` | บันทึกทุก operation รวมถึงที่เกิดเป็นครั้งคราว | overhead และ collection แบบ capped ที่เต็มและ entry หลุดเร็ว |
+| Profiler level `1` กับ `slowms` | ถูกพอที่จะเปิดทิ้งไว้ | พลาด operation ที่ต่ำกว่าเกณฑ์; `slowms` ยังเปลี่ยน log ของทั้ง server |
+| Slow-query log อย่างเดียว (level `0`) | ไม่มี collection profile ให้ดูแล | entry อยู่ใน log ไม่ใช่ document ที่ query ได้ |
+| Index ทุก filter | การอ่านตรวจเท่ากับที่คืน | ทุกการเขียนจ่ายค่า index ทุกตัว (ดูโมดูล indexes) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ตั้ง `slowms` ต่ำเกินไปใน production แล้วลืมผลที่ตามมา** — threshold ที่ต่ำเกินไปทำให้เกือบทุก query ถูกบันทึก ได้ผลเหมือนเปิด level `2` โดยไม่ตั้งใจ overhead สูงขึ้นและ capped collection หมุนเวียนเร็วจนข้อมูลที่ต้องการหายไปก่อน
-- **เชื่อว่า index ที่มีอยู่ต้องถูก planner เลือกใช้เสมอ** — planner อาจยังเลือก `COLLSCAN` แม้มี index ถ้า selectivity ต่ำหรือ index ไม่ตรงกับ query pattern เช่นลำดับฟิลด์ผิดสำหรับ compound index ต้องเช็ค `explain` จริง ไม่ใช่สันนิษฐานจากการมี index อยู่
-- **มองแค่ latency เฉลี่ยแทนที่จะดู tail latency (p95/p99)** — ค่าเฉลี่ยกลบ query ที่ช้าเป็นครั้งคราวได้ง่าย ผู้ใช้ที่เจอ query ช้าที่สุดคือคนที่รู้สึกถึงปัญหาจริง ไม่ใช่ค่าเฉลี่ย
+- **"profiler ที่ level 0 คือปิด"** — slow-query **log** ยังบันทึกทุกอย่างที่ช้ากว่า `slowms`
+- **"ตั้ง `slowms` ใน database หนึ่งมีผลเฉพาะที่"** — มันเป็นระดับ server
+- **"system.profile เก็บประวัติ"** — มันเป็น capped และหมุนเวียน; entry ข้างบนหายไปเมื่อมีตัวใหม่เข้ามา
+- **"query แรกที่เย็นแปลว่า index แย่"** — scan แรกหลังรีสตาร์ทอ่าน page เข้า cache; เปรียบเทียบรอบอุ่น
+- **"สร้าง client ต่อ request ปลอดภัยกว่า"** — มันทำให้ connection ใหม่เพิ่มขึ้นมาก (ดูรอบ pool ข้างบน) และลูปช้าลง; client ที่ใช้ร่วมกันเป็นแบบแผน
+- **"index ที่มีอยู่จะถูกใช้เสมอ"** — planner เลือก; ดู `planSummary` ใน profile entry แทนการสมมติ
 
-> 💡 ตัวอย่างจากของจริง
->
-> **Performance Advisor ใน MongoDB Atlas** — สแกน traffic จริงต่อเนื่องและแนะนำ index ที่ควรสร้างโดยอัตโนมัติ แทนที่ทีมต้องมานั่งไล่อ่าน `system.profile` ด้วยมือทุกวัน
->
-> **ทีม e-commerce ช่วง Black Friday** — เปิด profiler level `1` พร้อม `slowms` ต่ำเป็นการชั่วคราวช่วง traffic พีค เพื่อจับ query ช้าที่โผล่มาเฉพาะตอนโหลดสูง แล้วปรับกลับเป็น threshold ปกติหลังผ่านช่วงพีคเพื่อคุม overhead
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่ตรวจแล้วใน shell/Node; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizPerf = [
   {
-    q: 'database profiler ทำอะไร?',
+    q: 'profile entry แสดง planSummary COLLSCAN, docsExamined 49999, nreturned 5000 สัญญาณอะไร?',
     options: [
-      'สร้าง index ให้ query ที่ช้าโดยอัตโนมัติ',
-      'บันทึก operation พร้อมเวลาที่ใช้ลงใน collection system.profile',
-      'replicate query ที่ช้าไปยัง secondary',
-      'บล็อก query ที่ช้ากว่า slowms',
+      'query ใช้ index ที่สมบูรณ์แบบ',
+      'query อ่าน document มากกว่าที่คืนมาก — ขาด index',
+      'profiler ตั้งค่าผิด',
+      'ผลลัพธ์เล็กเกินกว่าจะสนใจ',
     ],
     answer: 1,
+    explain: 'นั่นคือ entry จริงจากการรันแรก หลัง createIndex({ joined: 1 }) entry แสดง IXSCAN โดย docsExamined เท่ากับ nreturned',
   },
   {
-    q: 'ใน profile entry, docsExamined ใหญ่กว่า nreturned มาก สิ่งนี้บ่งบอกอะไร?',
+    q: 'profiler อยู่ level 0 กับ slowms 20 และมี query 200 ms รัน อะไรถูกบันทึก?',
     options: [
-      ' query กำลังใช้ index ที่เหมาะสมที่สุด',
-      'query อ่าน document มากกว่าที่คืนกลับมาก — น่าจะขาด index',
-      'profiler ถูกตั้งค่าผิด',
-      'ชุดผลลัพธ์เล็กเกินไปจนไม่สำคัญ',
+      'ไม่มีอะไร',
+      'บรรทัด "Slow query" ใน log ของ server แต่ไม่มี document ใน system.profile',
+      'document ใน system.profile อย่างเดียว',
+      'ทั้งบรรทัดใน log และ document ใน system.profile',
     ],
     answer: 1,
+    explain: 'การรัน lab แสดง 0 profile entry ที่ level 0 และบรรทัด Slow query ใน docker logs',
   },
   {
-    q: '"working set" คืออะไร?',
-    options: [
-      'รายการ index บน collection',
-      'ส่วนของข้อมูลและ index ที่ query แตะต้องอย่างแข็งขัน ซึ่งคุณต้องการให้พอดีกับ RAM',
-      'backup ของ write ล่าสุด',
-      'ชุดของ connection ใน pool ของ driver',
-    ],
+    q: 'ข้อใดเกี่ยวกับ slowms เป็นจริง?',
+    options: ['กระทบเฉพาะ database ปัจจุบัน', 'เป็นระดับ server และควบคุม slow-query log ด้วย', 'จำกัดเวลารันของ query', 'ไม่มีผลที่ level 2'],
     answer: 1,
+    explain: 'การตั้งใน database หนึ่งเปลี่ยนเกณฑ์ของ log และของทุก database บน server ซึ่งเป็นเหตุผลที่ lab ใช้ container ชั่วคราว',
   },
   {
-    q: 'ทำไม driver ควรใช้ client ตัวเดียวและ connection pool เดิมซ้ำ?',
+    q: 'system.profile คืออะไร?',
     options: [
-      'รับประกัน strong consistency',
-      'การนำ connection ใน pool มาใช้ซ้ำหลีกเลี่ยงการเปิดอันใหม่ต่อ request และการใช้ขีดจำกัดของ server จนหมด',
-      'เปิดใช้ sharding ให้อัตโนมัติ',
-      'ปิด profiler ให้',
+      'ประวัติของทุก query แบบไม่จำกัดขนาด',
+      'collection แบบ capped แยกตาม database: ขนาดคงที่ entry เก่าหลุดออก',
+      'collection ระดับ server ใน admin',
+      'view บนไฟล์ log',
     ],
     answer: 1,
+    explain: 'stats() รายงาน capped true และ maxSize คงที่',
+  },
+  {
+    q: 'handler ของ Express สร้าง new MongoClient(url) ทุก request lab วัดอะไรเทียบกับ client ที่ใช้ร่วมกัน?',
+    options: [
+      'ไม่ต่างกัน',
+      'connection ใหม่ที่ server จำนวนมากและลูปช้ากว่า เทียบกับ pool เดียวที่ใช้ซ้ำ',
+      'connection น้อยกว่าแต่อ่านช้ากว่า',
+      'สำคัญเฉพาะเมื่อใช้ TLS',
+    ],
+    answer: 1,
+    explain: 'รอบ pool: 300 request ที่แต่ละครั้งมี client ของตัวเองเปิด connection ใหม่ 600 ตัวใน 5.1 วินาที; client ที่ใช้ร่วมกันเปิด 0 ตัวใน 0.8 วินาที',
   },
 ]
 

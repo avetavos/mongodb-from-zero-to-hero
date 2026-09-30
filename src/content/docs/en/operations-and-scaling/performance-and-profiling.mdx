@@ -1,6 +1,6 @@
 ---
 title: Performance and profiling
-description: Find slow queries with the database profiler, re-read explain, keep the working set in RAM, and apply the common fixes that make queries fast again.
+description: Find slow queries with the database profiler and the slow-query log, read a real system.profile entry, watch a running operation with currentOp, see the WiredTiger cache warm up, and fix a client-per-request pool bug — all measured.
 sidebar:
   order: 4
 ---
@@ -9,49 +9,68 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-When a database feels slow, the temptation is to guess: add a server, add memory, add an index somewhere and hope. The professional move is the opposite — *measure first*. MongoDB gives you two instruments for that. The **database profiler** records the operations that actually ran and how long each took, so you can see which queries are the problem. And `explain` tells you *why* a single query is slow by showing the plan the server chose. Together they turn performance work from guesswork into a short investigation.
+When a database feels slow, the temptation is to guess: add a server, add memory, add an index somewhere and hope. The professional move is the opposite — *measure first*. MongoDB gives you two instruments. The **database profiler** records the operations that actually ran and how long each took, so you can see which queries are the problem. And `explain` tells you *why* a single query is slow by showing the plan the server chose.
+
+Fences with a path comment ran against the course's one-node replica set (mongo 8.3.11, mongosh 2.11.1, Node driver 7.7.0, this Mac); fences marked *lab* ran on a throwaway standalone `mongo:8.3.11` container capped at 512 MB with a 0.25 GB WiredTiger cache (`mongodb-b3-perf`, removed afterwards) because they change server-wide settings (`slowms`), restart the server, or measure server-wide counters. Python/Go/Rust tabs mirror the verified shell/Node call and are not executed by the course's automated checker.
 
 ## Where the time goes
 
-Most slow queries come down to one of two causes: the query reads far more documents than it returns, or the data it needs is not in memory and has to be fetched from disk. The first picture is the clearest. The same query, with and without a supporting index, does a wildly different amount of work:
+Most slow queries come down to one of two causes: the query reads far more documents than it returns, or the data it needs is not in memory and has to be fetched from disk.
 
 export const latencyFlow = `flowchart TB
   subgraph Slow["No index — COLLSCAN"]
-    Q1["Find members joined in 2023"] --> R1["Read all 1,000,000 docs"]
+    Q1["Find members joined in 2023"] --> R1["Read every document"]
     R1 --> F1["Discard the non-matches"]
-    F1 --> O1["Return 12 docs — slow"]
+    F1 --> O1["Return the matches — slow"]
   end
   subgraph Fast["With an index — IXSCAN"]
     Q2["Find members joined in 2023"] --> R2["Seek the index to 2023"]
-    R2 --> F2["Read only the 12 matching docs"]
-    F2 --> O2["Return 12 docs — fast"]
+    R2 --> F2["Read only the matching documents"]
+    F2 --> O2["Return them — fast"]
   end`
 
 <Mermaid code={latencyFlow} title="Without an index a query reads everything and throws most away; with one it reads only what it returns" />
 
-The second cause is subtler: the **working set**. That is the slice of your data and indexes that queries actually touch day to day. When the working set fits in RAM, reads are served from memory and the database flies. When it spills past RAM, every miss becomes a disk read, and latency climbs even though the queries themselves did not change. Keeping the working set in memory — by adding RAM, or by reading less data per query — is one of the biggest levers you have.
+The second cause is the **working set**: the slice of data and indexes that queries actually touch. When it fits in RAM, reads are served from memory. When it does not, every miss becomes a disk read. The cache demo below makes that visible.
 
 ## Enabling the profiler
 
-The profiler writes one document per slow operation into a special `system.profile` collection in each database. You set it per database. Level `1` records only operations slower than a threshold you choose in milliseconds; level `2` records everything (useful in development, far too noisy in production); level `0` turns it off.
+The profiler writes one document per recorded operation into a capped `system.profile` collection **in each database**. Level `1` records operations slower than `slowms`; level `2` records everything (development only); level `0` turns it off. Below, level 2 on a lesson database with 50 000 members — safe on a shared server, because it only affects this database — then the slowest recent query:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    // Record every operation slower than 100 ms
-    db.setProfilingLevel(1, { slowms: 100 })
+    // mongosh/perf-profile.js
+    const docs = Array.from({ length: 50000 }, (_, i) => ({ name: "m" + i, joined: 2015 + (i % 10), city: "c" + (i % 200), fines: i % 7 }));
+    db.members.insertMany(docs);
 
-    // Check the current setting
-    db.getProfilingStatus()
+    db.setProfilingLevel(2);
+    db.members.find({ joined: 2023 }).batchSize(5000).toArray();   // no index yet; one batch = one profile entry
+    db.setProfilingLevel(0);
+
+    const e = db.system.profile.find({ op: "query", ns: db.getName() + ".members" }).sort({ ts: -1 }).limit(1).toArray()[0];
+    console.log({ op: e.op, millis: e.millis, planSummary: e.planSummary, docsExamined: e.docsExamined, keysExamined: e.keysExamined, nreturned: e.nreturned });
+    assert.strictEqual(e.planSummary, "COLLSCAN");
+    assert.ok(e.docsExamined >= 49000);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.command({ profile: 1, slowms: 100 });
-    const status = await db.command({ profile: -1 });
-    console.log(status);
+    // app/perf-profile.mjs
+    const members = db.collection("members");
+    await members.insertMany(Array.from({ length: 50000 }, (_, i) => ({ name: "m" + i, joined: 2015 + (i % 10), city: "c" + (i % 200), fines: i % 7 })));
+
+    await db.command({ profile: 2 });
+    await members.find({ joined: 2023 }, { batchSize: 5000 }).toArray();
+    await db.command({ profile: 0 });
+
+    const [e] = await db.collection("system.profile")
+      .find({ op: "query", ns: db.databaseName + ".members" }).sort({ ts: -1 }).limit(1).toArray();
+    console.log({ op: e.op, millis: e.millis, planSummary: e.planSummary, docsExamined: e.docsExamined, nreturned: e.nreturned });
+    if (e.planSummary !== "COLLSCAN" || e.docsExamined < 49000) throw new Error("expected a full collection scan");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -78,169 +97,308 @@ The profiler writes one document per slow operation into a special `system.profi
   </TabItem>
 </Tabs>
 
-## Reading system.profile
-
-Once the profiler is on, you query `system.profile` like any other collection. Sort by time descending and look at the slowest recent operations. The fields to watch are `millis` (how long it took), `docsExamined` versus `nreturned` (how many documents it read versus returned), and `planSummary` (whether it used an index or a collection scan):
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.system.profile
-      .find({}, { op: 1, ns: 1, millis: 1, planSummary: 1, docsExamined: 1, nreturned: 1 })
-      .sort({ ts: -1 })
-      .limit(5)
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const slow = await db
-      .collection("system.profile")
-      .find({})
-      .project({ op: 1, ns: 1, millis: 1, planSummary: 1 })
-      .sort({ ts: -1 })
-      .limit(5)
-      .toArray();
-    console.log(slow);
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    slow = (
-        db["system.profile"]
-        .find({}, {"op": 1, "ns": 1, "millis": 1, "planSummary": 1})
-        .sort("ts", -1)
-        .limit(5)
-    )
-    for entry in slow:
-        print(entry)
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    opts := options.Find().
-        SetSort(bson.D{{Key: "ts", Value: -1}}).
-        SetLimit(5)
-    cur, err := db.Collection("system.profile").Find(ctx, bson.M{}, opts)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let opts = FindOptions::builder()
-        .sort(doc! { "ts": -1 })
-        .limit(5)
-        .build();
-    let mut cursor = db
-        .collection::<Document>("system.profile")
-        .find(doc! {})
-        .with_options(opts)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-A single profile entry tells the whole story at a glance. This one read a million documents to return twelve, with a plan summary of `COLLSCAN` — a textbook missing index:
-
-```json
+```text
 {
-  "op": "query",
-  "ns": "library.members",
-  "millis": 2143,
-  "planSummary": "COLLSCAN",
-  "docsExamined": 1000000,
-  "nreturned": 12
+  op: 'query',
+  millis: 37,
+  planSummary: 'COLLSCAN',
+  docsExamined: 49999,
+  keysExamined: 0,
+  nreturned: 5000
 }
 ```
 
-When `docsExamined` dwarfs `nreturned`, you have found the problem. The next step is `explain` on that exact query to confirm the plan, then a fix:
+```text
+{
+  op: 'query',
+  millis: 31,
+  planSummary: 'COLLSCAN',
+  docsExamined: 49999,
+  nreturned: 5000
+}
+```
+
+The fields to read are `millis`, `docsExamined` against `nreturned` (49 999 read for 5 000 returned), and `planSummary` (`COLLSCAN`, a scan of the whole collection). One thing that surprised the first draft of this lesson: the profiler records **one entry per batch**. A plain `find().toArray()` on the 200 000-document lab collection produced a `query` entry with `nreturned: 101`, `docsExamined: 1009` (it stopped scanning once it had a first batch) and a separate `getmore` entry with `nreturned: 19899` for the rest; the fences use `batchSize(5000)` so the whole result is one entry. Add the index and run it again:
 
 ```js
-db.members.find({ joined: 2023 }).explain("executionStats")
+// mongosh/perf-fix.js
+db.members.createIndex({ joined: 1 });
+
+db.setProfilingLevel(2);
+const n = db.members.find({ joined: 2023 }).batchSize(5000).toArray().length;
+db.setProfilingLevel(0);
+
+const e = db.system.profile.find({ op: "query", ns: db.getName() + ".members" }).sort({ ts: -1 }).limit(1).toArray()[0];
+console.log({ millis: e.millis, planSummary: e.planSummary, keysExamined: e.keysExamined, docsExamined: e.docsExamined, nreturned: e.nreturned });
+assert.strictEqual(e.planSummary, "IXSCAN { joined: 1 }");
+assert.strictEqual(e.docsExamined, n);
 ```
+
+```text
+{
+  millis: 42,
+  planSummary: 'IXSCAN { joined: 1 }',
+  keysExamined: 5000,
+  docsExamined: 5000,
+  nreturned: 5000
+}
+```
+
+Now `docsExamined` equals `nreturned`: the index reads exactly what the query returns. (Timings on a 50 000-document collection are milliseconds either way; the *counts* are the scalable signal.)
+
+### `slowms`, the log, and what the profiler costs
+
+Level `1` records only operations slower than `slowms` (default 100 ms). The same threshold also decides what the server writes to its log as a `"Slow query"` line, even with the profiler at level `0`. A *lab* run with `slowms: 20` on a 200 000-document collection:
+
+```js
+// mongosh/perf-slowms.js @skip-verify lab: sets the server-wide slowms on a throwaway standalone
+db.setProfilingLevel(0, { slowms: 20 });
+console.log(db.getProfilingStatus());
+db.members.find({ fines: 99 }).toArray();       // COLLSCAN over all 200 000 documents, no match
+db.members.find({ name: "m1" }).limit(1).toArray();   // stops at the first hit: fast
+console.log("profile entries at level 0:", db.system.profile.countDocuments());
+db.setProfilingLevel(1, { slowms: 20 });
+db.members.find({ fines: 99 }).toArray();
+db.members.find({ name: "m1" }).limit(1).toArray();
+console.log("profile entries at level 1:", db.system.profile.find({}, { op: 1, millis: 1, planSummary: 1 }).toArray());
+const p = db.system.profile.stats();
+console.log({ capped: p.capped, maxSizeBytes: p.maxSize });
+```
+
+```text
+{
+  was: 0,
+  slowms: 20,
+  slowinprogms: Long('5000'),
+  sampleRate: 1,
+  ok: 1
+}
+profile entries at level 0: 0
+profile entries at level 1: [ { op: 'query', millis: 103, planSummary: 'COLLSCAN' } ]
+{ capped: true, maxSizeBytes: 1048576 }
+```
+
+and the server log line for the slow one, read back from the server's in-memory log (`getLog`; the same JSON goes to the log file or `docker logs`), trimmed to the interesting keys:
+
+```js
+// mongosh/perf-slowlog.js @skip-verify lab: reads the log of the throwaway server (real output below)
+const line = db.adminCommand({ getLog: "global" }).log.filter((l) => l.includes("Slow query") && l.includes('"fines":99')).pop();
+const j = JSON.parse(line);
+console.log({ msg: j.msg, ns: j.attr.ns, planSummary: j.attr.planSummary, keysExamined: j.attr.keysExamined, docsExamined: j.attr.docsExamined, nreturned: j.attr.nreturned, durationMillis: j.attr.durationMillis });
+```
+
+```text
+2
+{"msg":"Slow query","ns":"library.members","planSummary":"COLLSCAN","keysExamined":0,"docsExamined":200000,"nreturned":0,"durationMillis":103}
+
+```
+
+Three facts: (1) at level `0` the slow query is still **logged**, not profiled; (2) at level `1` only the slow operation was recorded, the quick lookup was not; (3) `system.profile` is a **capped** collection with a fixed size (1 MB by default in this run), so old entries roll off.
+
+## Watching a running operation: `currentOp`
+
+The profiler is history; `currentOp` is the present. A lab run started a deliberately slow query (`$where` with `sleep`) on one connection and inspected it from another, then killed it:
+
+```js
+// mongosh/perf-currentop.js @skip-verify lab: needs two connections (real output below)
+// connection A (blocks):  db.members.find({ $where: "sleep(4000) || true" }).toArray()
+// connection B:
+const op = db.currentOp({ ns: /members/, op: "query", secs_running: { $gte: 1 } }).inprog[0];
+console.log({ op: op.op, ns: op.ns, secs_running: op.secs_running, planSummary: op.planSummary, opid: op.opid });
+db.killOp(op.opid);
+```
+
+```text
+{
+  op: 'query',
+  ns: 'library.members',
+  secs_running: Long('1'),
+  planSummary: 'COLLSCAN',
+  opid: 31745
+}
+```
+
+## The WiredTiger cache and the working set
+
+The storage engine keeps recently used pages in its own cache, sized by default to roughly half of the machine's RAM (here capped to 0.25 GB). A query on data that is not cached must read pages from disk. The lab restarted the server (cold cache), then ran the same aggregate over the 200 000 documents twice and read the cache counters around it:
+
+```js
+// app/perf-cache.mjs @skip-verify lab: run right after `docker restart` of the throwaway server (real output below)
+const stats = async () => {
+  const c = (await db.admin().command({ serverStatus: 1 })).wiredTiger.cache;
+  return { maxBytes: c["maximum bytes configured"], inCacheBytes: c["bytes currently in the cache"], pagesReadIntoCache: c["pages read into cache"] };
+};
+const scan = async () => { const t = Date.now(); await db.collection("members").aggregate([{ $group: { _id: "$city", n: { $sum: 1 }, fines: { $sum: "$fines" } } }]).toArray(); return Date.now() - t; };
+console.log("before", await stats());
+console.log("cold scan ms:", await scan());
+console.log("warm scan ms:", await scan());
+console.log("after ", await stats());
+```
+
+```text
+before { maxBytes: 268435456, inCacheBytes: 57465, pagesReadIntoCache: 21 }
+cold scan ms: 97
+warm scan ms: 63
+after  {
+  maxBytes: 268435456,
+  inCacheBytes: 19855589,
+  pagesReadIntoCache: 346
+}
+
+```
+
+The first scan after a restart had to read pages into the cache (`pagesReadIntoCache` jumped) and was slower than the second, which was served from memory. When the working set is bigger than the cache, *every* scan looks like the cold one — the fix is more RAM, smaller documents (projection, fewer fields), or indexes that touch fewer pages.
+
+## Connection pools: one client, not one per request
+
+Drivers keep a pool of connections and reuse them. The classic mistake is creating a client inside the request handler, which pays a TCP (and TLS/auth) handshake every time and can exhaust the server's connection limit.
+
+<SpotTheBug lang="js" code={`// AI comment: "connect per request for isolation; the driver cleans up"
+app.get("/members/:id", async (req, res) => {
+  const client = new MongoClient(process.env.MONGO_URL);
+  await client.connect();
+  const doc = await client.db("library").collection("members").findOne({ _id: req.params.id });
+  await client.close();
+  res.json(doc);
+});`}>
+
+Each request opens (and closes) its own connections. Measured (*lab*, 300 sequential lookups against the standalone, `serverStatus().connections.totalCreated` before/after):
+
+```js
+// app/perf-pool.mjs @skip-verify lab: reads server-wide connection counters (real output below)
+import { MongoClient } from "mongodb";
+const uri = "mongodb://localhost:27303/";
+const created = async (c) => (await c.db("admin").command({ serverStatus: 1 })).connections.totalCreated;
+const watcher = new MongoClient(uri); await watcher.connect();
+
+let before = await created(watcher);
+let t = Date.now();
+for (let i = 0; i < 300; i++) {                        // the bug: a client per request
+  const c = new MongoClient(uri); await c.connect();
+  await c.db("library").collection("members").findOne({ name: "m" + i });
+  await c.close();
+}
+const perRequest = { ms: Date.now() - t, newConnections: (await created(watcher)) - before };
+
+const shared = new MongoClient(uri); await shared.connect();   // the fix: one client for the process
+before = await created(watcher);
+t = Date.now();
+for (let i = 0; i < 300; i++) await shared.db("library").collection("members").findOne({ name: "m" + i });
+const sharedRun = { ms: Date.now() - t, newConnections: (await created(watcher)) - before };
+console.log({ perRequest, shared: sharedRun });
+await shared.close(); await watcher.close();
+```
+
+```text
+{
+  perRequest: { ms: 5067, newConnections: 600 },
+  shared: { ms: 823, newConnections: 0 }
+}
+
+```
+
+</SpotTheBug>
 
 ## The common fixes
 
-Most slow queries are cured by one of a small handful of moves:
+- **Add an index** for the fields a query filters and sorts on — the single highest-impact fix (`COLLSCAN` to `IXSCAN`, `docsExamined` from 49 999 to 5 000 above).
+- **Project less**, so fewer bytes move and the query may be answered from an index.
+- **Bound results** with `limit`.
+- **Share one client** per process (measured above).
 
-- **Add an index** on the fields the query filters or sorts by, so the server seeks instead of scans. This is the single highest-impact fix and the reason the profiler exists.
-- **Project less.** Ask only for the fields you need rather than whole documents, which cuts the bytes moved and can let a query be served entirely from an index.
-- **Avoid unbounded results.** Always `limit` queries that could match a large number of documents; an accidental full-collection sweep is slow no matter how good the index is.
-- **Right-size connections.** Drivers maintain a **connection pool** and reuse connections rather than opening one per request. Reusing a shared client — not creating a new one per call — keeps that pool healthy and avoids exhausting the server's connection limit.
-
-**In Compass / Atlas:** Compass has a *Performance Insights* and *Explain Plan* view that runs `explain` for you and flags collection scans visually. Atlas goes further with a *Performance Advisor* that watches your real traffic and suggests indexes to create, and a *Profiler* tab that surfaces the slowest operations without you touching `system.profile` by hand.
+**In Compass / Atlas:** Compass's Explain Plan tab runs `explain` for a query and flags collection scans; Atlas has a Performance Advisor that suggests indexes from real traffic — both are UIs over the mechanisms shown here, and their panel names change between releases.
 
 ## Tips and gotchas
 
-- Profile at level `1` with a sensible `slowms` in production, not level `2` — recording every operation adds overhead and floods the collection.
-- `system.profile` is a **capped** collection: it has a fixed size and old entries roll off. Read it soon after reproducing a slow query, or the evidence ages out.
-- The profiler tells you *which* query is slow; `explain` tells you *why*. Use them in that order — find the culprit, then diagnose it.
-- A high `docsExamined` to `nreturned` ratio is the clearest single signal of a missing or wrong index. Aim to read close to what you return.
+- Use level `1` with a sensible `slowms` in production. Level `2` records everything and, on a busy server, floods the capped collection.
+- `slowms` is **server-wide**: changing it on one database changes it for all (and for the log). Try it on a throwaway server first.
+- `system.profile` is capped and per database; read it soon after reproducing the problem.
+- The profiler tells you *which* query is slow; `explain` tells you *why*.
+- A high `docsExamined` to `nreturned` ratio is the clearest single signal of a missing or wrong index.
 
 <Callout title="Measure, then fix">
-Turn on the profiler to find the queries that are actually slow, read system.profile for a high docsExamined-to-nreturned ratio, confirm with explain, and fix it — usually by adding the right index, projecting less, and bounding the result. Never guess at performance.
+Find slow operations (profiler level 1, or the "Slow query" log lines), read docsExamined against nreturned, confirm with explain, fix — usually an index — and measure again. Reuse one client per process.
 </Callout>
+
+## Mental Model
+
+Performance work is a loop over **three counters**: how much the server *examined* (`keysExamined`, `docsExamined`), how much it *returned* (`nreturned`), and whether the pages were *in memory* (cache counters). A healthy query examines about what it returns; an unhealthy one examines everything (missing index) or waits for disk (cold or too-small cache). The profiler and `currentOp` tell you which operation, `explain` tells you why, and the pool tells you whether the client is creating the load itself.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Profiler level `2` (log every operation) | Catches every slow query, including intermittent ones | High overhead, and the capped `system.profile` collection fills fast, rolling off old entries before you can inspect them |
-| Profiler level `1` with a `slowms` threshold | Low overhead, safe to leave running continuously in production | Intermittently slow queries, or ones only slightly over the threshold, can escape notice |
+| Profiler level `2` | Records every operation, including intermittent ones | Overhead, and a capped collection that fills and rolls entries off quickly |
+| Profiler level `1` with `slowms` | Cheap enough to leave on | Misses operations under the threshold; `slowms` also changes the log for the whole server |
+| Slow-query log only (level `0`) | No profile collection to maintain | Entries live in the log, not in queryable documents |
+| Index for every filter | Reads examine what they return | Every write pays for every index (see the indexes module) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Setting `slowms` too low in production without considering the consequences** — too low a threshold logs nearly every query, effectively becoming level `2` by accident. Overhead rises and the capped collection cycles so fast the data you need is gone before you look.
-- **Assuming an existing index must always be chosen by the planner** — the planner can still pick a `COLLSCAN` even with an index present, if selectivity is low or the index does not match the query pattern, such as a wrong field order on a compound index. Check real `explain` output, do not assume from an index merely existing.
-- **Looking only at average latency instead of tail latency (p95/p99)** — an average easily hides occasional slow queries. The users who hit the slowest queries are the ones who actually feel the problem, not the average.
+- **"The profiler at level 0 is off."** — the slow-query **log** still records anything slower than `slowms`.
+- **"Setting `slowms` in one database is local."** — it is server-wide.
+- **"system.profile keeps the history."** — it is capped and rolls; entries above disappear as new ones arrive.
+- **"A cold first query means the index is bad."** — the first scan after a restart reads pages into the cache; compare a warm run.
+- **"Creating a client per request is safer."** — it multiplied new connections (see the pool run above) and slowed the loop; one shared client is the pattern.
+- **"An existing index is always used."** — the planner chooses; check `planSummary` in the profile entry rather than assuming.
 
-> 💡 Real-world example
->
-> **MongoDB Atlas Performance Advisor** — continuously scans real traffic and automatically suggests indexes to create, instead of a team manually combing through `system.profile` every day.
->
-> **An e-commerce team during Black Friday** — temporarily enables profiler level `1` with a low `slowms` during peak traffic, to catch slow queries that only appear under high load, then reverts to the normal threshold afterward to control overhead.
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; they are not executed by the course's automated checker._
 
 export const quizPerf = [
   {
-    q: 'What does the database profiler do?',
-    options: [
-      'It automatically creates indexes for slow queries',
-      'It records operations and their durations into the system.profile collection',
-      'It replicates slow queries to a secondary',
-      'It blocks any query slower than slowms',
-    ],
-    answer: 1,
-  },
-  {
-    q: 'In a profile entry, docsExamined is far larger than nreturned. What does that signal?',
+    q: 'A profile entry shows planSummary COLLSCAN, docsExamined 49999, nreturned 5000. What does it signal?',
     options: [
       'The query is using an ideal index',
-      'The query is reading far more documents than it returns — likely a missing index',
+      'The query reads far more documents than it returns — a missing index',
       'The profiler is misconfigured',
       'The result set is too small to matter',
     ],
     answer: 1,
+    explain: 'That is the real entry from the first run. After createIndex({ joined: 1 }) the entry showed IXSCAN with docsExamined equal to nreturned.',
   },
   {
-    q: 'What is the "working set"?',
+    q: 'The profiler is at level 0 with slowms 20 and a 200 ms query runs. What is recorded?',
     options: [
-      'The list of indexes on a collection',
-      'The portion of data and indexes that queries actively touch, which you want to fit in RAM',
-      'A backup of the most recent writes',
-      'The set of connections in the driver pool',
+      'Nothing',
+      'A "Slow query" line in the server log, but no system.profile document',
+      'A system.profile document only',
+      'Both a log line and a system.profile document',
     ],
     answer: 1,
+    explain: 'The lab run showed 0 profile entries at level 0 and a Slow query line in docker logs.',
   },
   {
-    q: 'Why should a driver reuse one client and its connection pool?',
+    q: 'Which statement about slowms is true?',
     options: [
-      'It guarantees strong consistency',
-      'Reusing pooled connections avoids opening one per request and exhausting the server limit',
-      'It enables sharding automatically',
-      'It disables the profiler',
+      'It only affects the current database',
+      'It is server-wide and also controls the slow-query log',
+      'It caps query runtime',
+      'It has no effect at level 2',
     ],
     answer: 1,
+    explain: 'Setting it in one database changed the threshold for the log and for every database on the server, which is why the lab used a throwaway container.',
+  },
+  {
+    q: 'What is system.profile?',
+    options: [
+      'An unbounded history of all queries',
+      'A capped, per-database collection: a fixed size, old entries roll off',
+      'A server-wide collection in admin',
+      'A view over the log file',
+    ],
+    answer: 1,
+    explain: 'stats() reported capped true and a fixed maxSize.',
+  },
+  {
+    q: 'An Express handler builds new MongoClient(url) on every request. What did the lab measure against one shared client?',
+    options: [
+      'No difference',
+      'Many new server connections and a slower loop, versus one pool reused',
+      'Fewer connections but slower reads',
+      'It only matters with TLS',
+    ],
+    answer: 1,
+    explain: 'The pool run: 300 requests with a client each opened 600 new connections in 5.1 s; the shared client opened 0 in 0.8 s.',
   },
 ]
 
