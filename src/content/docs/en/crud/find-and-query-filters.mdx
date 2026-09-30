@@ -1,6 +1,6 @@
 ---
 title: Finding documents
-description: Read documents back with find and findOne, build equality and multi-field filters, and project the fields you want.
+description: Read documents back with find and findOne, understand the cursor and its batches, build equality and multi-field filters, and project the fields you want - with the real results, errors and round-trip counts.
 sidebar:
   order: 3
 ---
@@ -8,26 +8,71 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Reading is where a database earns its keep, and MongoDB gives you two doors into the same room. `findOne` is for when you expect a single document — "who is the member named Grace?" — and hands you that one document or nothing at all. `find` is for when you might get several — "which members joined in 2023?" — and hands you a cursor you can iterate over. Both take the same kind of **filter**, a document that describes which records you want.
+Reading is where a database earns its keep, and MongoDB gives you two doors into the same room. `findOne` is for when you expect a single document - "who is the member named Grace?" - and hands you that one document or nothing at all. `find` is for when you might get several - "which members joined in 2023?" - and hands you a cursor you can iterate over. Both take the same kind of **filter**, a document that describes which records you want.
 
-Throughout this lesson assume the `members` collection already holds the people we inserted earlier. We will ask it questions of increasing precision.
+Every output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 (the Python, Go and Rust tabs were each run once in a scratch program on the same server). Object ids will differ on your machine.
 
-## findOne versus find
+## The data we query
 
-The difference is shape, not syntax. `findOne` returns at most one document directly. `find` returns a cursor — a lazy handle the driver iterates to pull documents in batches — so you usually turn it into an array (or loop over it) to see the results.
+Each lesson seeds its own data so you can open it on its own. Here are six library members - the same shape used through the whole course:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.findOne({ name: "Grace" })
+    // mongosh/find-seed.js
+    db.members.insertMany([
+      { name: "Ada",      joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Compilers"] },
+      { name: "Grace",    joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers", "Algorithms"] },
+      { name: "Linus",    joined: 2023, fines: 2, city: "Helsinki",  borrowed: [] },
+      { name: "Margaret", joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Algorithms"] },
+      { name: "Edsger",   joined: 2022, fines: 5, city: "Austin",    borrowed: ["Compilers", "Algorithms", "Databases"] },
+      { name: "Barbara",  joined: 2025, fines: 1, city: "Boston",    borrowed: [] },
+    ]);
+    assert.strictEqual(db.members.countDocuments(), 6);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Compilers"] },
+      { name: "Grace",    joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers", "Algorithms"] },
+      { name: "Linus",    joined: 2023, fines: 2, city: "Helsinki",  borrowed: [] },
+      { name: "Margaret", joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Algorithms"] },
+      { name: "Edsger",   joined: 2022, fines: 5, city: "Austin",    borrowed: ["Compilers", "Algorithms", "Databases"] },
+      { name: "Barbara",  joined: 2025, fines: 1, city: "Boston",    borrowed: [] },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 6) throw new Error("expected 6");
+    ```
+  </TabItem>
+</Tabs>
+
+(For Python, Go and Rust, insert the same six documents as in the previous lesson.)
+
+## findOne versus find
+
+The difference is shape, not syntax. `findOne` returns at most one document directly. `find` returns a cursor - a lazy handle the driver iterates to pull documents in batches - so you usually turn it into an array (or loop over it) to see the results.
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/find-one.js
+    const member = db.members.findOne({ name: "Grace" });
+    console.log(member);
+    console.log(db.members.findOne({ name: "Nobody" }));   // no match
+    assert.strictEqual(member.name, "Grace");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/find-one.mjs
     const member = await db.collection("members").findOne({ name: "Grace" });
     console.log(member);
+    console.log(await db.collection("members").findOne({ name: "Nobody" }));
+    if (member?.name !== "Grace") throw new Error("expected Grace");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -54,29 +99,43 @@ The difference is shape, not syntax. `findOne` returns at most one document dire
   </TabItem>
 </Tabs>
 
-The single matching document comes back in full, including the `_id`:
+The single matching document comes back in full, including the `_id`, and a miss is `null` (not an error) in the shell and Node:
 
-```json
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
-  "name": "Grace",
-  "joined": 2024,
-  "fines": 0
+  _id: ObjectId('6abca853ca24543a2bc8573d'),
+  name: 'Grace',
+  joined: 2024,
+  fines: 0,
+  city: 'Arlington',
+  borrowed: [ 'Compilers', 'Algorithms' ]
 }
+null
 ```
+
+How each driver reports "no such member" differs, and it matters for error handling: Python returns `None`, Rust returns `None` inside `Option`, Node returns `null` - but **Go's `FindOne(...).Decode()` returns an error, `mongo: no documents in result`** (`mongo.ErrNoDocuments`), which you must treat as "not found", not as a failure.
 
 An empty filter matches everything, which is how you read a whole collection. With `find` you get a cursor over all of it:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({})
+    // mongosh/find-all.js
+    const cursor = db.members.find({});
+    console.log(cursor.constructor.name);          // a Cursor, not an array
+    const all = cursor.toArray();
+    console.log(all.map((m) => m.name));
+    assert.strictEqual(all.length, 6);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-all.mjs
     const all = await db.collection("members").find({}).toArray();
-    console.log(all);
+    console.log(all.map((m) => m.name));
+    let n = 0;
+    for await (const m of db.collection("members").find({})) n++;   // or iterate lazily
+    if (all.length !== 6 || n !== 6) throw new Error("expected 6");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -110,23 +169,67 @@ An empty filter matches everything, which is how you read a whole collection. Wi
   </TabItem>
 </Tabs>
 
+```text
+Cursor
+[ 'Ada', 'Grace', 'Linus', 'Margaret', 'Edsger', 'Barbara' ]
+```
+
+### What a cursor really does: batches
+
+"Lazy handle" is not a metaphor. We turned on the profiler for a scratch database, inserted 1000 small documents and counted the server round trips for four reads:
+
+```js
+// mongosh/find-batches.js
+db.big.insertMany(Array.from({ length: 1000 }, (_, i) => ({ i, pad: "x".repeat(50) })));
+const trip = (label, fn) => {
+  db.setProfilingLevel(2);                 // profile every operation of THIS database only
+  const since = new Date();
+  const n = fn();
+  db.setProfilingLevel(0);
+  const ops = db.system.profile.find({ ts: { $gte: since }, ns: db.getName() + ".big" }).sort({ ts: 1 }).toArray();
+  console.log(label, "docs:", n, "| server round trips:", ops.map((o) => `${o.op}(${o.nreturned})`).join(" "));
+  return ops;
+};
+const a = trip("find().toArray()      ", () => db.big.find().toArray().length);
+const b = trip("find().batchSize(100) ", () => db.big.find().batchSize(100).toArray().length);
+const c = trip("find().limit(5)       ", () => db.big.find().limit(5).toArray().length);
+const d = trip("findOne()             ", () => (db.big.findOne() ? 1 : 0));
+assert.strictEqual(a.length, 2);
+assert.strictEqual(c.length, 1);
+```
+
+```text
+find().toArray()       docs: 1000 | server round trips: query(101) getmore(899)
+find().batchSize(100)  docs: 1000 | server round trips: query(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(0)
+find().limit(5)        docs: 5 | server round trips: query(5)
+findOne()              docs: 1 | server round trips: query(1)
+```
+
+The first reply carries **101 documents**, the next `getMore` the rest (up to the reply size cap); `batchSize(100)` forces eleven round trips; `limit(5)` and `findOne` need exactly one. That is also why the shell prints 20 documents and then `Type "it" for more`: `it` is the shell asking the cursor for its next batch.
+
 ## Equality filters
 
-A filter that names a field and a value means "this field equals this value." Stack several fields in one filter and MongoDB treats them as an **implicit AND** — a document must match every condition to be returned. Here we ask for members who joined in 2023 *and* have no outstanding fines:
+A filter that names a field and a value means "this field equals this value." Stack several fields in one filter and MongoDB treats them as an **implicit AND** - a document must match every condition to be returned. Here we ask for members who joined in 2023 *and* have no outstanding fines:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ joined: 2023, fines: 0 })
+    // mongosh/find-equality.js
+    const matches = db.members.find({ joined: 2023, fines: 0 }, { _id: 0, name: 1 }).toArray();
+    console.log(matches);
+    console.log(db.members.find({ joined: 2099, fines: 0 }).toArray());   // a miss: empty array, no error
+    assert.strictEqual(matches.map((m) => m.name).join(), "Ada,Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-equality.mjs
     const matches = await db
       .collection("members")
       .find({ joined: 2023, fines: 0 })
       .toArray();
-    console.log(matches);
+    console.log(matches.map((m) => m.name));
+    if (matches.length !== 2) throw new Error("expected 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -159,18 +262,14 @@ A filter that names a field and a value means "this field equals this value." St
   </TabItem>
 </Tabs>
 
-The result is a list of the documents that satisfied both conditions:
+Two members satisfy both conditions; a filter nobody satisfies returns an empty list:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "joined": 2023,
-    "fines": 0
-  }
-]
+```text
+[ { name: 'Ada' }, { name: 'Margaret' } ]
+[]
 ```
+
+(Node printed `[ 'Ada', 'Margaret' ]`; Python, Go and Rust each returned the same 2 documents.)
 
 ## A first taste of projection
 
@@ -179,16 +278,24 @@ By default a read returns every field of every matching document. A **projection
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ joined: 2023 }, { name: 1, _id: 0 })
+    // mongosh/find-projection.js
+    console.log(db.members.find({ joined: 2023 }, { name: 1, _id: 0 }).toArray());
+    console.log(db.members.find({}, { name: 1 }).limit(1).toArray());        // _id sneaks in
+    let err;
+    try { db.members.find({}, { name: 1, fines: 0 }).toArray(); } catch (e) { err = e; }   // mixing include and exclude
+    console.log(err.name, err.code, err.message);
+    assert.strictEqual(err.code, 31254);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-projection.mjs
     const names = await db
       .collection("members")
       .find({ joined: 2023 }, { projection: { name: 1, _id: 0 } })
       .toArray();
     console.log(names);
+    if (names.length !== 3 || "_id" in names[0]) throw new Error("expected 3 projected names");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -226,24 +333,73 @@ By default a read returns every field of every matching document. A **projection
   </TabItem>
 </Tabs>
 
-Now each result carries only the requested field:
+Now each result carries only the requested field - and the two traps are real:
 
-```json
-[{ "name": "Margaret" }]
+```text
+[ { name: 'Ada' }, { name: 'Linus' }, { name: 'Margaret' } ]
+[ { _id: ObjectId('6abca853ca24543a2bc8573c'), name: 'Ada' } ]
+MongoServerError 31254 Cannot do exclusion on field fines in inclusion projection
 ```
 
-**In Compass:** type a filter into the **Filter** bar at the top of the Documents tab and press **Find**; open the **Options** panel to fill in a projection without writing the call by hand.
+`_id` is included unless you switch it off with `_id: 0`, and mixing inclusion (`name: 1`) with exclusion (`fines: 0`) is rejected by the server (code `31254`).
+
+**In Compass:** the query bar has a **Filter** field and a **Find** button; the **Options** drop-down adds **Project**, **Sort**, **Limit**, **Skip**, **Collation** and **Max Time MS** (Compass documentation, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/), fetched 2026-09-30). Note the Compass filter bar accepts every query operator except `$text` and `$expr`.
 
 ## Tips and gotchas
 
-- `find` returns a **cursor**, not a list. Nothing is fetched until you iterate it (or call a helper like `toArray`). A `findOne` is effectively a cursor that stops after the first document.
-- The `_id` field is **included by default** in every projection. If you do not want it, you have to switch it off explicitly with `_id: 0`.
-- Don't mix `1` and `0` in the same projection except for `_id`. Either list the fields you want, or list the fields you want to drop — not both.
-- A filter that matches nothing returns an empty cursor (or, for `findOne`, a null result). That is a normal answer, not an error.
+- `find` returns a **cursor**, not a list. Nothing beyond the first batch is fetched until you iterate it (or call a helper like `toArray`). A `findOne` is effectively a cursor that stops after the first document.
+- The `_id` field is **included by default** in every projection. If you do not want it, switch it off explicitly with `_id: 0`.
+- Don't mix `1` and `0` in the same projection except for `_id`. Either list the fields you want, or list the fields you want to drop - not both.
+- A filter that matches nothing returns an empty cursor (or, for `findOne`, `null`/`None`; in Go an `ErrNoDocuments` error). That is a normal answer, not a failure.
+- A filter is an ordinary object in your language, so a **repeated key silently keeps only the last value** (see below).
 
 <Callout title="Filters are just documents">
-A query filter is a document that describes the documents you want. List several fields and MongoDB requires all of them to match — that implicit AND is the workhorse behind most everyday reads.
+A query filter is a document that describes the documents you want. List several fields and MongoDB requires all of them to match - that implicit AND is the workhorse behind most everyday reads.
 </Callout>
+
+## Reading AI-generated code
+
+Ask an assistant for "members with a small balance, greater than 0 and under 5" and you may get:
+
+<SpotTheBug lang="js" code={`// AI comment: "fines greater than 0 AND less than 5"
+const owing = await db.collection("members")
+  .find({ fines: { $gt: 0 }, fines: { $lt: 5 } })
+  .toArray();`}>
+
+A JavaScript object literal cannot hold the same key twice: the second `fines` **silently replaces** the first, so the filter that reaches the server is just `{ fines: { $lt: 5 } }`. On our six members that returned **five** documents, including Ada, Grace and Margaret who owe nothing:
+
+```text
+[ 'Ada 0', 'Grace 0', 'Linus 2', 'Margaret 0', 'Barbara 1' ]   <- find({ fines: {$gt: 0}, fines: {$lt: 5} })
+[ 'Linus 2', 'Barbara 1' ]                                     <- find({ fines: {$gt: 0, $lt: 5} })
+```
+
+Put both operators in **one** sub-document, or use an explicit `$and`. This fence proves the fix returns exactly the two members who owe a small amount:
+
+```js
+// mongosh/find-range-fix.js
+db.members.drop();
+db.members.insertMany([
+  { name: "Ada", fines: 0 }, { name: "Grace", fines: 0 }, { name: "Linus", fines: 2 },
+  { name: "Margaret", fines: 0 }, { name: "Edsger", fines: 5 }, { name: "Barbara", fines: 1 },
+]);
+const wrong = db.members.find({ fines: { $gt: 0 }, fines: { $lt: 5 } }, { _id: 0, name: 1, fines: 1 }).toArray();
+const right = db.members.find({ fines: { $gt: 0, $lt: 5 } }, { _id: 0, name: 1, fines: 1 }).toArray();
+const explicit = db.members.find({ $and: [{ fines: { $gt: 0 } }, { fines: { $lt: 5 } }] }, { _id: 0, name: 1 }).toArray();
+console.log(wrong.map((d) => `${d.name} ${d.fines}`), right.map((d) => `${d.name} ${d.fines}`), explicit.length);
+assert.strictEqual(wrong.length, 5);
+assert.strictEqual(right.length, 2);
+assert.strictEqual(explicit.length, 2);
+```
+
+```text
+[ 'Ada 0', 'Grace 0', 'Linus 2', 'Margaret 0', 'Barbara 1' ] [ 'Linus 2', 'Barbara 1' ] 2
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A read is **filter, then shape**: the filter (a document) decides *which* documents match, the projection decides *which fields* come back, and the cursor decides *how many round trips* it takes. `find` gives you the cursor; `findOne` is `find().limit(1)` unwrapped. Keep the filter server-side and small, and you keep the wire small.
 
 ## Trade-offs
 
@@ -251,19 +407,23 @@ A query filter is a document that describes the documents you want. List several
 |---------|---------|------|
 | A plain equality filter (`field: value`) | Simple to write and read, uses an index directly and efficiently | Limited to answering "equals" questions only |
 | A multi-field filter with implicit AND | Sharper, more precise filtering without extra operators | The more fields, the more you need a compound index matching that field order, or the query slows down |
-| A filter using richer operators (`$gt`, `$in`, `$regex`, etc.) | Highly flexible, can answer range or pattern questions | Harder to design a covering index for; some operators (like an unanchored `$regex`) cannot use an index fully, or at all |
+| A filter using richer operators (`$gt`, `$in`, `$regex`, etc.) | Highly flexible, can answer range or pattern questions | Harder to design an index for; some operators (like an unanchored `$regex`) cannot use an index efficiently |
+| Default batch sizes (`toArray`) | 2 round trips for 1000 documents (101 + 899) | Whole result held in memory; for huge results iterate the cursor instead |
+| Small `batchSize` | Bounded memory per batch | 11 round trips for the same 1000 documents |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming `find` returns results the instant you call it** — it actually returns only a lazy cursor. Forgetting `toArray()`/iteration produces no error, but no data either.
-- **Calling `find({})` and filtering the whole collection in client code** — send the filter you need to MongoDB so it can filter at the query level instead, reducing data sent over the wire and letting an index help.
-- **Confusing `find` with `findOne` when expecting a single document** — accidentally calling `find` and reading the first element from the array, when `findOne` fits the intent better and returns a plain null when nothing is found.
+- **"`find` returns the results the instant you call it."** - it returns a lazy cursor. Forgetting `toArray()`/iteration produces no error, but no data either.
+- **"`find({})` and filtering in client code is fine."** - send the filter to MongoDB so it filters at the query level, sends less over the wire and lets an index help.
+- **"`find` and `findOne` are interchangeable."** - `findOne` returns a plain document (or null); `find().toArray()[0]` fetches a whole batch to use one document.
+- **"`{ a: {$gt: 0}, a: {$lt: 5} }` is a range."** - the second key replaces the first; the real run returned five documents instead of two.
+- **"A miss is an error."** - not in the shell, Node, Python or Rust; in Go `Decode` returns `mongo: no documents in result`.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An e-commerce product search page** — users filter by several fields at once (category + price range + in-stock status). The system composes a filter document with multiple fields and operators, then relies on a compound index to keep the query fast even with millions of products in the collection.
->
-> **An admin dashboard** — uses `findOne({ email })` to check a user at login and `find({ status: "active" })` to pull the list of active users for a reporting table.
+> The Compass query-bar documentation shows the same filter-document model in a GUI: the **Filter** field takes any query operator except `$text` and `$expr`, with **Project**, **Sort** and **Limit** under **Options** ([Compass: filter documents](https://www.mongodb.com/docs/compass/current/query/filter/), fetched 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the Go, Python and Rust outputs matched: Grace found, 6 documents, 2 equality matches, 3 projected names) but they are not executed by the course's automated checker._
 
 export const quizFind = [
   {
@@ -275,16 +435,18 @@ export const quizFind = [
       'An error if more than one document matches',
     ],
     answer: 1,
+    explain: 'find hands back a lazy cursor that pulls batches (101 documents first, then getMore); findOne returns one document or null.',
   },
   {
     q: 'In a filter with two fields, how are the conditions combined?',
     options: [
-      'With an implicit OR — any condition may match',
-      'With an implicit AND — every condition must match',
+      'With an implicit OR - any condition may match',
+      'With an implicit AND - every condition must match',
       'Only the first field is used',
       'Only the last field is used',
     ],
     answer: 1,
+    explain: '{ joined: 2023, fines: 0 } required both: only Ada and Margaret matched.',
   },
   {
     q: 'How do you keep the _id out of a projection?',
@@ -295,6 +457,24 @@ export const quizFind = [
       'List every other field and _id drops automatically',
     ],
     answer: 2,
+    explain: 'The real run of { name: 1 } still returned _id; { name: 1, _id: 0 } removed it.',
+  },
+  {
+    q: 'What does find({ fines: { $gt: 0 }, fines: { $lt: 5 } }) actually send to the server (JavaScript)?',
+    options: [
+      'Both conditions, combined with AND',
+      'Only { fines: { $lt: 5 } } - the duplicate key replaced the first',
+      'An error is raised for the duplicate key',
+      'Only { fines: { $gt: 0 } }',
+    ],
+    answer: 1,
+    explain: 'An object literal keeps the last value for a repeated key: it returned 5 documents, not the 2 with 0 < fines < 5. Use { fines: { $gt: 0, $lt: 5 } } or $and.',
+  },
+  {
+    q: 'You call db.big.find().batchSize(100).toArray() on 1000 documents. Roughly how many server round trips?',
+    options: ['1', '2', '11', '1000'],
+    answer: 2,
+    explain: 'The profiler showed one query(100) plus ten getmore replies (nine of 100 documents and a final empty one): 11 round trips, versus 2 with the default batch.',
   },
 ]
 

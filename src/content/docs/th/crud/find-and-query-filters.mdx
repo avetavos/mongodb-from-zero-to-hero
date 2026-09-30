@@ -1,6 +1,6 @@
 ---
 title: การค้นหา document
-description: อ่าน document กลับมาด้วย find และ findOne สร้าง filter แบบ equality และแบบหลาย field และ project field ที่คุณต้องการ
+description: อ่าน document กลับด้วย find และ findOne เข้าใจ cursor และ batch สร้าง filter แบบ equality และหลาย field และ project field ที่ต้องการ — พร้อมผลลัพธ์ error และจำนวน round trip จริง
 sidebar:
   order: 3
 ---
@@ -8,26 +8,71 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การอ่านคือจุดที่ฐานข้อมูลพิสูจน์คุณค่าตัวเอง และ MongoDB มอบประตูสองบานเข้าสู่ห้องเดียวกันให้คุณ `findOne` ใช้สำหรับเมื่อคุณคาดหวัง document เพียงรายการเดียว — "สมาชิกชื่อ Grace คือใคร?" — แล้วคุณจะได้ document รายการนั้นกลับมา หรือไม่ได้อะไรเลย `find` ใช้สำหรับเมื่อคุณอาจได้หลายรายการ — "สมาชิกคนใดบ้างที่เข้าร่วมในปี 2023?" — แล้วคุณจะได้ cursor กลับมาไว้วนซ้ำ ทั้งคู่รับ **filter** ชนิดเดียวกัน นั่นคือ document ที่อธิบายว่าคุณต้องการระเบียนใด
+การอ่านคือจุดที่ฐานข้อมูลพิสูจน์คุณค่า และ MongoDB ให้ประตูสองบานเข้าสู่ห้องเดียวกัน `findOne` ใช้เมื่อคุณคาดว่าจะได้ document เดียว — "สมาชิกชื่อ Grace คือใคร?" — และส่ง document นั้นมาหรือไม่ส่งอะไรเลย `find` ใช้เมื่ออาจได้หลายรายการ — "สมาชิกคนไหนเข้าร่วมในปี 2023?" — และส่ง cursor ที่คุณวนอ่านได้ ทั้งสองรับ **filter** ชนิดเดียวกัน คือ document ที่อธิบายว่าต้องการระเบียนไหน
 
-ตลอดบทเรียนนี้ให้สมมติว่า collection `members` มีคนที่เรา insert ไว้ก่อนหน้านี้อยู่แล้ว เราจะยิงคำถามที่แม่นยำขึ้นเรื่อย ๆ ใส่ collection นี้
+ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน) object id บนเครื่องของคุณจะต่างออกไป
 
-## findOne เทียบกับ find
+## ข้อมูลที่เรา query
 
-ความแตกต่างคือรูปทรง ไม่ใช่ syntax `findOne` คืน document อย่างมากที่สุดหนึ่งรายการโดยตรง `find` คืน cursor — handle แบบ lazy ที่ driver วนซ้ำเพื่อดึง document มาทีละชุด — ปกติคุณจึงแปลงเป็น array (หรือวนลูปครอบ) เพื่อดูผลลัพธ์
+แต่ละบทเรียน seed ข้อมูลของตัวเอง คุณจึงเปิดบทไหนก็ได้โดยลำพัง นี่คือสมาชิกห้องสมุดหกคน — รูปร่างเดียวกันตลอดคอร์ส:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.findOne({ name: "Grace" })
+    // mongosh/find-seed.js
+    db.members.insertMany([
+      { name: "Ada",      joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Compilers"] },
+      { name: "Grace",    joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers", "Algorithms"] },
+      { name: "Linus",    joined: 2023, fines: 2, city: "Helsinki",  borrowed: [] },
+      { name: "Margaret", joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Algorithms"] },
+      { name: "Edsger",   joined: 2022, fines: 5, city: "Austin",    borrowed: ["Compilers", "Algorithms", "Databases"] },
+      { name: "Barbara",  joined: 2025, fines: 1, city: "Boston",    borrowed: [] },
+    ]);
+    assert.strictEqual(db.members.countDocuments(), 6);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Compilers"] },
+      { name: "Grace",    joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers", "Algorithms"] },
+      { name: "Linus",    joined: 2023, fines: 2, city: "Helsinki",  borrowed: [] },
+      { name: "Margaret", joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Algorithms"] },
+      { name: "Edsger",   joined: 2022, fines: 5, city: "Austin",    borrowed: ["Compilers", "Algorithms", "Databases"] },
+      { name: "Barbara",  joined: 2025, fines: 1, city: "Boston",    borrowed: [] },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 6) throw new Error("expected 6");
+    ```
+  </TabItem>
+</Tabs>
+
+(สำหรับ Python, Go และ Rust ให้ insert หกรายการเดียวกันเหมือนบทก่อนหน้า)
+
+## findOne เทียบกับ find
+
+ความต่างอยู่ที่รูปร่าง ไม่ใช่ไวยากรณ์ `findOne` คืน document ไม่เกินหนึ่งโดยตรง `find` คืน cursor — handle แบบ lazy ที่ driver วนดึง document เป็น batch — คุณจึงมักแปลงเป็น array (หรือ loop) เพื่อดูผลลัพธ์
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/find-one.js
+    const member = db.members.findOne({ name: "Grace" });
+    console.log(member);
+    console.log(db.members.findOne({ name: "Nobody" }));   // no match
+    assert.strictEqual(member.name, "Grace");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/find-one.mjs
     const member = await db.collection("members").findOne({ name: "Grace" });
     console.log(member);
+    console.log(await db.collection("members").findOne({ name: "Nobody" }));
+    if (member?.name !== "Grace") throw new Error("expected Grace");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -54,29 +99,43 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-document รายการเดียวที่ตรงกันกลับมาแบบเต็ม ๆ รวมถึง `_id` ด้วย:
+document ที่ตรงกันกลับมาเต็ม รวม `_id` และการไม่พบคือ `null` (ไม่ใช่ error) ใน shell และ Node:
 
-```json
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
-  "name": "Grace",
-  "joined": 2024,
-  "fines": 0
+  _id: ObjectId('6abca853ca24543a2bc8573d'),
+  name: 'Grace',
+  joined: 2024,
+  fines: 0,
+  city: 'Arlington',
+  borrowed: [ 'Compilers', 'Algorithms' ]
 }
+null
 ```
 
-filter ที่ว่างเปล่าตรงกับทุกอย่าง นั่นคือวิธีที่คุณอ่าน collection ทั้งก้อน ใช้ `find` แล้วคุณจะได้ cursor ที่ครอบทั้ง collection:
+แต่ละ driver รายงาน "ไม่มีสมาชิกคนนั้น" ต่างกันและสำคัญต่อการจัดการ error: Python คืน `None`, Rust คืน `None` ใน `Option`, Node คืน `null` — แต่ **`FindOne(...).Decode()` ของ Go คืน error `mongo: no documents in result`** (`mongo.ErrNoDocuments`) ซึ่งต้องถือเป็น "ไม่พบ" ไม่ใช่ความล้มเหลว
+
+filter ว่างตรงกับทุกอย่าง นั่นคือวิธีอ่านทั้ง collection ด้วย `find` คุณได้ cursor ครอบทั้งหมด:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({})
+    // mongosh/find-all.js
+    const cursor = db.members.find({});
+    console.log(cursor.constructor.name);          // a Cursor, not an array
+    const all = cursor.toArray();
+    console.log(all.map((m) => m.name));
+    assert.strictEqual(all.length, 6);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-all.mjs
     const all = await db.collection("members").find({}).toArray();
-    console.log(all);
+    console.log(all.map((m) => m.name));
+    let n = 0;
+    for await (const m of db.collection("members").find({})) n++;   // or iterate lazily
+    if (all.length !== 6 || n !== 6) throw new Error("expected 6");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -110,23 +169,67 @@ filter ที่ว่างเปล่าตรงกับทุกอย่�
   </TabItem>
 </Tabs>
 
+```text
+Cursor
+[ 'Ada', 'Grace', 'Linus', 'Margaret', 'Edsger', 'Barbara' ]
+```
+
+### cursor ทำอะไรจริง ๆ: batch
+
+"handle แบบ lazy" ไม่ใช่คำเปรียบเทียบ เราเปิด profiler บน database scratch, insert document เล็ก ๆ 1000 รายการ แล้วนับ round trip ไปยัง server ของการอ่านสี่แบบ:
+
+```js
+// mongosh/find-batches.js
+db.big.insertMany(Array.from({ length: 1000 }, (_, i) => ({ i, pad: "x".repeat(50) })));
+const trip = (label, fn) => {
+  db.setProfilingLevel(2);                 // profile every operation of THIS database only
+  const since = new Date();
+  const n = fn();
+  db.setProfilingLevel(0);
+  const ops = db.system.profile.find({ ts: { $gte: since }, ns: db.getName() + ".big" }).sort({ ts: 1 }).toArray();
+  console.log(label, "docs:", n, "| server round trips:", ops.map((o) => `${o.op}(${o.nreturned})`).join(" "));
+  return ops;
+};
+const a = trip("find().toArray()      ", () => db.big.find().toArray().length);
+const b = trip("find().batchSize(100) ", () => db.big.find().batchSize(100).toArray().length);
+const c = trip("find().limit(5)       ", () => db.big.find().limit(5).toArray().length);
+const d = trip("findOne()             ", () => (db.big.findOne() ? 1 : 0));
+assert.strictEqual(a.length, 2);
+assert.strictEqual(c.length, 1);
+```
+
+```text
+find().toArray()       docs: 1000 | server round trips: query(101) getmore(899)
+find().batchSize(100)  docs: 1000 | server round trips: query(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(100) getmore(0)
+find().limit(5)        docs: 5 | server round trips: query(5)
+findOne()              docs: 1 | server round trips: query(1)
+```
+
+คำตอบแรกพก **101 document** `getMore` ถัดไปพกที่เหลือ (ถึงเพดานขนาดคำตอบ); `batchSize(100)` บังคับ round trip สิบเอ็ดครั้ง; `limit(5)` และ `findOne` ใช้พอดีหนึ่งครั้ง นั่นคือเหตุผลที่ shell พิมพ์ 20 document แล้วตามด้วย `Type "it" for more`: `it` คือ shell ขอ batch ถัดไปจาก cursor
+
 ## filter แบบ equality
 
-filter ที่ระบุ field และค่าหมายความว่า "field นี้เท่ากับค่านี้" วาง field หลาย ๆ ตัวซ้อนกันใน filter เดียว แล้ว MongoDB จะมองว่าเป็น **implicit AND** — document ต้อง match ทุกเงื่อนไขถึงจะได้กลับมา ในที่นี้เราขอสมาชิกที่เข้าร่วมในปี 2023 *และ* ไม่มีค่าปรับค้างชำระ:
+filter ที่ระบุ field และค่าหมายถึง "field นี้เท่ากับค่านี้" วางหลาย field ใน filter เดียว MongoDB ถือเป็น **implicit AND** — document ต้องตรงทุกเงื่อนไขจึงถูกคืน ที่นี่เราขอสมาชิกที่เข้าร่วมปี 2023 *และ* ไม่มีค่าปรับค้าง:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ joined: 2023, fines: 0 })
+    // mongosh/find-equality.js
+    const matches = db.members.find({ joined: 2023, fines: 0 }, { _id: 0, name: 1 }).toArray();
+    console.log(matches);
+    console.log(db.members.find({ joined: 2099, fines: 0 }).toArray());   // a miss: empty array, no error
+    assert.strictEqual(matches.map((m) => m.name).join(), "Ada,Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-equality.mjs
     const matches = await db
       .collection("members")
       .find({ joined: 2023, fines: 0 })
       .toArray();
-    console.log(matches);
+    console.log(matches.map((m) => m.name));
+    if (matches.length !== 2) throw new Error("expected 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -159,36 +262,40 @@ filter ที่ระบุ field และค่าหมายความว
   </TabItem>
 </Tabs>
 
-ผลลัพธ์คือรายการของ document ที่ตรงกับทั้งสองเงื่อนไข:
+สมาชิกสองคนตรงทั้งสองเงื่อนไข; filter ที่ไม่มีใครตรงคืน list ว่าง:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "joined": 2023,
-    "fines": 0
-  }
-]
+```text
+[ { name: 'Ada' }, { name: 'Margaret' } ]
+[]
 ```
 
-## การได้ลิ้มลอง projection เป็นครั้งแรก
+(Node พิมพ์ `[ 'Ada', 'Margaret' ]`; Python, Go และ Rust คืน 2 document เดียวกันเช่นกัน)
 
-โดยปริยายการอ่านจะคืนทุก field ของทุก document ที่ตรงกัน **projection** ให้คุณขอเฉพาะ field ที่คุณสนใจ ซึ่งช่วยลดข้อมูลที่ส่งผ่านสายลง คุณส่ง document ตัวที่สองเข้าไปโดยที่ `1` หมายถึง "รวม field นี้" ในที่นี้เราต้องการเพียงชื่อ และเราปิด `_id` อย่างชัดเจนด้วยการกำหนดให้เป็น `0`:
+## ลองชิม projection
+
+โดยค่าเริ่มต้นการอ่านคืนทุก field ของทุก document ที่ตรง **projection** ให้คุณขอเฉพาะ field ที่สนใจ ซึ่งลดข้อมูลที่ส่งผ่านสาย คุณส่ง document ที่สองโดย `1` หมายถึง "รวม field นี้" ที่นี่เราต้องการแค่ชื่อ และปิด `_id` อย่างชัดเจนด้วยการตั้งเป็น `0`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ joined: 2023 }, { name: 1, _id: 0 })
+    // mongosh/find-projection.js
+    console.log(db.members.find({ joined: 2023 }, { name: 1, _id: 0 }).toArray());
+    console.log(db.members.find({}, { name: 1 }).limit(1).toArray());        // _id sneaks in
+    let err;
+    try { db.members.find({}, { name: 1, fines: 0 }).toArray(); } catch (e) { err = e; }   // mixing include and exclude
+    console.log(err.name, err.code, err.message);
+    assert.strictEqual(err.code, 31254);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/find-projection.mjs
     const names = await db
       .collection("members")
       .find({ joined: 2023 }, { projection: { name: 1, _id: 0 } })
       .toArray();
     console.log(names);
+    if (names.length !== 3 || "_id" in names[0]) throw new Error("expected 3 projected names");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -226,75 +333,148 @@ filter ที่ระบุ field และค่าหมายความว
   </TabItem>
 </Tabs>
 
-ตอนนี้ผลลัพธ์แต่ละรายการมีเฉพาะ field ที่ร้องขอเท่านั้น:
+ตอนนี้แต่ละผลลัพธ์มีเฉพาะ field ที่ขอ — และกับดักสองข้อเป็นของจริง:
 
-```json
-[{ "name": "Margaret" }]
+```text
+[ { name: 'Ada' }, { name: 'Linus' }, { name: 'Margaret' } ]
+[ { _id: ObjectId('6abca853ca24543a2bc8573c'), name: 'Ada' } ]
+MongoServerError 31254 Cannot do exclusion on field fines in inclusion projection
 ```
 
-**ใน Compass:** พิมพ์ filter ลงในแถบ **Filter** ที่ด้านบนของแท็บ Documents แล้วกด **Find** เปิดแผง **Options** เพื่อกรอก projection โดยไม่ต้องเขียนการเรียกด้วยมือ
+`_id` ถูกรวมเสมอเว้นแต่คุณปิดด้วย `_id: 0` และการผสม inclusion (`name: 1`) กับ exclusion (`fines: 0`) ถูก server ปฏิเสธ (code `31254`)
 
-## เคล็ดลับและจุดที่ต้องระวัง
+**ใน Compass:** query bar มีช่อง **Filter** และปุ่ม **Find**; drop-down **Options** เพิ่ม **Project**, **Sort**, **Limit**, **Skip**, **Collation** และ **Max Time MS** (เอกสาร Compass, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/), เรียกอ่านเมื่อ 2026-09-30) สังเกตว่า filter bar ของ Compass รับทุก query operator ยกเว้น `$text` และ `$expr`
 
-- `find` คืน **cursor** ไม่ใช่ list ยังไม่มีอะไรถูกดึงมาจนกว่าคุณจะวนซ้ำ (หรือเรียก helper อย่าง `toArray`) `findOne` แท้จริงแล้วคือ cursor ที่หยุดหลังจาก document แรก
-- field `_id` ถูก **รวมไว้โดยปริยาย** ในทุก projection ถ้าไม่ต้องการ ต้องปิดเองอย่างชัดเจนด้วย `_id: 0`
-- อย่าผสม `1` และ `0` ใน projection เดียวกัน ยกเว้นสำหรับ `_id` ให้เลือกระหว่างการระบุ field ที่คุณต้องการ หรือระบุ field ที่คุณต้องการตัดออก — ไม่ใช่ทั้งสองอย่าง
-- filter ที่ไม่ตรงกับอะไรเลยคืน cursor ที่ว่างเปล่า (หรือสำหรับ `findOne` คือผลลัพธ์ที่เป็น null) นั่นเป็นคำตอบปกติ ไม่ใช่ error
+## เคล็ดลับและข้อควรระวัง
 
-<Callout title="filter ก็เป็นแค่ document">
-query filter คือ document ที่อธิบาย document ที่คุณต้องการ ระบุ field หลายตัว แล้ว MongoDB จะกำหนดให้ทั้งหมดต้องตรงกัน — implicit AND นั้นคือม้างานเบื้องหลังการอ่านในชีวิตประจำวันส่วนใหญ่
+- `find` คืน **cursor** ไม่ใช่ list ไม่มีอะไรถูกดึงนอกเหนือ batch แรกจนกว่าคุณจะวนอ่าน (หรือเรียก helper อย่าง `toArray`) `findOne` ก็คือ cursor ที่หยุดหลัง document แรก
+- field `_id` **ถูกรวมโดยค่าเริ่มต้น** ในทุก projection ถ้าไม่ต้องการ ให้ปิดอย่างชัดเจนด้วย `_id: 0`
+- อย่าผสม `1` และ `0` ใน projection เดียวกัน ยกเว้น `_id` เลือกระบุ field ที่ต้องการ หรือระบุ field ที่ต้องการทิ้ง — ไม่ใช่ทั้งสองอย่าง
+- filter ที่ไม่ตรงอะไรเลยคืน cursor ว่าง (หรือสำหรับ `findOne` คือ `null`/`None`; ใน Go เป็น error `ErrNoDocuments`) นั่นเป็นคำตอบปกติ ไม่ใช่ความล้มเหลว
+- filter เป็น object ธรรมดาในภาษาของคุณ ดังนั้น **key ที่ซ้ำเก็บเฉพาะค่าสุดท้ายอย่างเงียบ ๆ** (ดูด้านล่าง)
+
+<Callout title="filter ก็คือ document">
+filter ของ query คือ document ที่อธิบาย document ที่คุณต้องการ ระบุหลาย field และ MongoDB ต้องการให้ตรงทั้งหมด — implicit AND นั้นคือม้างานเบื้องหลังการอ่านประจำวันส่วนใหญ่
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ขอผู้ช่วย AI ว่า "สมาชิกที่มียอดค้างเล็กน้อย มากกว่า 0 และน้อยกว่า 5" คุณอาจได้:
+
+<SpotTheBug lang="js" code={`// AI comment: "fines greater than 0 AND less than 5"
+const owing = await db.collection("members")
+  .find({ fines: { $gt: 0 }, fines: { $lt: 5 } })
+  .toArray();`}>
+
+object literal ของ JavaScript ไม่มี key ซ้ำได้: `fines` ตัวที่สอง **แทนที่** ตัวแรกอย่างเงียบ ๆ filter ที่ถึง server จึงเป็นแค่ `{ fines: { $lt: 5 } }` บนสมาชิกหกคนของเรา มันคืน **ห้า** document รวม Ada, Grace และ Margaret ที่ไม่มีค้าง:
+
+```text
+[ 'Ada 0', 'Grace 0', 'Linus 2', 'Margaret 0', 'Barbara 1' ]   <- find({ fines: {$gt: 0}, fines: {$lt: 5} })
+[ 'Linus 2', 'Barbara 1' ]                                     <- find({ fines: {$gt: 0, $lt: 5} })
+```
+
+ใส่ทั้งสอง operator ใน sub-document **เดียว** หรือใช้ `$and` ที่ชัดเจน fence นี้พิสูจน์ว่าการแก้คืนพอดีสองคนที่ค้างเล็กน้อย:
+
+```js
+// mongosh/find-range-fix.js
+db.members.drop();
+db.members.insertMany([
+  { name: "Ada", fines: 0 }, { name: "Grace", fines: 0 }, { name: "Linus", fines: 2 },
+  { name: "Margaret", fines: 0 }, { name: "Edsger", fines: 5 }, { name: "Barbara", fines: 1 },
+]);
+const wrong = db.members.find({ fines: { $gt: 0 }, fines: { $lt: 5 } }, { _id: 0, name: 1, fines: 1 }).toArray();
+const right = db.members.find({ fines: { $gt: 0, $lt: 5 } }, { _id: 0, name: 1, fines: 1 }).toArray();
+const explicit = db.members.find({ $and: [{ fines: { $gt: 0 } }, { fines: { $lt: 5 } }] }, { _id: 0, name: 1 }).toArray();
+console.log(wrong.map((d) => `${d.name} ${d.fines}`), right.map((d) => `${d.name} ${d.fines}`), explicit.length);
+assert.strictEqual(wrong.length, 5);
+assert.strictEqual(right.length, 2);
+assert.strictEqual(explicit.length, 2);
+```
+
+```text
+[ 'Ada 0', 'Grace 0', 'Linus 2', 'Margaret 0', 'Barbara 1' ] [ 'Linus 2', 'Barbara 1' ] 2
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+การอ่านคือ **filter แล้วจัดรูป**: filter (document) ตัดสิน *document ไหน* ที่ตรง, projection ตัดสิน *field ไหน* ที่กลับมา และ cursor ตัดสินว่าต้อง *กี่ round trip* `find` ให้ cursor; `findOne` คือ `find().limit(1)` ที่แกะห่อแล้ว เก็บ filter ไว้ฝั่ง server และเล็ก คุณก็เก็บสายให้เล็ก
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| equality filter ธรรมดา (`field: value`) | เขียนง่าย อ่านง่าย ใช้ index ตรง ๆ ได้อย่างมีประสิทธิภาพ | ตอบคำถามได้จำกัด แค่ "เท่ากับ" เท่านั้น |
-| filter หลาย field แบบ implicit AND | คมชัดขึ้น กรองได้แม่นกว่าโดยไม่ต้องเขียน operator เพิ่ม | field ยิ่งเยอะ ยิ่งต้องมี compound index ที่ตรงกับลำดับ field ไม่งั้น query ช้า |
-| filter ที่ใช้ operator ซับซ้อน (`$gt`, `$in`, `$regex` ฯลฯ) | ยืดหยุ่นสูง ตอบคำถามเชิงช่วงหรือ pattern ได้ | ออกแบบ index ให้ครอบคลุมยากขึ้น บาง operator (เช่น `$regex` ที่ไม่ขึ้นต้นด้วย anchor) ใช้ index ไม่ได้เต็มที่หรือใช้ไม่ได้เลย |
+| filter แบบ equality ธรรมดา (`field: value`) | เขียนและอ่านง่าย ใช้ index ตรง ๆ และมีประสิทธิภาพ | ตอบได้เฉพาะคำถามแบบ "เท่ากับ" |
+| filter หลาย field แบบ implicit AND | กรองได้คมและแม่นกว่าโดยไม่ต้องใช้ operator เพิ่ม | ยิ่งมี field มาก ยิ่งต้องมี compound index ที่ลำดับ field ตรงกัน ไม่เช่นนั้น query ช้าลง |
+| filter ที่ใช้ operator ซับซ้อน (`$gt`, `$in`, `$regex` ฯลฯ) | ยืดหยุ่นมาก ตอบคำถามช่วงหรือรูปแบบได้ | ออกแบบ index ยากกว่า; operator บางตัว (เช่น `$regex` ที่ไม่ anchor) ใช้ index ได้ไม่ดี |
+| batch ค่าเริ่มต้น (`toArray`) | 2 round trip สำหรับ 1000 document (101 + 899) | ผลลัพธ์ทั้งหมดอยู่ในหน่วยความจำ; ผลใหญ่มากควรวน cursor แทน |
+| `batchSize` เล็ก | หน่วยความจำต่อ batch มีขอบเขต | 11 round trip สำหรับ 1000 document เดียวกัน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า `find` คืนผลลัพธ์ทันทีที่เรียก** — จริง ๆ แล้วได้แค่ cursor แบบ lazy เท่านั้น ถ้าลืม `toArray()`/วนลูป ก็จะไม่เห็น error แต่ก็ไม่เห็นข้อมูลเช่นกัน
-- **ใช้ `find({})` แล้วดึงทั้ง collection มา filter ในแอปฝั่ง client** — ควรส่ง filter ที่ต้องการไปให้ MongoDB กรองให้ตั้งแต่ query เพื่อลดข้อมูลที่ต้องส่งผ่านสาย และให้ index ช่วยงานได้
-- **สับสนระหว่าง `find` กับ `findOne` เมื่อคาดหวัง document เดียว** — เผลอเรียก `find` แล้วอ่านผลลัพธ์ตัวแรกจาก array ทั้งที่ `findOne` ตรงจุดประสงค์กว่าและคืนค่า null ตรงไปตรงมาเมื่อไม่พบ
+- **"`find` คืนผลลัพธ์ทันทีที่เรียก"** — มันคืน cursor แบบ lazy การลืม `toArray()`/วนอ่านไม่ทำให้เกิด error แต่ก็ไม่ได้ข้อมูล
+- **"`find({})` แล้วกรองในโค้ด client ก็ได้"** — ส่ง filter ไปให้ MongoDB กรองระดับ query เพื่อส่งข้อมูลผ่านสายน้อยลงและให้ index ช่วยได้
+- **"`find` กับ `findOne` ใช้แทนกันได้"** — `findOne` คืน document ธรรมดา (หรือ null); `find().toArray()[0]` ดึงทั้ง batch เพื่อใช้ document เดียว
+- **"`{ a: {$gt: 0}, a: {$lt: 5} }` คือช่วง"** — key ที่สองแทนที่ตัวแรก; การรันจริงคืนห้า document แทนสอง
+- **"การไม่พบคือ error"** — ไม่ใช่ใน shell, Node, Python หรือ Rust; ใน Go `Decode` คืน `mongo: no documents in result`
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **หน้าค้นหาสินค้าของ e-commerce** — ผู้ใช้กรองด้วยหลาย field พร้อมกัน (หมวดหมู่ + ช่วงราคา + สถานะมีสต็อก) ระบบประกอบ filter document ที่มีหลาย field และหลาย operator เข้าด้วยกัน แล้วพึ่ง compound index ให้ query ยังเร็วแม้ collection มีสินค้าเป็นล้านรายการ
->
-> **Dashboard แอดมิน** — ใช้ `findOne({ email })` ตรวจสอบผู้ใช้ตอน login และ `find({ status: "active" })` ดึงรายชื่อผู้ใช้ที่ยัง active สำหรับตารางรายงาน
+> เอกสาร query bar ของ Compass แสดงโมเดล filter-document เดียวกันใน GUI: ช่อง **Filter** รับทุก query operator ยกเว้น `$text` และ `$expr` โดยมี **Project**, **Sort** และ **Limit** ใต้ **Options** ([Compass: filter documents](https://www.mongodb.com/docs/compass/current/query/filter/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (output ของ Go, Python และ Rust ตรงกัน: พบ Grace, 6 document, ตรง equality 2 รายการ, ชื่อที่ project 3 รายการ) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizFind = [
   {
     q: 'find คืนอะไร เมื่อเทียบกับ findOne?',
     options: [
-      'document รายการเดียว ส่วน findOne คืน list',
-      'cursor ครอบทุกรายการที่ตรงกัน ส่วน findOne คืน document อย่างมากที่สุดหนึ่งรายการ',
-      'สิ่งเดียวกันเป๊ะในทั้งสองกรณี',
-      'error ถ้ามี document ตรงกันมากกว่าหนึ่งรายการ',
+      'document เดียว; findOne คืน list',
+      'cursor ครอบทุกรายการที่ตรง; findOne คืนไม่เกินหนึ่ง document',
+      'เหมือนกันทุกประการทั้งสองกรณี',
+      'error ถ้ามีมากกว่าหนึ่ง document ที่ตรง',
     ],
     answer: 1,
+    explain: 'find ส่ง cursor แบบ lazy ที่ดึงเป็น batch (101 document ก่อน แล้ว getMore); findOne คืนหนึ่ง document หรือ null',
   },
   {
     q: 'ใน filter ที่มีสอง field เงื่อนไขถูกรวมกันอย่างไร?',
     options: [
-      'ด้วย implicit OR — เงื่อนไขใดก็ได้อาจตรงกัน',
-      'ด้วย implicit AND — ทุกเงื่อนไขต้องตรงกัน',
-      'ใช้เฉพาะ field แรกเท่านั้น',
-      'ใช้เฉพาะ field สุดท้ายเท่านั้น',
+      'ด้วย implicit OR — เงื่อนไขใดตรงก็ได้',
+      'ด้วย implicit AND — ทุกเงื่อนไขต้องตรง',
+      'ใช้เฉพาะ field แรก',
+      'ใช้เฉพาะ field สุดท้าย',
     ],
     answer: 1,
+    explain: '{ joined: 2023, fines: 0 } ต้องการทั้งสอง: มีเพียง Ada และ Margaret ที่ตรง',
   },
   {
-    q: 'คุณกัน _id ออกจาก projection ได้อย่างไร?',
+    q: 'จะกัน _id ออกจาก projection ได้อย่างไร?',
     options: [
-      'ถูกตัดออกโดยอัตโนมัติ',
-      'คุณไม่สามารถตัด _id ออกได้',
-      'กำหนด _id เป็น 0 อย่างชัดเจน',
-      'ระบุ field อื่น ๆ ทุกตัว แล้ว _id จะหลุดออกไปโดยอัตโนมัติ',
+      'ถูกตัดออกโดยค่าเริ่มต้น',
+      'ตัด _id ไม่ได้',
+      'ตั้ง _id เป็น 0 อย่างชัดเจน',
+      'ระบุ field อื่นทั้งหมดแล้ว _id หายไปเอง',
     ],
     answer: 2,
+    explain: 'การรันจริงของ { name: 1 } ยังคืน _id; { name: 1, _id: 0 } เอาออกได้',
+  },
+  {
+    q: 'find({ fines: { $gt: 0 }, fines: { $lt: 5 } }) ส่งอะไรไปยัง server จริง ๆ (JavaScript)?',
+    options: [
+      'ทั้งสองเงื่อนไข รวมด้วย AND',
+      'เฉพาะ { fines: { $lt: 5 } } — key ที่ซ้ำแทนที่ตัวแรก',
+      'เกิด error เพราะ key ซ้ำ',
+      'เฉพาะ { fines: { $gt: 0 } }',
+    ],
+    answer: 1,
+    explain: 'object literal เก็บค่าสุดท้ายของ key ที่ซ้ำ: คืน 5 document ไม่ใช่ 2 ที่มี 0 < fines < 5 ใช้ { fines: { $gt: 0, $lt: 5 } } หรือ $and',
+  },
+  {
+    q: 'คุณเรียก db.big.find().batchSize(100).toArray() บน 1000 document ประมาณกี่ round trip ไปยัง server?',
+    options: ['1', '2', '11', '1000'],
+    answer: 2,
+    explain: 'profiler แสดง query(100) หนึ่งครั้งบวก getmore สิบครั้ง (เก้าครั้งได้ 100 และครั้งสุดท้ายว่าง): 11 round trip เทียบ 2 ครั้งกับ batch ค่าเริ่มต้น',
   },
 ]
 
