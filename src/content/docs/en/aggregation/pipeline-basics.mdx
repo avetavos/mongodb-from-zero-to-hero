@@ -1,6 +1,6 @@
 ---
-title: Pipeline basics — $match and $project
-description: Filter the stream early with $match so indexes can help, reshape and compute fields with $project, and learn why stage order matters.
+title: Pipeline basics - $match and $project
+description: Filter the stream early with $match so indexes can help, reshape with $project, $set and $unset, and see exactly which reorderings the optimizer does for you and which it cannot - measured on 200 000 orders.
 sidebar:
   order: 2
 ---
@@ -9,216 +9,348 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Two stages carry most aggregation work before anything fancy happens: `$match` throws away documents you do not need, and `$project` reshapes the ones you keep. Learn these two well and you already have a query language that goes beyond `find`. The subtle, important lesson hiding in them is that **where you put a stage changes how fast and how correct your pipeline is.**
+Two stages carry most aggregation work before anything fancy happens: `$match` throws away documents you do not need, and `$project` reshapes the ones you keep. The subtle lesson hiding in them is that **where you put a stage changes how fast and how correct your pipeline is** - and, more surprisingly, that the server already fixes some orderings for you.
 
-We continue with the `sales` collection. A single order looks like this:
+The lesson seeds the module's `sales` collection (200 000 orders `{ title, genre, quantity, price, buyer }`, index on `price`) and the `aplan()` helper described in the module intro. Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program.
 
-```json
-{
-  "_id": "a1",
-  "title": "Dune",
-  "genre": "fiction",
-  "quantity": 3,
-  "price": 12,
-  "buyer": "Ada"
+```js
+// mongosh/pb-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.aplan = (pipeline) => {               // one line per aggregate explain: what the first stage read, then the stages left in the pipeline
+  const e = db.sales.explain("executionStats").aggregate(pipeline);
+  const cursor = e.stages ? e.stages[0].$cursor : e, rest = e.stages ? e.stages.slice(1).map((s) => Object.keys(s)[0]) : [];
+  const chain = (p) => { const out = []; for (p = p.queryPlan ?? p; p; p = p.inputStage) out.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : "")); return out.join(" > "); };
+  const s = cursor.executionStats;
+  return chain(cursor.queryPlanner.winningPlan) + "  keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + (rest.length ? "  | left in pipeline: " + rest.join(" > ") : "");
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.sales.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;                                          // 500 titles, 5 genres, quantity 1..5, price 5..25, 1000 buyers (pseudo-random but repeatable)
+    return { title: "T" + (i % 500), genre: genres[(i % 500) % 5], quantity: 1 + ((Math.imul(i, 2654435761) >>> 0) % 5), price: 5 + ((Math.imul(i, 40503) >>> 0) % 21), buyer: "b" + (i % 1000) };
+  }), { ordered: false });
 }
+db.sales.createIndex({ price: 1 });
+console.log("sales:", db.sales.countDocuments(), "orders");
 ```
 
-## $match filters the stream — put it first
+```text
+sales: 200000 orders
+```
 
-`$match` keeps only the documents whose fields satisfy its condition. Its syntax is exactly the query syntax you already know from `find`, so `$gt`, `$in`, `$and`, and the rest all work. The reason to place it **first** is not style: when `$match` is the very first stage, the aggregation engine can use a collection's **indexes** to skip non-matching documents entirely, instead of streaming the whole collection through later stages.
+## $match filters the stream - put it first
+
+`$match` keeps only documents that satisfy its condition, using the same syntax as `find` (`$gt`, `$in`, `$and`...). When it is the first stage the engine plans it like a `find`, so an **index** can skip non-matching documents instead of streaming the whole collection through later stages:
 
 export const matchProject = `flowchart LR
-  In["all sales"] --> M["$match: price >= 10 (uses index)"]
+  In["all sales"] --> M["$match: price >= 24 (uses index)"]
   M --> P["$project: keep title, compute revenue"]
   P --> Out["slim, reshaped documents"]`
 
 <Mermaid code={matchProject} title="Filter first so an index can prune the stream, then reshape what survives" />
 
-Here we keep only orders of at least ten dollars apiece:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $match: { price: { $gte: 10 } } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $match: { price: { $gte: 10 } } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$match": {"price": {"$gte": 10}}},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$match": { "price": { "$gte": 10 } } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-Only the orders priced ten or more survive into the next stage:
-
-```json
-[
-  { "_id": "a1", "title": "Dune", "genre": "fiction", "quantity": 3, "price": 12, "buyer": "Ada" },
-  { "_id": "a4", "title": "Foundation", "genre": "fiction", "quantity": 1, "price": 15, "buyer": "Linus" }
-]
+```js
+// mongosh/pb-match.js
+const rows = db.sales.aggregate([{ $match: { price: { $gte: 24 } } }, { $limit: 2 }]).toArray();
+console.log(rows);
+console.log(aplan([{ $match: { price: { $gte: 24 } } }]));
+assert.ok(rows.every((d) => d.price >= 24));
 ```
+
+```text
+[
+  {
+    _id: ObjectId('6abcb8d411b1b6194d7740a3'),
+    title: 'T46',
+    genre: 'science',
+    quantity: 2,
+    price: 25,
+    buyer: 'b46'
+  },
+  {
+    _id: ObjectId('6abcb8d411b1b6194d7740aa'),
+    title: 'T53',
+    genre: 'poetry',
+    quantity: 5,
+    price: 25,
+    buyer: 'b53'
+  }
+]
+FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+```
+
+13 422 of 200 000 orders match, and the plan read exactly 13 422 index keys and 13 422 documents.
 
 ## $project reshapes and computes
 
-`$project` decides which fields leave the stage and lets you build **new** fields from expressions. Set a field to `1` to keep it, `0` to drop it, or to an expression to compute it. Field references inside expressions use a `$` prefix, so `"$price"` means "the value of the price field." Here we keep the title and compute a `revenue` field as price times quantity:
+`$project` decides which fields leave the stage and builds **new** fields from expressions. `1` keeps a field, `0` drops it, an expression computes it. Field references inside expressions use a `$` prefix: `"$price"` is the value of the field, `"price"` is a literal string. Here we keep the title and compute `revenue = price x quantity`; the Node.js tab runs it on a three-order collection:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $match: { price: { $gte: 10 } } },
-      { $project: {
-          _id: 0,
-          title: 1,
-          revenue: { $multiply: ["$price", "$quantity"] }
-      } }
-    ])
+    // mongosh/pb-project.js
+    const rows = db.sales.aggregate([
+      { $match: { price: { $gte: 24 } } },
+      { $project: { _id: 0, title: 1, revenue: { $multiply: ["$price", "$quantity"] } } },
+      { $limit: 3 },
+    ]).toArray();
+    console.log(rows);
+    assert.ok(rows.every((d) => d.revenue >= 24 && !("_id" in d)));
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
+    // app/pb-project.mjs
+    const sales = db.collection("sales");
+    await sales.insertMany([
+      { title: "Dune", genre: "fiction", quantity: 3, price: 12, buyer: "Ada" },
+      { title: "Foundation", genre: "fiction", quantity: 1, price: 15, buyer: "Linus" },
+      { title: "Cosmos", genre: "science", quantity: 2, price: 6, buyer: "Ada" },
+    ]);
+    const rows = await sales.aggregate([
       { $match: { price: { $gte: 10 } } },
-      { $project: {
-          _id: 0,
-          title: 1,
-          revenue: { $multiply: ["$price", "$quantity"] },
-      } },
+      { $project: { _id: 0, title: 1, revenue: { $multiply: ["$price", "$quantity"] } } },
     ]).toArray();
+    console.log(rows);
+    if (rows.length !== 2 || rows[0].revenue !== 36) throw new Error("unexpected projection");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     rows = list(db.sales.aggregate([
         {"$match": {"price": {"$gte": 10}}},
-        {"$project": {
-            "_id": 0,
-            "title": 1,
-            "revenue": {"$multiply": ["$price", "$quantity"]},
-        }},
+        {"$project": {"_id": 0, "title": 1, "revenue": {"$multiply": ["$price", "$quantity"]}}},
     ]))
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
-        {{"$project", bson.D{
-            {"_id", 0},
-            {"title", 1},
-            {"revenue", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}},
+        {{Key: "$match", Value: bson.D{{Key: "price", Value: bson.D{{Key: "$gte", Value: 10}}}}}},
+        {{Key: "$project", Value: bson.D{
+            {Key: "_id", Value: 0},
+            {Key: "title", Value: 1},
+            {Key: "revenue", Value: bson.D{{Key: "$multiply", Value: bson.A{"$price", "$quantity"}}}},
         }}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$match": { "price": { "$gte": 10 } } },
-        doc! { "$project": {
-            "_id": 0,
-            "title": 1,
-            "revenue": { "$multiply": ["$price", "$quantity"] }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$match": { "price": { "$gte": 10 } } },
+            doc! { "$project": {
+                "_id": 0,
+                "title": 1,
+                "revenue": { "$multiply": ["$price", "$quantity"] },
+            } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-Each surviving document is now slim and carries a computed field:
-
-```json
+```text
 [
-  { "title": "Dune", "revenue": 36 },
-  { "title": "Foundation", "revenue": 15 }
+  { title: 'T46', revenue: 50 },
+  { title: 'T53', revenue: 125 },
+  { title: 'T60', revenue: 75 }
 ]
 ```
 
-**In Compass:** add a `$match` stage, then an `$project` stage in the **Aggregations** tab. The live preview under each stage shows the document count shrinking after `$match` and the fields changing after `$project`, which makes the effect of stage order obvious at a glance.
+```text
+[
+  { title: 'Dune', revenue: 36 },
+  { title: 'Foundation', revenue: 15 }
+]
+```
 
-## Why stage order matters
+### $set, $unset and the inclusion/exclusion rule
 
-Put `$match` *after* a heavy stage and you pay to process documents you were going to discard anyway. Put it *first* and the engine prunes the stream — sometimes with an index — before any other work happens. The rule of thumb: **filter as early as you can, reshape as late as you can.** A `$project` that drops large fields can also help a later stage by shrinking each document, but the biggest win almost always comes from an early `$match`.
+`$project` with a field list is an *inclusion* projection: everything not listed disappears. `$set` (alias `$addFields`) adds or overwrites fields and keeps the rest; `$unset` removes named fields. A single `$project` cannot mix inclusion and exclusion except for `_id`:
+
+```js
+// mongosh/pb-set.js
+const one = (extra) => db.sales.aggregate([{ $match: { title: "T7" } }, { $limit: 1 }, ...extra]).toArray()[0];
+console.log("$project keeps only what you list :", Object.keys(one([{ $project: { title: 1, revenue: { $multiply: ["$price", "$quantity"] } } }])).join(", "));
+console.log("$set adds, keeps everything else  :", Object.keys(one([{ $set: { revenue: { $multiply: ["$price", "$quantity"] } } }])).join(", "));
+console.log("$unset removes named fields       :", Object.keys(one([{ $unset: ["buyer", "genre"] }])).join(", "));
+try { db.sales.aggregate([{ $project: { title: 1, buyer: 0 } }]).toArray(); }
+catch (e) { console.log("mixing 1 and 0:", e.codeName + " -", e.message); }
+```
+
+```text
+$project keeps only what you list : _id, title, revenue
+$set adds, keeps everything else  : _id, title, genre, quantity, price, buyer, revenue
+$unset removes named fields       : _id, title, quantity, price
+mixing 1 and 0: Location31254 - Invalid $project :: caused by :: Cannot do exclusion on field buyer in inclusion projection
+```
+
+**In Compass:** add a `$match` stage, then a `$project` stage in the **Aggregations** tab. The live preview under each stage shows the count shrinking after `$match` and the fields changing after `$project`.
+
+## Why stage order matters - and what the optimizer fixes
+
+Older material says a `$match` after `$project` or `$group` can never use an index. That is only half true. MongoDB's optimizer rewrites the pipeline first: for a projection stage followed by `$match`, it "moves any filters in the `$match` stage that do not require values computed in the projection stage to a new `$match` stage before the projection" ([pipeline optimization](https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/), consulted 2026-09-30). Five orderings of the same kind of question, with the plan each actually got:
+
+```js
+// mongosh/pb-order.js
+const rev = { $multiply: ["$price", "$quantity"] };
+console.log("A $match first                 :", aplan([{ $match: { price: { $gte: 24 } } }, { $project: { revenue: rev } }]));
+console.log("B $match AFTER $project        :", aplan([{ $project: { revenue: rev, price: 1 } }, { $match: { price: { $gte: 24 } } }]));
+console.log("C $match on a computed field   :", aplan([{ $project: { revenue: rev } }, { $match: { revenue: { $gte: 100 } } }]));
+console.log("D $match after $group (on _id) :", aplan([{ $group: { _id: "$price", n: { $sum: 1 } } }, { $match: { _id: { $gte: 24 } } }]));
+console.log("E $match on a $group total     :", aplan([{ $group: { _id: "$genre", n: { $sum: 1 } } }, { $match: { n: { $gt: 5 } } }]));
+const e = db.sales.explain().aggregate([{ $project: { revenue: rev, price: 1 } }, { $match: { price: { $gte: 24 } } }]);
+console.log("B optimizedPipeline:", e.queryPlanner.optimizedPipeline, "| parsedQuery:", JSON.stringify(e.queryPlanner.parsedQuery));
+```
+
+```text
+A $match first                 : PROJECTION_DEFAULT > FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+B $match AFTER $project        : PROJECTION_DEFAULT > FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+C $match on a computed field   : PROJECTION_DEFAULT > COLLSCAN  keys=0 docs=200000  | left in pipeline: $match
+D $match after $group (on _id) : GROUP > PROJECTION_COVERED > IXSCAN(price_1)  keys=13422 docs=0
+E $match on a $group total     : GROUP > COLLSCAN  keys=0 docs=200000  | left in pipeline: $match
+B optimizedPipeline: true | parsedQuery: {"price":{"$gte":24}}
+```
+
+- **A, B** - same plan: the filter on the stored `price` was moved in front of the `$project` (`optimizedPipeline: true`, `parsedQuery` is the price filter).
+- **C** - the filter needs `revenue`, a value that only exists after `$project`, so it stays behind: COLLSCAN over 200 000 documents and `$match` left in the pipeline.
+- **D** - a `$match` on the `$group` key (`_id`) is moved before the `$group` too, and the plan is even covered (`docs=0`).
+- **E** - a filter on an accumulator (`n`) can only run after the group exists: COLLSCAN and `$match` left behind.
+
+So the real rule is not "always write `$match` first" (though it is the clearest style) but "a filter is only stuck late when it depends on a computed field or an aggregate value".
+
+## Memory: 100 MB per stage, disk by default
+
+Blocking stages (`$sort`, `$group`) keep their working set in memory up to 100 MB. Since MongoDB 6.0 `allowDiskUseByDefault` is `true`, so a stage that exceeds the limit spills to disk instead of failing; pass `{ allowDiskUse: false }` to get the old behaviour. A 130 MB collection makes the difference visible:
+
+```js
+// mongosh/pb-memory.js
+console.log(db.adminCommand({ getParameter: 1, allowDiskUseByDefault: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 1, internalDocumentSourceGroupMaxMemoryBytes: 1 }));
+for (let s = 0; s < 130000; s += 10000) db.big.insertMany(Array.from({ length: 10000 }, (_, k) => ({ n: s + k, r: Math.random(), pad: "x".repeat(1000) })), { ordered: false });
+console.log("big collection MB:", +(db.big.stats().size / 1048576).toFixed(0), "(over the 100 MB per-stage limit)");
+let t = Date.now();
+console.log("default            ->", db.big.aggregate([{ $sort: { r: 1 } }, { $project: { n: 1 } }]).toArray().length, "rows in", Date.now() - t, "ms");
+try { db.big.aggregate([{ $sort: { r: 1 } }, { $project: { n: 1 } }], { allowDiskUse: false }).toArray(); }
+catch (e) { console.log("allowDiskUse:false ->", e.codeName + ":", e.message.slice(0, 130)); }
+```
+
+```text
+{
+  allowDiskUseByDefault: true,
+  internalDocumentSourceGroupMaxMemoryBytes: Long('104857600'),
+  internalQueryMaxBlockingSortMemoryUsageBytes: Long('104857600'),
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1790752983, i: 53993 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: Long('0')
+    }
+  },
+  operationTime: Timestamp({ t: 1790752983, i: 53993 })
+}
+big collection MB: 130 (over the 100 MB per-stage limit)
+default            -> 130000 rows in 444 ms
+allowDiskUse:false -> QueryExceededMemoryLimitNoDiskUseAllowed: Executor error during aggregate command on namespace: b2_bbc59d.big :: caused by :: Sort exceeded memory limit of 104857600 bytes,
+```
 
 ## Tips and gotchas
 
-- An early `$match` can use indexes; a `$match` that comes after `$group` or `$project` usually cannot, because the documents at that point are freshly computed, not stored.
-- In `$project`, mixing inclusion (`1`) and exclusion (`0`) in the same stage is only allowed for `_id`. List the fields you want, or drop the ones you do not — not both.
-- Field paths inside expressions need the `$` prefix: `"$price"` is the field's value, while `"price"` is the literal string.
-- Prefer `$project` (or its cousin `$set`) to compute once and reuse the result downstream, rather than repeating the same expression in several stages.
+- An early `$match` on stored fields can use an index; the optimizer will hoist it past `$project`/`$set` and past a `$group` on the key, but never past a computed field or an accumulator.
+- Mixing inclusion (`1`) and exclusion (`0`) in one `$project` is an error, except for `_id`.
+- `"$price"` is a field value, `"price"` a literal string.
+- Use `explain` (`aplan` above) to see what was hoisted: `left in pipeline` lists what the first stage could not absorb.
 
 <Callout title="Filter early, reshape late">
-The first instinct for any pipeline should be: can I $match sooner? An early filter is the cheapest performance win in aggregation, because it can lean on an index and shrinks everything that follows.
+The first instinct for any pipeline: can I `$match` sooner? Often the optimizer does it for you, but a filter on a computed value or a group total cannot move - store and index the value, or pre-filter on an indexed field.
 </Callout>
+
+## Reading AI-generated code
+
+Asked for "orders worth at least 100 with an index-friendly pipeline", an assistant writes:
+
+<SpotTheBug lang="js" code={`// AI comment: "price is indexed, and $match is the only filter - the index handles it"
+db.sales.aggregate([
+  { $project: { title: 1, revenue: { $multiply: ["$price", "$quantity"] } } },
+  { $match: { revenue: { $gte: 100 } } },
+]);`}>
+
+`revenue` only exists after `$project`, so the optimizer cannot hoist the filter: plan C above scans all 200 000 documents, and no index on `price` can answer a test on `price x quantity`. Two fixes, both measured below: add a coarse pre-filter the index can serve (`revenue >= 100` implies `price >= 20` because `quantity <= 5`, cutting the read to 57 143 documents), or store `revenue` in the document, index it and match on the stored field (14 111 keys, exactly the answer):
+
+```js
+// mongosh/pb-bug.js
+const rev = { $multiply: ["$price", "$quantity"] };
+const buggy = [{ $project: { title: 1, revenue: rev } }, { $match: { revenue: { $gte: 100 } } }];            // filter on a computed field
+const coarse = [{ $match: { price: { $gte: 20 } } }, ...buggy];                                                 // revenue >= 100 implies price >= 20 (quantity <= 5)
+console.log("buggy   (filter on a computed field):", aplan(buggy));
+console.log("coarse pre-filter on the index      :", aplan(coarse));
+db.sales.updateMany({}, [{ $set: { revenue: rev } }]);                                                            // store the value once ...
+db.sales.createIndex({ revenue: 1 });                                                                             // ... and index it
+const fixed = [{ $match: { revenue: { $gte: 100 } } }, { $project: { title: 1, revenue: 1 } }];
+console.log("stored + indexed revenue             :", aplan(fixed));
+const n = (p) => db.sales.aggregate(p).toArray().length;
+console.log("rows returned by all three:", n(buggy), n(coarse), n(fixed));
+assert.ok(n(buggy) === n(coarse) && n(coarse) === n(fixed));
+```
+
+```text
+buggy   (filter on a computed field): PROJECTION_DEFAULT > COLLSCAN  keys=0 docs=200000  | left in pipeline: $match
+coarse pre-filter on the index      : PROJECTION_DEFAULT > FETCH > IXSCAN(price_1)  keys=57143 docs=57143  | left in pipeline: $match
+stored + indexed revenue             : PROJECTION_SIMPLE > FETCH > IXSCAN(revenue_1)  keys=14111 docs=14111
+rows returned by all three: 14111 14111 14111
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Think of the optimizer as a helpful colleague who moves your filter earlier whenever it can prove the filter does not need anything produced in between. You control the rest: filters that depend on computed values or group totals must stay where the value exists, so either accept the scan, pre-filter on something stored, or store the value.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `$match` early in the pipeline | Can use an index, drops documents before the heavy work, saves CPU and memory | The filter conditions must target fields that have not been reshaped yet, sometimes more awkward than filtering after computing |
-| `$match` late in the pipeline (after computing) | Filter conditions can target computed fields directly | Cannot use an index, and CPU is spent processing documents that end up discarded anyway |
-| `$project` listing fields explicitly | Precise control over the output shape, reduces the size of documents passed downstream | When the schema changes (fields added/removed), every place that lists fields needs updating |
+| `$match` first on stored fields | Uses an index: 13 422 keys, not 200 000 documents | Conditions must target stored fields |
+| `$match` on a computed field | Expresses the real question directly | COLLSCAN of 200 000 documents |
+| Store + index the computed value | 14 111 keys; exact | Write-time upkeep, extra index |
+| `$project` with explicit fields | Precise output shape | New fields must be added everywhere |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Placing `$match` after `$group` or `$project` and expecting an index to still help** — the moment documents pass through `$group`/`$project`, they are no longer the documents stored on disk, so the collection's indexes no longer apply.
-- **Forgetting a `$project` at the end of the pipeline** — without reshaping the final result, the client receives documents with more fields than necessary, including internal fields only meant for computing, needlessly bloating the payload.
-- **Mixing inclusion (`1`) and exclusion (`0`) in the same `$project` and being confused by the error** — MongoDB only allows mixing them for `_id`; every other field must pick one or the other.
+- **"A `$match` after `$project` cannot use an index."** - plan B used `price_1` (13 422 keys).
+- **"A `$match` after `$group` is always late."** - a filter on the group key was hoisted (plan D, covered).
+- **"So stage order never matters."** - filters on `revenue` or `n` stayed late and scanned 200 000 documents.
+- **"A big `$sort` fails at 100 MB."** - it spilled to disk and finished (130 000 rows in 449 ms) unless `allowDiskUse: false`.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A typical analytics dashboard** — a query that filters by date range and status first (`$match` early in the pipeline, on an indexed field), then `$project`s down to only the fields a chart needs, lets a dashboard reading millions of documents a day respond in a few hundred milliseconds.
->
-> **A typical real estate report** — always filters on fields like region and status with `$match` first, so an index can drop most documents immediately, then `$project`s down to only the fields the sales team needs to see in the report. Keller Williams uses this style of MongoDB aggregation pipeline with its listing data on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+> The MongoDB manual documents the optimizer behaviour measured here as a named rule ("$match ... moves any filters ... that do not require values computed in the projection stage") together with the reverse case, where computed values pin a filter in place ([pipeline optimization](https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/), consulted 2026-09-30). Keller Williams uses this style of pipeline over its listing data on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the match-project pipeline returned the same revenue rows) but they are not executed by the course's automated checker._
 
 export const quizBasics = [
   {
     q: 'Why is it best to place $match as the first stage of a pipeline?',
     options: [
       'It is the only stage allowed to run first',
-      'So the engine can use indexes and prune the stream before later work',
+      'So the engine can use an index and read fewer documents before later work',
       'Because $match cannot appear anywhere else',
       'It automatically sorts the results',
     ],
     answer: 1,
+    explain: 'A leading { price: { $gte: 24 } } read 13 422 index keys and documents; the same filter on a computed field scanned all 200 000.',
   },
   {
     q: 'In a $project stage, what does "$price" refer to?',
@@ -229,6 +361,7 @@ export const quizBasics = [
       'The price of the whole collection',
     ],
     answer: 1,
+    explain: '{ $multiply: ["$price", "$quantity"] } produced revenue 50 for price 25 x quantity 2.',
   },
   {
     q: 'Which $project pattern is NOT allowed in a single stage?',
@@ -239,6 +372,40 @@ export const quizBasics = [
       'Computing a field with an expression',
     ],
     answer: 2,
+    explain: '{ title: 1, buyer: 0 } failed with "Cannot do exclusion on field buyer in inclusion projection".',
+  },
+  {
+    q: 'A pipeline is [ $project (adds revenue, keeps price), then $match { price >= 24 } ]. Does the $match still use the price index?',
+    options: [
+      'No, a $match after $project can never use an index',
+      'Yes: the optimizer moves the part of the $match that does not need computed values in front of the $project',
+      'Only with allowDiskUse',
+      'Only on a replica set',
+    ],
+    answer: 1,
+    explain: 'Plan B was PROJECTION_DEFAULT > FETCH > IXSCAN(price_1) with 13 422 keys and optimizedPipeline: true; only the filter on computed revenue (plan C) stayed behind and became a COLLSCAN.',
+  },
+  {
+    q: 'How do you fix a slow $match on a computed value like price x quantity?',
+    options: [
+      'Use $sort first',
+      'Store the computed value in the document, index it, and $match on the stored field (14 111 keys instead of 200 000 documents)',
+      'Move $match after $group',
+      'It cannot be sped up',
+    ],
+    answer: 1,
+    explain: 'Stored revenue with revenue_1 examined 14 111 keys; a coarse price pre-filter (57 143 keys) also worked without changing the data; all three returned 14 111 rows.',
+  },
+  {
+    q: 'A 130 MB $sort runs with default settings on MongoDB 8. What happens?',
+    options: [
+      'It fails at 100 MB',
+      'It spills to disk and succeeds; it fails only with allowDiskUse: false',
+      'It is silently truncated',
+      'It waits for more RAM',
+    ],
+    answer: 1,
+    explain: 'allowDiskUseByDefault was true: 130 000 rows in 449 ms; with allowDiskUse: false, QueryExceededMemoryLimitNoDiskUseAllowed.',
   },
 ]
 

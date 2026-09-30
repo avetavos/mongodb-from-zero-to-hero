@@ -1,6 +1,6 @@
 ---
-title: Pipeline basics — $match และ $project
-description: filter stream ตั้งแต่เนิ่น ๆ ด้วย $match เพื่อให้ index ช่วยได้ จัดรูปและคำนวณ field ด้วย $project และเข้าใจว่าทำไมลำดับของ stage ถึงสำคัญ
+title: พื้นฐาน pipeline - $match และ $project
+description: กรองสายข้อมูลแต่เนิ่น ๆ ด้วย $match เพื่อให้ index ช่วยได้ ปรับรูปด้วย $project, $set และ $unset และดูว่า optimizer จัดลำดับใหม่ให้ได้แบบไหนและแบบไหนไม่ได้ - วัดบน order 200 000 รายการ
 sidebar:
   order: 2
 ---
@@ -9,236 +9,403 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ก่อนจะไปถึงของหรู มีสอง stage ที่แบกงาน aggregation ไว้เกือบทั้งหมด: `$match` ทิ้ง document ที่คุณไม่ต้องการ ส่วน `$project` จัดรูป document ที่เหลือใหม่ เรียนสองตัวนี้ให้แม่น คุณก็มีเครื่องมือ query ที่ไปไกลกว่า `find` แล้ว และมีบทเรียนสำคัญซ่อนอยู่ในนั้น: **ตำแหน่งที่คุณวาง stage เปลี่ยนทั้งความเร็วและความถูกต้องของ pipeline**
+สอง stage ทำงานหลักของ aggregation ก่อนถึงของหรู: `$match` ทิ้ง document ที่ไม่ต้องการ และ `$project` ปรับรูป document ที่เก็บไว้ บทเรียนละเอียดที่ซ่อนอยู่คือ **ตำแหน่งของ stage เปลี่ยนความเร็วและความถูกต้องของ pipeline** - และที่น่าแปลกกว่าคือ server แก้บางลำดับให้คุณอยู่แล้ว
 
-เรายังใช้ collection `sales` ต่อ ออเดอร์หนึ่งรายการหน้าตาแบบนี้:
+บทนี้เตรียม collection `sales` ของโมดูล (order 200 000 รายการ `{ title, genre, quantity, price, buyer }` มี index บน `price`) และ helper `aplan()` ตามที่อธิบายในบทนำโมดูล จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
 
-```json
-{
-  "_id": "a1",
-  "title": "Dune",
-  "genre": "fiction",
-  "quantity": 3,
-  "price": 12,
-  "buyer": "Ada"
+```js
+// mongosh/pb-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.aplan = (pipeline) => {               // one line per aggregate explain: what the first stage read, then the stages left in the pipeline
+  const e = db.sales.explain("executionStats").aggregate(pipeline);
+  const cursor = e.stages ? e.stages[0].$cursor : e, rest = e.stages ? e.stages.slice(1).map((s) => Object.keys(s)[0]) : [];
+  const chain = (p) => { const out = []; for (p = p.queryPlan ?? p; p; p = p.inputStage) out.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : "")); return out.join(" > "); };
+  const s = cursor.executionStats;
+  return chain(cursor.queryPlanner.winningPlan) + "  keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + (rest.length ? "  | left in pipeline: " + rest.join(" > ") : "");
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.sales.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;                                          // 500 titles, 5 genres, quantity 1..5, price 5..25, 1000 buyers (pseudo-random but repeatable)
+    return { title: "T" + (i % 500), genre: genres[(i % 500) % 5], quantity: 1 + ((Math.imul(i, 2654435761) >>> 0) % 5), price: 5 + ((Math.imul(i, 40503) >>> 0) % 21), buyer: "b" + (i % 1000) };
+  }), { ordered: false });
 }
+db.sales.createIndex({ price: 1 });
+console.log("sales:", db.sales.countDocuments(), "orders");
 ```
 
-## $match ฟิลเตอร์สตรีม — วางไว้ก่อน
+```text
+sales: 200000 orders
+```
 
-`$match` เก็บเฉพาะ document ที่ field ตรงตามเงื่อนไข โดยใช้ syntax เดียวกับ query ของ `find` ที่คุณรู้จักอยู่แล้ว ดังนั้น `$gt`, `$in`, `$and` และตัวอื่น ๆ ใช้ได้หมด เหตุผลที่ต้องวางไว้ **ก่อน** ไม่ใช่เรื่องสไตล์: เมื่อ `$match` เป็น stage แรกสุด เอนจิน aggregation ใช้ **index** ของ collection ข้าม document ที่ไม่ตรงได้ทั้งหมด แทนที่จะ stream ทั้ง collection ผ่าน stage ถัดไป
+## $match กรองสายข้อมูล - วางไว้ก่อน
+
+`$match` เก็บเฉพาะ document ที่ตรงเงื่อนไข ด้วยไวยากรณ์เดียวกับ `find` (`$gt`, `$in`, `$and`...) เมื่อเป็น stage แรก engine วางแผนเหมือน `find` จึงใช้ **index** ข้าม document ที่ไม่ตรงได้ แทนการไหลทั้ง collection ผ่าน stage ถัดไป:
 
 export const matchProject = `flowchart LR
-  In["all sales"] --> M["$match: price >= 10 (uses index)"]
+  In["all sales"] --> M["$match: price >= 24 (uses index)"]
   M --> P["$project: keep title, compute revenue"]
   P --> Out["slim, reshaped documents"]`
 
-<Mermaid code={matchProject} title=" filter ก่อนเพื่อให้ index ตัด stream ได้ แล้วค่อยจัดรูปสิ่งที่เหลือรอด" />
+<Mermaid code={matchProject} title="กรองก่อนเพื่อให้ index ตัดสายข้อมูล แล้วค่อยปรับรูปสิ่งที่เหลือ" />
 
-ตรงนี้เราเก็บเฉพาะออเดอร์ที่ราคาอย่างน้อยสิบดอลลาร์ต่อชิ้น:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $match: { price: { $gte: 10 } } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $match: { price: { $gte: 10 } } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$match": {"price": {"$gte": 10}}},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$match": { "price": { "$gte": 10 } } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-เฉพาะออเดอร์ที่ราคาตั้งแต่สิบขึ้นไปเท่านั้นที่รอดเข้าไปยัง stage ถัดไป:
-
-```json
-[
-  { "_id": "a1", "title": "Dune", "genre": "fiction", "quantity": 3, "price": 12, "buyer": "Ada" },
-  { "_id": "a4", "title": "Foundation", "genre": "fiction", "quantity": 1, "price": 15, "buyer": "Linus" }
-]
+```js
+// mongosh/pb-match.js
+const rows = db.sales.aggregate([{ $match: { price: { $gte: 24 } } }, { $limit: 2 }]).toArray();
+console.log(rows);
+console.log(aplan([{ $match: { price: { $gte: 24 } } }]));
+assert.ok(rows.every((d) => d.price >= 24));
 ```
 
-## $project จัดรูปและคำนวณ
+```text
+[
+  {
+    _id: ObjectId('6abcb8d411b1b6194d7740a3'),
+    title: 'T46',
+    genre: 'science',
+    quantity: 2,
+    price: 25,
+    buyer: 'b46'
+  },
+  {
+    _id: ObjectId('6abcb8d411b1b6194d7740aa'),
+    title: 'T53',
+    genre: 'poetry',
+    quantity: 5,
+    price: 25,
+    buyer: 'b53'
+  }
+]
+FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+```
 
-`$project` ตัดสินว่า field ไหนจะออกจาก stage และให้คุณสร้าง field **ใหม่** จาก expression ได้ ตั้งค่า field เป็น `1` เพื่อเก็บไว้ `0` เพื่อทิ้ง หรือใส่ expression เพื่อคำนวณ การอ้าง field ภายใน expression ต้องนำหน้าด้วย `$` ดังนั้น `"$price"` หมายถึง "ค่าของ field price" ตรงนี้เราเก็บ title ไว้ แล้วคำนวณ field `revenue` จาก price คูณ quantity:
+order 13 422 จาก 200 000 รายการตรง และ plan อ่าน index key 13 422 ตัวกับ document 13 422 รายการพอดี
+
+## $project ปรับรูปและคำนวณ
+
+`$project` กำหนดว่า field ไหนออกจาก stage และสร้าง field **ใหม่** จาก expression `1` เก็บ field, `0` ตัดทิ้ง, expression คือคำนวณ การอ้างอิง field ใน expression ใช้ prefix `$`: `"$price"` คือค่าของ field, `"price"` คือ string ตามตัวอักษร ที่นี่เราเก็บ title และคำนวณ `revenue = price x quantity`; แท็บ Node.js รันบน collection สาม order:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $match: { price: { $gte: 10 } } },
-      { $project: {
-          _id: 0,
-          title: 1,
-          revenue: { $multiply: ["$price", "$quantity"] }
-      } }
-    ])
+    // mongosh/pb-project.js
+    const rows = db.sales.aggregate([
+      { $match: { price: { $gte: 24 } } },
+      { $project: { _id: 0, title: 1, revenue: { $multiply: ["$price", "$quantity"] } } },
+      { $limit: 3 },
+    ]).toArray();
+    console.log(rows);
+    assert.ok(rows.every((d) => d.revenue >= 24 && !("_id" in d)));
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
+    // app/pb-project.mjs
+    const sales = db.collection("sales");
+    await sales.insertMany([
+      { title: "Dune", genre: "fiction", quantity: 3, price: 12, buyer: "Ada" },
+      { title: "Foundation", genre: "fiction", quantity: 1, price: 15, buyer: "Linus" },
+      { title: "Cosmos", genre: "science", quantity: 2, price: 6, buyer: "Ada" },
+    ]);
+    const rows = await sales.aggregate([
       { $match: { price: { $gte: 10 } } },
-      { $project: {
-          _id: 0,
-          title: 1,
-          revenue: { $multiply: ["$price", "$quantity"] },
-      } },
+      { $project: { _id: 0, title: 1, revenue: { $multiply: ["$price", "$quantity"] } } },
     ]).toArray();
+    console.log(rows);
+    if (rows.length !== 2 || rows[0].revenue !== 36) throw new Error("unexpected projection");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     rows = list(db.sales.aggregate([
         {"$match": {"price": {"$gte": 10}}},
-        {"$project": {
-            "_id": 0,
-            "title": 1,
-            "revenue": {"$multiply": ["$price", "$quantity"]},
-        }},
+        {"$project": {"_id": 0, "title": 1, "revenue": {"$multiply": ["$price", "$quantity"]}}},
     ]))
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$match", bson.D{{"price", bson.D{{"$gte", 10}}}}}},
-        {{"$project", bson.D{
-            {"_id", 0},
-            {"title", 1},
-            {"revenue", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}},
+        {{Key: "$match", Value: bson.D{{Key: "price", Value: bson.D{{Key: "$gte", Value: 10}}}}}},
+        {{Key: "$project", Value: bson.D{
+            {Key: "_id", Value: 0},
+            {Key: "title", Value: 1},
+            {Key: "revenue", Value: bson.D{{Key: "$multiply", Value: bson.A{"$price", "$quantity"}}}},
         }}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$match": { "price": { "$gte": 10 } } },
-        doc! { "$project": {
-            "_id": 0,
-            "title": 1,
-            "revenue": { "$multiply": ["$price", "$quantity"] }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$match": { "price": { "$gte": 10 } } },
+            doc! { "$project": {
+                "_id": 0,
+                "title": 1,
+                "revenue": { "$multiply": ["$price", "$quantity"] },
+            } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-document แต่ละอันที่รอดมาตอนนี้เหลือแค่ field ที่จำเป็น พร้อมค่าที่คำนวณแล้ว:
-
-```json
+```text
 [
-  { "title": "Dune", "revenue": 36 },
-  { "title": "Foundation", "revenue": 15 }
+  { title: 'T46', revenue: 50 },
+  { title: 'T53', revenue: 125 },
+  { title: 'T60', revenue: 75 }
 ]
 ```
 
-**ใน Compass:** เพิ่ม stage `$match` แล้วตามด้วย stage `$project` ในแท็บ **Aggregations** ตัวอย่างสด ๆ ใต้แต่ละ stage จะโชว์จำนวน document ที่หดลงหลัง `$match` และ field ที่เปลี่ยนไปหลัง `$project` ทำให้เห็นผลของลำดับ stage ได้ในพริบตา
+```text
+[
+  { title: 'Dune', revenue: 36 },
+  { title: 'Foundation', revenue: 15 }
+]
+```
 
-## ทำไมลำดับของ stage จึงสำคัญ
+### $set, $unset และกฎ include/exclude
 
-วาง `$match` ไว้ *หลัง* stage ที่หนัก คุณก็ต้องจ่ายค่าประมวลผล document ที่ยังไงก็จะโดนทิ้งอยู่ดี วางไว้ *ก่อน* เอนจินจะตัด stream — บางครั้งด้วย index — ก่อนที่งานอื่นจะเริ่ม หลักการง่าย ๆ คือ ** filter ให้เร็วที่สุด จัดรูปให้ช้าที่สุด** การใช้ `$project` ทิ้ง field ก้อนใหญ่ก็ช่วย stage ถัดไปได้เหมือนกัน เพราะทำให้แต่ละ document เล็กลง แต่ที่ได้ผลที่สุดเกือบทุกครั้งคือ `$match` ที่วางไว้ต้น pipeline
+`$project` ที่ระบุรายการ field คือ *inclusion* projection: ทุกอย่างที่ไม่ได้ระบุหายไป `$set` (alias `$addFields`) เพิ่มหรือเขียนทับ field และเก็บที่เหลือ; `$unset` ลบ field ที่ระบุชื่อ `$project` เดียวผสม inclusion กับ exclusion ไม่ได้ ยกเว้น `_id`:
 
-## ทิปและกับดัก
+```js
+// mongosh/pb-set.js
+const one = (extra) => db.sales.aggregate([{ $match: { title: "T7" } }, { $limit: 1 }, ...extra]).toArray()[0];
+console.log("$project keeps only what you list :", Object.keys(one([{ $project: { title: 1, revenue: { $multiply: ["$price", "$quantity"] } } }])).join(", "));
+console.log("$set adds, keeps everything else  :", Object.keys(one([{ $set: { revenue: { $multiply: ["$price", "$quantity"] } } }])).join(", "));
+console.log("$unset removes named fields       :", Object.keys(one([{ $unset: ["buyer", "genre"] }])).join(", "));
+try { db.sales.aggregate([{ $project: { title: 1, buyer: 0 } }]).toArray(); }
+catch (e) { console.log("mixing 1 and 0:", e.codeName + " -", e.message); }
+```
 
-- `$match` ที่อยู่ต้น pipeline ใช้ index ได้ ส่วน `$match` ที่มาหลัง `$group` หรือ `$project` มักใช้ไม่ได้ เพราะ document ณ จุดนั้นเป็นของที่คำนวณขึ้นใหม่ ไม่ใช่ของที่เก็บอยู่บนดิสก์
-- ใน `$project` การผสม inclusion (`1`) กับ exclusion (`0`) ใน stage เดียวกันทำได้เฉพาะกับ `_id` เท่านั้น ให้เลือกว่าจะระบุ field ที่ต้องการ หรือทิ้ง field ที่ไม่ต้องการ — ไม่ใช่ทั้งสองอย่าง
-- field path ภายใน expression ต้องนำหน้าด้วย `$`: `"$price"` คือค่าใน field ส่วน `"price"` คือ string ตัวอักษรนั้นตรง ๆ
-- ใช้ `$project` (หรือ `$set` ที่ทำหน้าที่คล้ายกัน) คำนวณครั้งเดียวแล้วเอาผลไปใช้ซ้ำทีหลัง ดีกว่าเขียน expression เดิมซ้ำในหลาย stage
+```text
+$project keeps only what you list : _id, title, revenue
+$set adds, keeps everything else  : _id, title, genre, quantity, price, buyer, revenue
+$unset removes named fields       : _id, title, quantity, price
+mixing 1 and 0: Location31254 - Invalid $project :: caused by :: Cannot do exclusion on field buyer in inclusion projection
+```
 
-<Callout title=" filter เนิ่น ๆ จัดรูปทีหลัง">
-คำถามแรกที่ควรถามกับทุก pipeline คือ: $match ให้เร็วกว่านี้ได้ไหม? filter ที่วางไว้ต้น pipeline คือการเพิ่ม performance ที่ต้นทุนถูกที่สุดใน aggregation เพราะพึ่ง index ได้ และทำให้ทุกอย่างที่ตามมาเล็กลงหมด
+**In Compass:** เพิ่ม stage `$match` แล้ว `$project` ในแท็บ **Aggregations** ตัวอย่างสดใต้แต่ละ stage แสดงจำนวนที่ลดลงหลัง `$match` และ field ที่เปลี่ยนหลัง `$project`
+
+## ทำไมลำดับ stage สำคัญ - และ optimizer แก้อะไรให้
+
+เอกสารรุ่นเก่าบอกว่า `$match` หลัง `$project` หรือ `$group` ใช้ index ไม่ได้เลย จริงเพียงครึ่งเดียว optimizer ของ MongoDB เขียน pipeline ใหม่ก่อน: สำหรับ projection ที่ตามด้วย `$match` มัน "moves any filters in the `$match` stage that do not require values computed in the projection stage to a new `$match` stage before the projection" ([pipeline optimization](https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/), ตรวจ 2026-09-30) ห้าลำดับของคำถามแบบเดียวกัน พร้อม plan ที่แต่ละอันได้จริง:
+
+```js
+// mongosh/pb-order.js
+const rev = { $multiply: ["$price", "$quantity"] };
+console.log("A $match first                 :", aplan([{ $match: { price: { $gte: 24 } } }, { $project: { revenue: rev } }]));
+console.log("B $match AFTER $project        :", aplan([{ $project: { revenue: rev, price: 1 } }, { $match: { price: { $gte: 24 } } }]));
+console.log("C $match on a computed field   :", aplan([{ $project: { revenue: rev } }, { $match: { revenue: { $gte: 100 } } }]));
+console.log("D $match after $group (on _id) :", aplan([{ $group: { _id: "$price", n: { $sum: 1 } } }, { $match: { _id: { $gte: 24 } } }]));
+console.log("E $match on a $group total     :", aplan([{ $group: { _id: "$genre", n: { $sum: 1 } } }, { $match: { n: { $gt: 5 } } }]));
+const e = db.sales.explain().aggregate([{ $project: { revenue: rev, price: 1 } }, { $match: { price: { $gte: 24 } } }]);
+console.log("B optimizedPipeline:", e.queryPlanner.optimizedPipeline, "| parsedQuery:", JSON.stringify(e.queryPlanner.parsedQuery));
+```
+
+```text
+A $match first                 : PROJECTION_DEFAULT > FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+B $match AFTER $project        : PROJECTION_DEFAULT > FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+C $match on a computed field   : PROJECTION_DEFAULT > COLLSCAN  keys=0 docs=200000  | left in pipeline: $match
+D $match after $group (on _id) : GROUP > PROJECTION_COVERED > IXSCAN(price_1)  keys=13422 docs=0
+E $match on a $group total     : GROUP > COLLSCAN  keys=0 docs=200000  | left in pipeline: $match
+B optimizedPipeline: true | parsedQuery: {"price":{"$gte":24}}
+```
+
+- **A, B** - plan เดียวกัน: filter บน `price` ที่เก็บไว้ถูกย้ายมาไว้หน้า `$project` (`optimizedPipeline: true`, `parsedQuery` คือ filter ของ price)
+- **C** - filter ต้องใช้ `revenue` ซึ่งมีหลัง `$project` เท่านั้น จึงค้างอยู่ข้างหลัง: COLLSCAN บน 200 000 document และ `$match` ยังเหลือใน pipeline
+- **D** - `$match` บน key ของ `$group` (`_id`) ก็ถูกย้ายไปไว้ก่อน `$group` และ plan ถึงกับ covered (`docs=0`)
+- **E** - filter บน accumulator (`n`) รันได้หลังกลุ่มเกิดแล้วเท่านั้น: COLLSCAN และ `$match` ค้างอยู่ข้างหลัง
+
+กฎจริงจึงไม่ใช่ "เขียน `$match` ก่อนเสมอ" (แม้เป็นสไตล์ที่ชัดที่สุด) แต่คือ "filter จะติดอยู่ท้ายก็ต่อเมื่อขึ้นกับ field ที่คำนวณหรือค่ารวม"
+
+## หน่วยความจำ: 100 MB ต่อ stage และใช้ดิสก์เป็นค่าเริ่มต้น
+
+stage แบบ blocking (`$sort`, `$group`) เก็บชุดข้อมูลทำงานในหน่วยความจำได้ถึง 100 MB ตั้งแต่ MongoDB 6.0 `allowDiskUseByDefault` เป็น `true` stage ที่เกินเพดานจึงล้นลงดิสก์แทนที่จะล้มเหลว ส่ง `{ allowDiskUse: false }` เพื่อได้พฤติกรรมแบบเดิม collection ขนาด 130 MB ทำให้เห็นความต่าง:
+
+```js
+// mongosh/pb-memory.js
+console.log(db.adminCommand({ getParameter: 1, allowDiskUseByDefault: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 1, internalDocumentSourceGroupMaxMemoryBytes: 1 }));
+for (let s = 0; s < 130000; s += 10000) db.big.insertMany(Array.from({ length: 10000 }, (_, k) => ({ n: s + k, r: Math.random(), pad: "x".repeat(1000) })), { ordered: false });
+console.log("big collection MB:", +(db.big.stats().size / 1048576).toFixed(0), "(over the 100 MB per-stage limit)");
+let t = Date.now();
+console.log("default            ->", db.big.aggregate([{ $sort: { r: 1 } }, { $project: { n: 1 } }]).toArray().length, "rows in", Date.now() - t, "ms");
+try { db.big.aggregate([{ $sort: { r: 1 } }, { $project: { n: 1 } }], { allowDiskUse: false }).toArray(); }
+catch (e) { console.log("allowDiskUse:false ->", e.codeName + ":", e.message.slice(0, 130)); }
+```
+
+```text
+{
+  allowDiskUseByDefault: true,
+  internalDocumentSourceGroupMaxMemoryBytes: Long('104857600'),
+  internalQueryMaxBlockingSortMemoryUsageBytes: Long('104857600'),
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1790752983, i: 53993 }),
+    signature: {
+      hash: Binary.createFromBase64('AAAAAAAAAAAAAAAAAAAAAAAAAAA=', 0),
+      keyId: Long('0')
+    }
+  },
+  operationTime: Timestamp({ t: 1790752983, i: 53993 })
+}
+big collection MB: 130 (over the 100 MB per-stage limit)
+default            -> 130000 rows in 444 ms
+allowDiskUse:false -> QueryExceededMemoryLimitNoDiskUseAllowed: Executor error during aggregate command on namespace: b2_bbc59d.big :: caused by :: Sort exceeded memory limit of 104857600 bytes,
+```
+
+## เคล็ดลับและข้อควรระวัง
+
+- `$match` แต่เนิ่น ๆ บน field ที่เก็บไว้ใช้ index ได้; optimizer ยกมันข้าม `$project`/`$set` และข้าม `$group` บน key ได้ แต่ไม่ข้าม field ที่คำนวณหรือ accumulator
+- ผสม inclusion (`1`) กับ exclusion (`0`) ใน `$project` เดียวเป็น error ยกเว้น `_id`
+- `"$price"` คือค่าของ field, `"price"` คือ string ตามตัวอักษร
+- ใช้ `explain` (`aplan` ข้างบน) ดูว่าอะไรถูกยก: `left in pipeline` แสดงสิ่งที่ stage แรกรับไปไม่ได้
+
+<Callout title="กรองเร็ว ปรับรูปช้า">
+สัญชาตญาณแรกสำหรับทุก pipeline: `$match` ให้เร็วกว่านี้ได้ไหม บ่อยครั้ง optimizer ทำให้ แต่ filter บนค่าที่คำนวณหรือยอดรวมของกลุ่มย้ายไม่ได้ - เก็บและทำ index ค่านั้น หรือ pre-filter บน field ที่มี index
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ "order ที่มูลค่าอย่างน้อย 100 ด้วย pipeline ที่ใช้ index ได้" AI เขียนว่า:
+
+<SpotTheBug lang="js" code={`// AI comment: "price is indexed, and $match is the only filter - the index handles it"
+db.sales.aggregate([
+  { $project: { title: 1, revenue: { $multiply: ["$price", "$quantity"] } } },
+  { $match: { revenue: { $gte: 100 } } },
+]);`}>
+
+`revenue` มีหลัง `$project` เท่านั้น optimizer จึงยก filter ไม่ได้: plan C ข้างบนสแกนทั้ง 200 000 document และไม่มี index บน `price` ใดตอบการทดสอบ `price x quantity` ได้ ทางแก้สองแบบ วัดผลด้านล่างทั้งคู่: เพิ่ม pre-filter หยาบที่ index รับได้ (`revenue >= 100` แปลว่า `price >= 20` เพราะ `quantity <= 5` ลดการอ่านเหลือ 57 143 document) หรือเก็บ `revenue` ไว้ใน document ทำ index แล้ว match บน field ที่เก็บ (14 111 key ตรงกับคำตอบพอดี):
+
+```js
+// mongosh/pb-bug.js
+const rev = { $multiply: ["$price", "$quantity"] };
+const buggy = [{ $project: { title: 1, revenue: rev } }, { $match: { revenue: { $gte: 100 } } }];            // filter on a computed field
+const coarse = [{ $match: { price: { $gte: 20 } } }, ...buggy];                                                 // revenue >= 100 implies price >= 20 (quantity <= 5)
+console.log("buggy   (filter on a computed field):", aplan(buggy));
+console.log("coarse pre-filter on the index      :", aplan(coarse));
+db.sales.updateMany({}, [{ $set: { revenue: rev } }]);                                                            // store the value once ...
+db.sales.createIndex({ revenue: 1 });                                                                             // ... and index it
+const fixed = [{ $match: { revenue: { $gte: 100 } } }, { $project: { title: 1, revenue: 1 } }];
+console.log("stored + indexed revenue             :", aplan(fixed));
+const n = (p) => db.sales.aggregate(p).toArray().length;
+console.log("rows returned by all three:", n(buggy), n(coarse), n(fixed));
+assert.ok(n(buggy) === n(coarse) && n(coarse) === n(fixed));
+```
+
+```text
+buggy   (filter on a computed field): PROJECTION_DEFAULT > COLLSCAN  keys=0 docs=200000  | left in pipeline: $match
+coarse pre-filter on the index      : PROJECTION_DEFAULT > FETCH > IXSCAN(price_1)  keys=57143 docs=57143  | left in pipeline: $match
+stored + indexed revenue             : PROJECTION_SIMPLE > FETCH > IXSCAN(revenue_1)  keys=14111 docs=14111
+rows returned by all three: 14111 14111 14111
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+คิดว่า optimizer เป็นเพื่อนร่วมงานที่ย้าย filter ของคุณไปก่อนเมื่อพิสูจน์ได้ว่า filter ไม่ต้องใช้สิ่งที่เกิดระหว่างทาง ส่วนที่เหลือคุณควบคุม: filter ที่ขึ้นกับค่าที่คำนวณหรือยอดกลุ่มต้องอยู่ที่ที่ค่ามีอยู่ ดังนั้นยอมรับการสแกน หรือ pre-filter บนสิ่งที่เก็บไว้ หรือเก็บค่านั้น
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| `$match` ไว้ต้น pipeline | ใช้ index ได้ ตัด document ทิ้งก่อนงานหนัก ประหยัด CPU และ memory | ต้องเขียนเงื่อนไข filter ให้ตรงกับ field ที่ยังไม่แปลงรูป บางครั้งซับซ้อนกว่าการ filter หลังคำนวณ |
-| `$match` ไว้ท้าย pipeline (หลังคำนวณ) | เขียนเงื่อนไขบน field ที่คำนวณแล้วได้ตรงไปตรงมา | ใช้ index ไม่ได้ และเสียแรงประมวลผล document ที่สุดท้ายก็โดนทิ้ง |
-| `$project` ระบุ field ทีละตัว (explicit list) | คุม shape ของผลลัพธ์ได้แม่นยำ ลดขนาด document ที่ส่งต่อ | พอ schema เปลี่ยน (เพิ่ม/ลบ field) ต้องกลับมาแก้ `$project` ทุกจุดที่ list field ไว้ |
+| `$match` ก่อนบน field ที่เก็บไว้ | ใช้ index: 13 422 key ไม่ใช่ 200 000 document | เงื่อนไขต้องเป็น field ที่เก็บไว้ |
+| `$match` บน field ที่คำนวณ | แสดงคำถามจริงตรง ๆ | COLLSCAN 200 000 document |
+| เก็บและทำ index ค่าที่คำนวณ | 14 111 key; ตรงพอดี | ต้องดูแลตอนเขียน และมี index เพิ่ม |
+| `$project` ระบุ field ชัดเจน | รูปผลลัพธ์แม่นยำ | field ใหม่ต้องเพิ่มทุกที่ |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **วาง `$match` หลัง `$group` หรือ `$project` แล้วหวังว่า index จะยังช่วย** — ทันทีที่ document ผ่าน `$group`/`$project` ก็ไม่ใช่ document ที่เก็บบนดิสก์อีกต่อไป index ของ collection จึงใช้ไม่ได้แล้ว
-- **ลืมใส่ `$project` ท้าย pipeline** — ถ้าไม่จัดรูปผลลัพธ์สุดท้าย ฝั่ง client จะได้ document ที่มี field เกินความจำเป็น รวมถึง field ภายในที่ตั้งใจใช้แค่ตอนคำนวณ ทำให้ payload บวมโดยเปล่าประโยชน์
-- **ผสม inclusion (`1`) กับ exclusion (`0`) ใน `$project` เดียวกัน แล้วงงว่าทำไม error** — MongoDB ยอมให้ผสมได้เฉพาะกับ `_id` เท่านั้น field อื่นต้องเลือกอย่างใดอย่างหนึ่ง
+- **"`$match` หลัง `$project` ใช้ index ไม่ได้"** - plan B ใช้ `price_1` (13 422 key)
+- **"`$match` หลัง `$group` ช้าเสมอ"** - filter บน key ของกลุ่มถูกยกไปก่อน (plan D, covered)
+- **"ลำดับ stage จึงไม่สำคัญ"** - filter บน `revenue` หรือ `n` ค้างท้ายและสแกน 200 000 document
+- **"`$sort` ใหญ่ล้มเหลวที่ 100 MB"** - มันล้นลงดิสก์และเสร็จ (130 000 แถวใน 449 ms) เว้นแต่ `allowDiskUse: false`
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **Analytics dashboard** — query ที่ filter ตามช่วงวันที่และ status ก่อน (`$match` ต้น pipeline บน field ที่มี index) แล้วค่อย `$project` ให้เหลือแค่ field ที่กราฟต้องใช้ ช่วยให้ dashboard ที่อ่านข้อมูลหลายล้าน document ต่อวันตอบกลับได้ในไม่กี่ร้อย millisecond
->
-> **รายงานอสังหาริมทรัพย์ทั่วไป** — filter บน field อย่าง region และ status ด้วย `$match` ก่อนเสมอ เพื่อให้ index ตัด document ส่วนใหญ่ทิ้งได้ทันที แล้วค่อย `$project` ให้เหลือเฉพาะ field ที่ทีมขายต้องเห็นในรายงาน — Keller Williams ใช้ MongoDB aggregation pipeline ในลักษณะนี้กับข้อมูล listing บน Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
+> คู่มือ MongoDB บันทึกพฤติกรรมของ optimizer ที่วัดที่นี่ไว้เป็นกฎที่มีชื่อ ("$match ... moves any filters ... that do not require values computed in the projection stage") พร้อมกรณีย้อนกลับที่ค่าที่คำนวณตรึง filter ไว้กับที่ ([pipeline optimization](https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/), ตรวจ 2026-09-30) Keller Williams ใช้ pipeline สไตล์นี้กับข้อมูลรายการอสังหาฯ บน Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (pipeline match-project คืนแถว revenue ชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizBasics = [
   {
-    q: 'ทำไมการวาง $match เป็น stage แรกของ pipeline ถึงดีที่สุด?',
+    q: 'ทำไมจึงควรวาง $match เป็น stage แรกของ pipeline',
     options: [
-      'เป็น stage เดียวที่ยอมให้รันก่อนได้',
-      'เพื่อให้เอนจินใช้ index และตัด stream ก่อนงานที่ตามมา',
-      'เพราะ $match วางที่อื่นไม่ได้',
-      'เพราะช่วยเรียงลำดับผลลัพธ์ให้อัตโนมัติ',
+      'เป็น stage เดียวที่รันก่อนได้',
+      'เพื่อให้ engine ใช้ index และอ่าน document น้อยลงก่อนงานถัดไป',
+      'เพราะ $match ไปอยู่ที่อื่นไม่ได้',
+      'มันเรียงผลลัพธ์ให้อัตโนมัติ',
     ],
     answer: 1,
+    explain: '{ price: { $gte: 24 } } นำหน้าอ่าน 13 422 key และ document; filter เดียวกันบน field ที่คำนวณสแกนทั้ง 200 000',
   },
   {
-    q: 'ใน stage $project, "$price" อ้างถึงอะไร?',
+    q: 'ใน stage $project "$price" หมายถึงอะไร',
     options: [
-      'ข้อความตัวอักษรคำว่า price',
-      'ค่าที่เก็บอยู่ใน field price ของแต่ละ document',
-      'field ใหม่ชื่อ price ที่ตั้งค่าเป็นศูนย์',
+      'ข้อความ price ตามตัวอักษร',
+      'ค่าที่เก็บใน field price ของแต่ละ document',
+      'field ใหม่ชื่อ price ที่ตั้งเป็นศูนย์',
       'ราคาของทั้ง collection',
     ],
     answer: 1,
+    explain: '{ $multiply: ["$price", "$quantity"] } ให้ revenue 50 สำหรับ price 25 x quantity 2',
   },
   {
-    q: 'รูปแบบไหนของ $project ที่ทำใน stage เดียวไม่ได้?',
+    q: 'รูปแบบ $project ใดใช้ใน stage เดียวไม่ได้',
     options: [
-      'ระบุเก็บหลาย field ด้วย 1',
-      'ระบุทิ้งหลาย field ด้วย 0',
+      'รวมหลาย field ด้วย 1',
+      'ตัดหลาย field ด้วย 0',
       'ผสม 1 กับ 0 สำหรับ field ที่ไม่ใช่ _id',
       'คำนวณ field ด้วย expression',
     ],
     answer: 2,
+    explain: '{ title: 1, buyer: 0 } ล้มเหลวด้วย "Cannot do exclusion on field buyer in inclusion projection"',
+  },
+  {
+    q: 'pipeline คือ [ $project (เพิ่ม revenue เก็บ price), แล้ว $match { price >= 24 } ] $match ยังใช้ index ของ price หรือไม่',
+    options: [
+      'ไม่ $match หลัง $project ใช้ index ไม่ได้เลย',
+      'ใช่: optimizer ย้ายส่วนของ $match ที่ไม่ต้องใช้ค่าที่คำนวณมาไว้หน้า $project',
+      'เฉพาะเมื่อมี allowDiskUse',
+      'เฉพาะ replica set',
+    ],
+    answer: 1,
+    explain: 'plan B เป็น PROJECTION_DEFAULT > FETCH > IXSCAN(price_1) ด้วย 13 422 key และ optimizedPipeline: true; มีเพียง filter บน revenue ที่คำนวณ (plan C) ที่ค้างอยู่ข้างหลังและกลายเป็น COLLSCAN',
+  },
+  {
+    q: 'แก้ $match ที่ช้าบนค่าที่คำนวณอย่าง price x quantity อย่างไร',
+    options: [
+      'ใช้ $sort ก่อน',
+      'เก็บค่าที่คำนวณไว้ใน document ทำ index แล้ว $match บน field ที่เก็บ (14 111 key แทน 200 000 document)',
+      'ย้าย $match ไปหลัง $group',
+      'เร่งไม่ได้',
+    ],
+    answer: 1,
+    explain: 'revenue ที่เก็บพร้อม revenue_1 ตรวจ 14 111 key; pre-filter หยาบบน price (57 143 key) ก็ใช้ได้โดยไม่ต้องเปลี่ยนข้อมูล; ทั้งสามคืน 14 111 แถว',
+  },
+  {
+    q: '$sort ขนาด 130 MB รันด้วยค่าเริ่มต้นบน MongoDB 8 เกิดอะไรขึ้น',
+    options: [
+      'ล้มเหลวที่ 100 MB',
+      'ล้นลงดิสก์และสำเร็จ; ล้มเหลวเฉพาะเมื่อ allowDiskUse: false',
+      'ถูกตัดทอนเงียบ ๆ',
+      'รอ RAM เพิ่ม',
+    ],
+    answer: 1,
+    explain: 'allowDiskUseByDefault เป็น true: 130 000 แถวใน 449 ms; เมื่อ allowDiskUse: false เกิด QueryExceededMemoryLimitNoDiskUseAllowed',
   },
 ]
 
