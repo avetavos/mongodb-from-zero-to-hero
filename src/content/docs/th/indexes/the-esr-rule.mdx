@@ -1,6 +1,6 @@
 ---
 title: กฎ ESR
-description: จัดลำดับฟิลด์ของ compound index แบบ Equality, Sort, Range เพื่อรีดประโยชน์จาก index อันเดียวให้ได้มากที่สุด พร้อมตัวอย่างที่ทำให้เห็นว่าทำไมลำดับจึงชนะ
+description: เรียง field ของ compound index แบบ Equality, Sort, Range - วัดด้วย explain บน 200 000 document - plan ที่มีและไม่มี stage SORT ผลของ limit และกรณีที่กฎนี้แพ้
 sidebar:
   order: 3
 ---
@@ -9,19 +9,43 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-บทเรียนก่อนทิ้งคำถามค้างไว้: เมื่อคุณสร้าง compound index สำหรับ query หนึ่ง ฟิลด์ควรเรียงลำดับอย่างไร คำตอบคือกฎสั้นๆ ที่จำง่ายชื่อ **ESR** — **Equality, Sort, Range** ระบุฟิลด์ที่ query ใช้สำหรับการจับคู่แบบเป๊ะก่อน แล้วตามด้วยฟิลด์ที่คุณเรียง แล้วตามด้วยฟิลด์ใดที่คุณ query เป็นช่วง ทำตามลำดับนั้นแล้ว index อันเดียวสามารถตอบสนองทั้งตัวกรอง การเรียง และการสแกนช่วงในรอบเดียว โดยไม่ต้องเรียงในหน่วยความจำเพิ่ม และไม่มีการอ่านที่สูญเปล่า
+บทก่อนทิ้งคำถามไว้: เมื่อสร้าง compound index ให้ query ควรเรียง field อย่างไร คำตอบคือกฎสั้น ๆ จำง่ายชื่อ **ESR** - **Equality, Sort, Range** ใส่ field ที่ query จับคู่ตรง ๆ ก่อน แล้วตามด้วย field ที่ sort แล้วท้ายสุดคือ field ที่ query แบบช่วง ทำตามลำดับนี้ index เดียวตอบทั้ง filter, sort และ range ในรอบเดียวโดยไม่ต้อง sort ในหน่วยความจำ
 
-มาลองทำกันให้ตลอดด้วย query รูปธรรมกับ `members` ในห้องสมุดของเรา
+ตัวเลขด้านล่างมาจาก mongo 8.3.11 และ mongosh 2.11.1 บน Mac เครื่องเดียว (Node driver 7.7.0 สำหรับแท็บ Node) ข้อมูล: member 200 000 คน 10 เมือง (Berlin 20 000) `fines` 0-6 `joined` 26 ปี `score` 0-999 บทนี้เตรียมข้อมูลเองและใช้ helper `plan()` บรรทัดเดียวเดิม (stage ผลลัพธ์ key ของ index document ที่อ่าน)
 
-## query ที่เรากำลังเพิ่มประสิทธิภาพ
+```js
+// mongosh/esr-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    return { name: "m" + i, joined: NumberInt(2000 + (Math.floor(i / 10) % 26)), fines: i % 7,
+             score: Math.floor(i / 10) % 1000, city: cities[i % 10] };
+  }), { ordered: false });
+}
+const q = { city: "Berlin", fines: { $gt: 2 } };
+console.log("members:", db.members.countDocuments(), "| Berlin:", db.members.countDocuments({ city: "Berlin" }), "| Berlin with fines > 2:", db.members.countDocuments(q));
+```
 
-สมมติว่าเราต้องการสมาชิกทุกคนใน city ที่กำหนด ที่มี fines มากกว่าสอง เรียงตามปีที่เข้าร่วม query นี้แตะสามฟิลด์ในสามรูปแบบที่ต่างกัน:
+```text
+members: 200000 | Berlin: 20000 | Berlin with fines > 2: 11428
+```
 
-- `city` — การจับคู่แบบ **equality**: `city` เท่ากับค่าเป๊ะค่าหนึ่ง
-- `joined` — ฟิลด์ **sort**: ผลลัพธ์กลับมาเรียงตามปีที่เข้าร่วม
-- `fines` — เป็น **range**: `fines` มากกว่าสอง เป็นช่วงค่ามากกว่าค่าเดียว
+## query ที่เรากำลังปรับให้เร็ว
+
+สมาชิก Berlin ทุกคนที่ fines เกินสอง เรียงตามปีที่เข้าร่วม สาม field สามบทบาท:
+
+- `city` - แบบ **equality**: ค่าเดียวเป๊ะ
+- `joined` - field ที่ **sort**
+- `fines` - แบบ **range**: `$gt: 2` ช่วงของค่า
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -41,161 +65,265 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
   <TabItem label="Python">
     ```python
-    list(
-        db.members
-        .find({"city": "Berlin", "fines": {"$gt": 2}})
-        .sort("joined", 1)
-    )
+    list(db.members.find({"city": "Berlin", "fines": {"$gt": 2}}).sort("joined", 1))
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     opts := options.Find().SetSort(bson.D{{Key: "joined", Value: 1}})
-    cur, err := coll.Find(
-        ctx,
-        bson.M{"city": "Berlin", "fines": bson.M{"$gt": 2}},
-        opts,
-    )
+    cur, err := coll.Find(ctx, bson.M{"city": "Berlin", "fines": bson.M{"$gt": 2}}, opts)
     if err != nil {
+        return err
+    }
+    var docs []bson.M
+    if err := cur.All(ctx, &docs); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let cur = coll
-        .find(doc! { "city": "Berlin", "fines": { "$gt": 2 } })
+    let mut cursor = coll
+        .find(doc! { "city": "Berlin", "fines": doc! { "$gt": 2 } })
         .sort(doc! { "joined": 1 })
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-## การนำ ESR ไปใช้
+## ใช้ ESR
 
-ESR บอกว่า: ฟิลด์ equality ก่อน, ฟิลด์ sort ที่สอง, ฟิลด์ range ท้ายสุด นั่นให้ index `{ city: 1, joined: 1, fines: 1 }`:
+ESR ให้ `{ city: 1, joined: 1, fines: 1 }` เพื่อเทียบ เรายังสร้างลำดับผิดที่ล่อใจ ซึ่งวาง range ก่อน sort คือ `{ city: 1, fines: 1, joined: 1 }` (Equality, Range, Sort) และตั้งชื่อชัดเจนให้ทั้งคู่:
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ city: 1, joined: 1, fines: 1 })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex({ city: 1, joined: 1, fines: 1 });
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("city", 1), ("joined", 1), ("fines", 1)])
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys: bson.D{
-                {Key: "city", Value: 1},
-                {Key: "joined", Value: 1},
-                {Key: "fines", Value: 1},
-            },
-        },
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    coll.create_index(
-        IndexModel::builder()
-            .keys(doc! { "city": 1, "joined": 1, "fines": 1 })
-            .build(),
-    )
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
+```js
+// mongosh/esr-create.js
+console.log(db.members.createIndex({ city: 1, joined: 1, fines: 1 }, { name: "ESR" }));   // Equality, Sort, Range
+console.log(db.members.createIndex({ city: 1, fines: 1, joined: 1 }, { name: "ERS" }));   // Equality, Range, Sort
+```
 
-นี่คือเหตุผลที่ลำดับนี้ใช้ได้:
+```text
+ESR
+ERS
+```
+
+แท็บ Node.js สร้าง index แบบ ESR บน collection 5 000 document ของตัวเองและตรวจว่า plan ไม่มี stage `SORT`:
+
+```js
+// app/esr-index.mjs
+const c = db.collection("members");
+await c.insertMany(Array.from({ length: 5000 }, (_, i) => ({ city: ["Berlin", "Oslo"][i % 2], joined: 2000 + (i % 26), fines: i % 7 })));
+await c.createIndex({ city: 1, joined: 1, fines: 1 }, { name: "ESR" });
+const e = await c.find({ city: "Berlin", fines: { $gt: 2 } }).sort({ joined: 1 }).explain("queryPlanner");
+const stages = []; for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage);
+console.log(stages.join(" > "));
+if (stages.includes("SORT")) throw new Error("ESR order should not need a SORT");
+```
+
+```text
+FETCH > IXSCAN
+```
 
 export const esrDiagram = `flowchart TB
   E["Equality: city equals Berlin"] --> EX["Index seeks to one narrow city block"]
   EX --> S["Sort: joined ascending"]
-  S --> SX["Inside that block, docs are already ordered by joined — no extra sort"]
+  S --> SX["Inside that block, entries are already ordered by joined - no extra sort"]
   SX --> R["Range: fines greater than 2"]
-  R --> RX["Walk the matching join order, keeping only fines above 2"]
+  R --> RX["Walk the joined order, keeping only fines above 2"]
   RX --> Out["Results: filtered, sorted, no in-memory sort step"]`
 
-<Mermaid code={esrDiagram} title="Equality บีบลงเหลือบล็อกเดียว Sort ถูกตอบสนองด้วยลำดับของ index และ Range คือการเดินขั้นสุดท้าย" />
+<Mermaid code={esrDiagram} title="Equality จำกัดเหลือบล็อกเดียว Sort ตอบด้วยลำดับของ index และ Range เป็นตัวกรองสุดท้าย" />
 
-equality บน `city` ตรึงการค้นหาไว้ที่ชิ้นต่อเนื่องชิ้นเดียวของ index ภายในชิ้นนั้น document ถูกวางเรียงตามลำดับ `joined` อยู่แล้ว ดังนั้น MongoDB จึงคืน document แบบเรียงโดยไม่ต้องมีขั้นตอนเรียงแยกต่างหาก range บน `fines` มาท้ายสุดเพราะ range ทำให้ฟิลด์ของ index ที่ตามมาไม่เรียงลำดับ — ถ้า `fines` มาก่อน `joined` ปีที่เข้าร่วมภายในช่วงนั้นจะกระจัดกระจาย และ MongoDB จะต้องเรียง document ในหน่วยความจำหลังการอ่าน
+## วัดผลทั้งสามลำดับ
 
-## ทำไมลำดับอื่นจึงแพ้
+```js
+// mongosh/esr-measure.js
+const q = { city: "Berlin", fines: { $gt: 2 } };
+console.log("ESR  {city, joined, fines}:", plan(db.members.find(q).sort({ joined: 1 }).hint("ESR")));
+console.log("ERS  {city, fines, joined}:", plan(db.members.find(q).sort({ joined: 1 }).hint("ERS")));
+console.log("planner, no hint          :", plan(db.members.find(q).sort({ joined: 1 })));
+const ex = db.members.find(q).sort({ joined: 1 }).explain();
+console.log("rejected plans            :", ex.queryPlanner.rejectedPlans.map((p) => { let s = p; while (s.inputStage) s = s.inputStage; return s.indexName; }));
+const ids = (n) => db.members.find(q, { _id: 1, joined: 1 }).sort({ joined: 1 }).hint(n).toArray().map((d) => d.joined).join();
+assert.strictEqual(ids("ESR"), ids("ERS"));                                    // same join-year order from both indexes
+assert.ok(!plan(db.members.find(q).sort({ joined: 1 }).hint("ESR")).includes("SORT"));
+assert.ok(plan(db.members.find(q).sort({ joined: 1 }).hint("ERS")).includes("SORT"));
+```
 
-เปรียบเทียบกับลำดับที่ดูน่าเลือกแต่ผิด `{ city: 1, fines: 1, joined: 1 }` ซึ่งวาง range ไว้ก่อน sort equality บน `city` ยังคงใช้ได้ แต่ `fines: { $gt: 2 }` เป็น range และเมื่อ index เดินผ่าน range แล้ว ทุกฟิลด์ที่ตามมาจะไม่อยู่ในช่วงที่เรียงต่อเนื่องเดียวอีกต่อไป ดังนั้น `joined` จึงใช้สำหรับการเรียงไม่ได้ และ MongoDB ก็ถอยกลับไปเรียงในหน่วยความจำแบบ blocking ของชุดผลลัพธ์ทั้งหมด query ยังคงคืนคำตอบที่ถูกต้อง — เพียงแต่ช้ากว่าและใช้หน่วยความจำมากกว่า การเรียงที่ซ่อนอยู่นั้นแหละคือสิ่งที่ ESR มีไว้เพื่อหลีกเลี่ยง
+```text
+ESR  {city, joined, fines}: FETCH > IXSCAN(ESR)  returned=11428 keys=11455 docs=11428
+ERS  {city, fines, joined}: FETCH > SORT > IXSCAN(ERS)  returned=11428 keys=11428 docs=11428
+planner, no hint          : FETCH > IXSCAN(ESR)  returned=11428 keys=11455 docs=11428
+rejected plans            : [ 'ERS' ]
+```
 
-วิธีจำที่มีประโยชน์: range "ผลาญ" การเรียงทั้งหมดของฟิลด์ที่ตามมา จึงต้องวางไว้ท้ายสุด หลังจากที่คุณได้การบีบด้วย equality และการเรียงมาฟรีแล้ว
+index แบบ ESR คืนผลลัพธ์ 11 428 รายการเรียงตามปีจาก index โดยตรง: ตรวจ 11 455 key (เกินผลลัพธ์ 27 - server กระโดดข้ามระหว่างค่า `joined`) และ **ไม่มี stage `SORT`** ส่วน index แบบ E-R-S เจอ 11 428 key เท่ากัน แต่ออกมาจัดกลุ่มตาม `fines` ไม่ใช่ `joined` plan จึงแทรก `FETCH > SORT > IXSCAN`: ทั้ง 11 428 entry ถูก sort ในหน่วยความจำก่อน fetch document ปล่อยให้ planner เลือกเอง มันเลือก ESR และแสดง ERS ใน `rejectedPlans` คำตอบเดียวกัน งานต่างกัน - และ SORT คือส่วนที่โตตามจำนวนผลลัพธ์และชนเพดานหน่วยความจำ
 
-**ใน Compass:** สร้าง index ผู้ท้าชิงในแท็บ **Indexes** แล้วรัน query ในแท็บ **Explain Plan** เมื่อ ESR ถูกตอบสนองคุณจะเห็นการเรียงถูกจัดการโดย index เมื่อไม่ใช่ plan จะแสดงขั้นตอน sort ที่ชัดเจนซึ่งกินผลลัพธ์เข้าไป
+`hint()` (ที่ใช้ข้างบน) บังคับ index ตามชื่อเพื่อเทียบลำดับแบบเคียงกัน อย่าทิ้งไว้ในโค้ด production เพราะมันทำให้ planner ปรับตัวตามข้อมูลไม่ได้
 
-## เคล็ดลับและจุดพลาด
+### เมื่อมี limit ช่องว่างกว้างขึ้น
 
-- ESR เป็นค่าตั้งต้น ไม่ใช่กฎตายตัว เป็นจุดตั้งต้นที่ถูกต้องสำหรับ query รูปแบบ "filter, sort, range" ที่พบบ่อย แต่ยืนยันด้วย `explain` บนข้อมูลจริงของคุณเสมอ
-- ฟิลด์ equality มีได้มากกว่าหนึ่ง และทั้งหมดอยู่ด้านหน้า เช่นเดียวกับฟิลด์ range หลายฟิลด์ที่ท้ายสุด ส่วนฟิลด์ sort ฟิลด์เดียวอยู่ตรงกลาง
-- ผลตอบแทนของการทำ ESR ให้ถูกคือการกำจัดการเรียงในหน่วยความจำ plan ที่มีขั้นตอน sort ชัดเจนบนชุดผลลัพธ์ขนาดใหญ่คือสัญญาณว่าลำดับฟิลด์ของคุณกำลังต่อสู้กับ query
+```js
+// mongosh/esr-limit.js
+const q = { city: "Berlin", fines: { $gt: 2 } };
+console.log("ESR  first 20:", plan(db.members.find(q).sort({ joined: 1 }).limit(20).hint("ESR")));
+console.log("ERS  first 20:", plan(db.members.find(q).sort({ joined: 1 }).limit(20).hint("ERS")));
+```
+
+```text
+ESR  first 20: LIMIT > FETCH > IXSCAN(ESR)  returned=20 keys=21 docs=20
+ERS  first 20: FETCH > SORT > IXSCAN(ERS)  returned=20 keys=11428 docs=20
+```
+
+index ที่เรียงแล้วให้ server หยุดหลัง 20 entry แรก (21 key, 20 document) ส่วนลำดับผิดยังต้องอ่านและ sort ทั้ง 11 428 key เพื่อรู้ว่า 20 รายการแรกคืออะไร
+
+**In Compass:** สร้าง index ผู้สมัครในแท็บ **Indexes** แล้วรัน query ในแท็บ **Explain Plan** เมื่อ ESR ถูกต้องการ sort ทำโดย index เมื่อไม่ถูก plan จะแสดง stage sort ชัดเจน
+
+## เมื่อกฎนี้แพ้
+
+ESR ลดการ sort ไม่ได้ลดจำนวน key ที่อ่าน ถ้า range คัดได้ *มาก* และ field ที่ sort มีค่าต่างกันมาก การเดินทุก key ตามลำดับ sort เพื่อทดสอบ range อาจแพงกว่าการ sort ผู้รอดไม่กี่รายการ สมาชิก Berlin ที่ `score >= 995` มี 100 จาก 20 000 เรียงตาม `name` (ไม่ซ้ำ):
+
+```js
+// mongosh/esr-exception.js
+db.members.createIndex({ city: 1, name: 1, score: 1 }, { name: "ESR_name" });     // Equality, Sort, Range
+db.members.createIndex({ city: 1, score: 1, name: 1 }, { name: "ERS_name" });     // Equality, Range, Sort
+const q = { city: "Berlin", score: { $gte: 995 } };                                   // a very selective range: 100 of 20 000
+console.log("ESR  all 100 :", plan(db.members.find(q).sort({ name: 1 }).hint("ESR_name")));
+console.log("ERS  all 100 :", plan(db.members.find(q).sort({ name: 1 }).hint("ERS_name")));
+console.log("ESR  first 20:", plan(db.members.find(q).sort({ name: 1 }).limit(20).hint("ESR_name")));
+console.log("ERS  first 20:", plan(db.members.find(q).sort({ name: 1 }).limit(20).hint("ERS_name")));
+console.log("Same query, sort on joined (26 distinct values):");
+db.members.createIndex({ city: 1, joined: 1, score: 1 }, { name: "ESR_joined" });
+console.log("ESR joined   :", plan(db.members.find(q).sort({ joined: 1 }).hint("ESR_joined")));
+```
+
+```text
+ESR  all 100 : FETCH > IXSCAN(ESR_name)  returned=100 keys=20001 docs=100
+ERS  all 100 : FETCH > SORT > IXSCAN(ERS_name)  returned=100 keys=100 docs=100
+ESR  first 20: LIMIT > FETCH > IXSCAN(ESR_name)  returned=20 keys=4446 docs=20
+ERS  first 20: FETCH > SORT > IXSCAN(ERS_name)  returned=20 keys=100 docs=20
+Same query, sort on joined (26 distinct values):
+ESR joined   : FETCH > IXSCAN(ESR_joined)  returned=100 keys=127 docs=100
+```
+
+ที่นี่ ESR อ่านทุก key ของ Berlin (20 001) เพื่อหา 100 รายการ ส่วน E-R-S seek ตรงไป 100 รายการแล้ว sort เมื่อมี `limit(20)` ESR หยุดที่ 4 446 key ยังมากกว่า E-R-S ราว 44 เท่า บรรทัดสุดท้ายแสดงอีกด้าน: เมื่อ sort ด้วย `joined` ที่มีเพียง 26 ค่า ESR อ่าน 127 key - server กระโดดข้ามระหว่าง 26 ค่า - กรณียกเว้นจึงต้องการ field ที่ sort ซึ่งมี cardinality สูง นี่คือเหตุผลที่กฎเป็นค่าตั้งต้นที่ต้องยืนยันด้วย `explain` ไม่ใช่กฎตายตัว
+
+## เคล็ดลับและข้อควรระวัง
+
+- ESR เป็นค่าตั้งต้น ไม่ใช่กฎตายตัว: ยืนยันด้วย `explain` บนข้อมูลของคุณ และเทียบลำดับด้วย `hint()`
+- field แบบ equality (หลายตัวก็ได้) ไปก่อนทั้งหมด field sort ตัวเดียวต่อมา และ range ท้ายสุด
+- ผลตอบแทนคือกำจัด SORT แบบ blocking (และเพดานหน่วยความจำ) และหยุดเร็วด้วย `limit`
 
 <Callout title="Equality, Sort, Range">
-จัดลำดับฟิลด์ของ compound index ตามวิธีที่ query เรียกใช้: การจับคู่แบบเป๊ะก่อน, ฟิลด์ sort ถัดมา, การเปรียบเทียบแบบ range ท้ายสุด ลำดับเดียวนั้นให้ index หนึ่งอันบีบ เรียง และสแกนได้โดยไม่ต้องมีการเรียงแยกต่างหาก
+เรียง field ของ compound index ตามวิธีที่ query ใช้: จับคู่ตรงก่อน field sort ต่อมา และการเปรียบเทียบช่วงท้ายสุด ลำดับนี้ให้ index เดียวจำกัด เรียง และสแกนโดยไม่ต้อง sort แยก - เว้นแต่ range ที่คัดมากบน sort ที่ cardinality สูงทำให้ลำดับตรงข้ามถูกกว่า จงวัดผล
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ index สำหรับ "สมาชิก Berlin ที่ fines เกิน 2 เรียงตามปีที่เข้าร่วม" AI เรียง field ตามลำดับที่ปรากฏใน query:
+
+<SpotTheBug lang="js" code={`// AI comment: "the index contains city, fines and joined,
+// so the filter AND the sort are both served by the index"
+await members.createIndex({ city: 1, fines: 1, joined: 1 });
+const rows = await members.find({ city: "Berlin", fines: { $gt: 2 } }).sort({ joined: 1 }).toArray();`}>
+
+การมี field ที่ sort ไม่เท่ากับการเรียงเพื่อมัน เพราะ `fines` เป็น range key จึงออกมาจัดกลุ่มตาม `fines` และ plan ยังมี `SORT` แบบ blocking เทียบ index ของ AI กับแบบ ESR:
+
+```js
+// mongosh/esr-bug.js
+// AI: "the index contains city, fines and joined, so filter AND sort are both served by it"
+const q = { city: "Berlin", fines: { $gt: 2 } };
+const stages = (name) => { const s = []; for (let p = db.members.find(q).sort({ joined: 1 }).hint(name).explain().queryPlanner.winningPlan; p; p = p.inputStage) s.push(p.stage); return s.join(" > "); };
+console.log("AI index  { city, fines, joined }:", stages("ERS"));
+console.log("ESR index { city, joined, fines }:", stages("ESR"));
+```
+
+```text
+AI index  { city, fines, joined }: FETCH > SORT > IXSCAN
+ESR index { city, joined, fines }: FETCH > IXSCAN
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+ลองนึกภาพ index เป็นรายการ tuple ที่เรียงแล้ว equality ตรึงพิกัดแรก คุณจึงอยู่ในรายการย่อยที่เรียงหนึ่งอัน ถ้าพิกัดถัดไปคือ field sort รายการย่อยนั้นก็อยู่ในลำดับที่ต้องการแล้ว ถ้าพิกัดถัดไปเป็น range คุณกำลังอ่านหลายช่วงที่เรียงแล้ว (หนึ่งช่วงต่อหนึ่งค่าใน range) ที่ต้องรวมกัน - ซึ่งก็คืองานของ stage SORT
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| เรียงฟิลด์ตาม ESR อย่างเคร่งครัด | index อันเดียวรองรับได้หลาย query shape ที่มี pattern filter/sort/range คล้ายกัน ลดจำนวน index ที่ต้องดูแล | ต้องมีวินัยตรวจสอบทุกครั้งที่ query pattern เปลี่ยน ไม่ใช่แค่สร้างแล้วจบ |
-| เรียงฟิลด์แบบเฉพาะกิจตาม query ที่เขียนอยู่ตรงหน้า | เขียนเร็ว ไม่ต้องคิดเยอะตอนเริ่มต้น | index ผูกติดกับ query shape เดียว เมื่อ query เปลี่ยนต้องสร้าง index ใหม่เพิ่มเรื่อยๆ |
+| ลำดับแบบ ESR | ไม่มี SORT; หยุดเร็วด้วย `limit` (21 key สำหรับ 20 แถว) | อาจอ่าน key มากกว่าเมื่อ range คัดมาก (20 001 เทียบ 100) |
+| ลำดับ E-R-S (range ก่อน sort) | key น้อยที่สุดเมื่อ range คัดมาก | SORT แบบ blocking ในหน่วยความจำ; หยุดเร็วไม่ได้ (11 428 key สำหรับ 20 แถว) |
+| เรียง field ตามใจ | เขียนเร็ว | ทุกรูปแบบ query ต้องมี index เพิ่ม |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **วางฟิลด์ range ไว้ก่อนฟิลด์ sort** — range ทำให้ลำดับของฟิลด์ index ที่ตามมาไม่ต่อเนื่องอีกต่อไป ผลคือ MongoDB ต้องเรียงผลลัพธ์ในหน่วยความจำแม้จะมี index ก็ตาม
-- **คิดว่า ESR เป็นกฎตายตัวที่ใช้ได้กับทุก query** — ESR เป็นจุดเริ่มต้นที่ดีสำหรับ pattern filter-sort-range ทั่วไปเท่านั้น ต้องยืนยันด้วย `explain()` เสมอ โดยเฉพาะ query ที่ซับซ้อนกว่านั้น
-- **ใส่ฟิลด์ equality หลายตัวปนกับฟิลด์ sort โดยไม่จัดกลุ่ม** — ฟิลด์ equality ทั้งหมดต้องอยู่ด้านหน้าสุดของ index ด้วยกัน ถ้าแทรกฟิลด์ sort หรือ range ไว้ระหว่างฟิลด์ equality จะทำลาย prefix ที่ query equality หลายฟิลด์ต้องการ
+- **"ถ้า field sort อยู่ใน index การ sort ก็ฟรี"** - ฟรีก็ต่อเมื่อ field ก่อนหน้าเป็น equality; หลัง range stage SORT กลับมา
+- **"ESR อ่าน key น้อยที่สุดเสมอ"** - มันลดการ sort; กรณี range คัดมากอ่าน 20 001 key เทียบกับ 100
+- **"ลำดับผิดให้ผลลัพธ์ผิด"** - ผลลัพธ์เหมือนกัน มีแค่ปริมาณงานที่ต่าง
+- **"ทิ้ง `hint()` ไว้เพื่อความปลอดภัย"** - มันตรึง plan และกันไม่ให้ planner ปรับตัว
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบ order management ที่ query ตาม `{ status: equality, createdAt: sort, totalAmount: range }`** — ทีมออกแบบ index ตาม ESR เป็น `{ status: 1, createdAt: 1, totalAmount: 1 }` ทำให้ dashboard ที่กรองสถานะออเดอร์ เรียงตามวันที่ และกรองช่วงยอดเงิน ทำงานโดยไม่มีขั้นตอน sort ในหน่วยความจำเลย
->
-> **ทีมที่ debug query ช้าลงหลัง requirement เปลี่ยน** — เดิม query กรองเฉพาะ equality กับ sort ทำงานเร็ว แต่หลังเพิ่มเงื่อนไข range ใหม่เข้าไปโดยไม่ทบทวนลำดับ index เดิม ทำให้ query กลับไปมีขั้นตอน sort ที่ชัดเจนใน `explain()` ต้องสร้าง index ใหม่ตาม ESR ให้ตรงกับ query pattern ที่เปลี่ยนไป
+> MongoDB บันทึกลำดับนี้ไว้เป็น "The ESR (Equality, Sort, Range) Guideline" และระบุข้อยกเว้นเดียวกับที่วัดข้างบน: "If the range predicate in your query is very selective, then put it before sort fields" ([ESR Guideline](https://www.mongodb.com/docs/manual/tutorial/equality-sort-range-guideline/), ตรวจ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (query Berlin/fines คืนสมาชิกชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizEsr = [
   {
-    q: 'ESR ย่อมาจากอะไร ในแง่ลำดับฟิลด์?',
-    options: ['Equality, Sort, Range', 'Equality, Search, Result', 'Exact, Sort, Reverse', 'Equality, Sort, Reduce'],
+    q: 'ESR ย่อมาจากอะไร ตามลำดับ field',
+    options: [
+      'Equality, Sort, Range',
+      'Equality, Search, Result',
+      'Exact, Sort, Reverse',
+      'Equality, Sort, Reduce',
+    ],
     answer: 0,
+    explain: 'field แบบ equality ก่อน field ที่ sort ต่อมา field แบบ range ท้ายสุด; index แบบ ESR หลีกเลี่ยง stage SORT ที่ index แบบ E-R-S ต้องใช้',
   },
   {
-    q: 'ทำไมฟิลด์ range จึงไปท้ายสุดใน ESR index?',
+    q: 'ทำไม field แบบ range จึงอยู่หลัง field ที่ sort ใน index แบบ ESR',
     options: [
-      'ฟิลด์ range ทำ index ไม่ได้เลย',
-      'range ทำให้ฟิลด์ของ index ที่ตามมาไม่เรียงลำดับ ซึ่งจะทำลายการเรียงในภายหลัง',
-      'ฟิลด์ range เลือกได้เฉพาะเจาะจงน้อยที่สุดเสมอ',
-      'MongoDB กำหนดให้ฟิลด์ range มาท้ายสุดในเชิง syntax',
+      'field แบบ range ทำ index ไม่ได้',
+      'entry ในช่วงถูกเรียงตาม field ของ range ก่อน field หลังมันจึงไม่อยู่ในลำดับ sort อีก',
+      'field แบบ range มี selectivity ต่ำสุดเสมอ',
+      'MongoDB บังคับตามไวยากรณ์',
     ],
     answer: 1,
+    explain: 'กับ { city, fines, joined } plan เป็น FETCH > SORT > IXSCAN: key ของ fines > 2 ออกมาจัดกลุ่มตาม fines ไม่ใช่ตาม joined',
   },
   {
-    q: 'คุณวางฟิลด์ range ไว้ก่อนฟิลด์ sort query plan จะแสดงอะไร?',
+    q: 'คุณวาง field range ก่อน field sort plan แสดงอะไร',
     options: [
       'query ถูกปฏิเสธ',
-      'ขั้นตอน sort ในหน่วยความจำที่ชัดเจน เพราะลำดับของ index ไม่ตอบสนองการเรียงอีกต่อไป',
-      'covered query โดยไม่มีการดึง document',
-      'plan เดียวกับลำดับ ESR ที่ถูกต้อง',
+      'stage SORT ในหน่วยความจำระหว่าง IXSCAN กับ FETCH',
+      'covered query ที่ไม่ fetch document',
+      'plan เดียวกับ ESR ที่ถูกต้อง',
     ],
     answer: 1,
+    explain: 'plan จริง: FETCH > SORT > IXSCAN(ERS), keys=11428; ผลลัพธ์ถูกต้อง เพียงแต่ sort ในหน่วยความจำ',
+  },
+  {
+    q: 'เมื่อไรที่ E-R-S (range ก่อน sort) ชนะ ESR',
+    options: [
+      'ไม่เคย',
+      'เมื่อ range คัดได้มากและ field ที่ sort มีค่าต่างกันมาก การ sort ผลลัพธ์ไม่กี่รายการถูกกว่าเดินทุก key ตามลำดับ sort',
+      'เมื่อ query มี limit เสมอ',
+      'เมื่อ collection เล็ก',
+    ],
+    answer: 1,
+    explain: 'range score >= 995 (100 จาก 20 000 สมาชิก Berlin) เรียงตาม name: ESR อ่าน 20 001 key ส่วน E-R-S อ่าน 100 key แล้ว sort 100 document',
+  },
+  {
+    q: 'ทำไมยังควรตรวจ index ที่เรียงแบบ ESR ด้วย explain',
+    options: [
+      'เพราะ ESR ใช้ไม่ได้เลย',
+      'เพราะ ESR เป็นค่าตั้งต้น; กรณียกเว้น range ที่คัดมากแสดงว่าลำดับตรงข้ามอ่าน key น้อยกว่าราว 200 เท่า',
+      'เพราะ explain เปลี่ยน index',
+      'เพราะ server บังคับให้ใช้ explain',
+    ],
+    answer: 1,
+    explain: '20 001 key เทียบกับ 100 key ในการรันกรณียกเว้น; กฎเป็นจุดเริ่มต้น และ hint() ให้เทียบลำดับได้',
   },
 ]
 
