@@ -1,6 +1,6 @@
 ---
 title: Setup with Docker
-description: Run MongoDB locally from the official Docker image with a single docker run command or a docker-compose file, then verify and connect.
+description: Run MongoDB locally from the official Docker image - standalone with a root user, or as a one-node replica set for transactions and change streams - then verify and connect, with every command proven on MongoDB 8.3.
 sidebar:
   order: 3
 ---
@@ -8,17 +8,37 @@ sidebar:
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-The fastest way to get a real MongoDB to play with is **Docker**. The official `mongo` image gives you a clean, isolated server in one command, with nothing installed permanently on your machine and nothing to uninstall afterwards. This lesson gets you from "Docker is running" to "I can talk to MongoDB" — first with a one-liner, then with a small `docker-compose.yml` you can keep in your project.
+The fastest way to get a real MongoDB to play with is **Docker**. The official `mongo` image gives you a clean, isolated server in one command, with nothing installed permanently on your machine and nothing to uninstall afterwards. This lesson gets you from "Docker is running" to "I can talk to MongoDB" - first with a one-liner, then with a small `docker-compose.yml` you can keep in your project - and it settles a question the later modules depend on: **standalone or replica set?**
 
-You only need Docker Desktop (or the Docker engine) installed and running. Everything else comes from the image.
+You only need Docker Desktop (or the Docker engine) installed and running. Every command below was run for real on one Mac with `mongo:8` = **8.3.11** (mongosh 2.11.1, Node driver 7.7.0). To keep the test containers tidy we ran them as `mongodb-b1-dev` and so on; the commands here use the friendlier `mongo-dev` you should use.
 
-## A one-line docker run
+## Standalone or replica set? Decide first
 
-This command pulls the official image, starts a container named `mongo-dev`, publishes the default MongoDB port `27017` to your machine, stores the data in a named volume so it survives a restart, and sets a root username and password:
+A plain `mongo` container is a **standalone** server. That is perfect for modules 1 to 6. But **multi-document transactions and change streams (module 7) only work on a replica set**, and a one-node replica set is enough. Here is what the same client code does on a standalone container (real output):
+
+```text
+txn:   MongoServerError: This MongoDB deployment does not support retryable writes. Please add retryWrites=false to your connection string.
+watch: MongoServerError: The $changeStream stage is only supported on replica sets or mongos   (code 40573)
+```
+
+So this lesson gives you **both** shapes. Use the standalone one for now; when you reach module 7, switch to the replica-set one (it works for every earlier module too, so if you prefer, just use it from the start).
+
+| | Standalone (`docker run` / compose 1) | One-node replica set (compose 2) |
+|---|---|---|
+| Modules 1-6 (CRUD, indexes, aggregation, modeling) | yes | yes |
+| Transactions, change streams (module 7) | no | yes |
+| Root user / auth | yes (`MONGO_INITDB_ROOT_*`) | no - `mongod --replSet rs0 --auth` exits with `BadValue: security.keyFile is required when authorization is enabled with replica sets` (see the security lesson) |
+| Connection string | `mongodb://root:secret@localhost:27017` | `mongodb://localhost:27017/?replicaSet=rs0` |
+
+## A one-line docker run (standalone)
+
+This command pulls the official image, starts a container named `mongo-dev`, publishes the default MongoDB port `27017`, stores the data in a named volume so it survives a restart, and sets a root username and password:
 
 ```bash
+# scripts/docker-run-standalone.sh
 docker run -d \
   --name mongo-dev \
   -p 27017:27017 \
@@ -33,17 +53,55 @@ A few things worth understanding in that command:
 - **`-d`** runs the container in the background (detached) so it does not tie up your terminal.
 - **`-p 27017:27017`** maps the container's port `27017` to the same port on your host, which is where MongoDB listens by default.
 - **`-v mongo-data:/data/db`** mounts a **named volume** at `/data/db`, the directory MongoDB writes its files to. The volume lives outside the container, so deleting and recreating the container does not lose your data.
-- **`-e MONGO_INITDB_ROOT_USERNAME` / `-e MONGO_INITDB_ROOT_PASSWORD`** create an administrative user the first time the container initialises an empty data directory.
+- **`-e MONGO_INITDB_ROOT_USERNAME` / `-e MONGO_INITDB_ROOT_PASSWORD`** create an administrative user the first time the container initialises an empty data directory (documented on the image page, [hub.docker.com/_/mongo](https://hub.docker.com/_/mongo)).
 
-## A docker-compose file
+## Verify it is running
 
-For anything beyond a quick test, a `docker-compose.yml` is nicer: the configuration lives in a file you can commit, and a single command brings everything up. This version runs MongoDB and adds **mongo-express**, a lightweight web UI for poking at your data in the browser:
+```bash
+# scripts/docker-ps.sh
+docker ps --format 'table {{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}'
+```
+
+```text
+IMAGE     STATUS         PORTS                                             NAMES
+mongo:8   Up 8 seconds   0.0.0.0:27017->27017/tcp, [::]:27017->27017/tcp   mongodb-b1-dev
+```
+
+The `mongosh` client ships inside the image, so you can run it without installing anything. The ping goes through the container's own shell:
+
+```bash
+# scripts/docker-exec-ping.sh
+docker exec -it mongo-dev mongosh "mongodb://root:secret@localhost:27017" --eval 'db.runCommand({ ping: 1 })'
+```
+
+```text
+{ ok: 1 }
+```
+
+`mongosh` on your host (if you installed it) takes the same string, pointed at the published port: `mongosh "mongodb://root:secret@localhost:27017"`. A successful interactive connection drops you at a `test>` prompt.
+
+### What "auth is on" really means
+
+The root variables switch authentication on. We proved the exact behaviour against this container, with no credentials in the connection string:
+
+```text
+> db.runCommand({ ping: 1 })          # ping needs no login
+{ ok: 1 }
+> db.members.find().toArray()
+MongoServerError: Command find requires authentication      (code 13, codeName Unauthorized)
+```
+
+Without the two `MONGO_INITDB_ROOT_*` variables (and no `--auth`), the same image starts with **no authentication at all** and binds every interface: `getCmdLineOpts` reports `net: { bindIp: '*' }`, and an unauthenticated `insertOne`/`find` just works. That is convenient on a laptop and dangerous on any machine whose port `27017` is reachable from outside.
+
+## A docker-compose file (standalone)
+
+For anything beyond a quick test, a `docker-compose.yml` is nicer: the configuration lives in a file you can commit, and a single command brings everything up. This version runs MongoDB and adds **mongo-express**, a lightweight web UI for browsing your data. Two changes from a naive copy-paste, both proven: the UI image is **pinned** (`latest` is exactly what this lesson tells you not to use), and there is no `container_name`, so `docker compose exec mongo ...` finds the service by its name.
 
 ```yaml
+# docker-compose.yml
 services:
   mongo:
     image: mongo:8
-    container_name: mongo-dev
     restart: unless-stopped
     ports:
       - "27017:27017"
@@ -54,14 +112,11 @@ services:
       - mongo-data:/data/db
 
   mongo-express:
-    image: mongo-express:latest
-    container_name: mongo-express
+    image: mongo-express:1.0.2-20-alpine3.19
     restart: unless-stopped
     ports:
       - "8081:8081"
     environment:
-      ME_CONFIG_MONGODB_ADMINUSERNAME: root
-      ME_CONFIG_MONGODB_ADMINPASSWORD: secret
       ME_CONFIG_MONGODB_URL: "mongodb://root:secret@mongo:27017/"
     depends_on:
       - mongo
@@ -70,17 +125,99 @@ volumes:
   mongo-data:
 ```
 
-Bring the whole stack up from the directory that holds the file:
-
 ```bash
+# scripts/compose-up.sh
 docker compose up -d
+docker compose ps
+docker compose exec mongo mongosh "mongodb://root:secret@localhost:27017" --eval 'db.runCommand({ ping: 1 })'
 ```
 
-When it is running you can open mongo-express at `http://localhost:8081` to browse databases and collections in a browser. The `mongo-express` service is optional — delete it if you only want the database.
+```text
+NAME                         IMAGE                               STATUS          PORTS
+mongodb-b1-mongo-1           mongo:8                             Up 15 seconds   0.0.0.0:27017->27017/tcp, [::]:27017->27017/tcp
+mongodb-b1-mongo-express-1   mongo-express:1.0.2-20-alpine3.19   Up 15 seconds   0.0.0.0:8081->8081/tcp, [::]:8081->8081/tcp
+{ ok: 1 }
+```
+
+`curl localhost:8081/` returned `401`, and `curl -u admin:pass localhost:8081/` returned `200`: mongo-express protects itself with **basic auth whose default is `admin:pass`** (its own log prints `basicAuth credentials are "admin:pass", it is recommended you change this`). Set `ME_CONFIG_BASICAUTH_USERNAME` / `ME_CONFIG_BASICAUTH_PASSWORD` before you expose the port to anyone, or delete the `mongo-express` service - it is optional.
+
+## A one-node replica set (for transactions and change streams)
+
+A replica set needs two things a standalone does not: `mongod` started with `--replSet <name>`, and a one-time `rs.initiate(...)`. The `docker run` version, step by step:
+
+```bash
+# scripts/docker-run-replset.sh
+docker run -d --name mongo-rs -p 27017:27017 mongo:8 mongod --replSet rs0 --bind_ip_all
+sleep 5
+docker exec mongo-rs mongosh --quiet --eval 'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
+```
+
+Before `rs.initiate` the node refuses writes - we recorded it:
+
+```text
+> db.members.insertOne({ a: 1 })
+NotWritablePrimary not primary
+> db.hello().isWritablePrimary
+false
+```
+
+After it, `db.hello()` reports `setName: 'rs0'` and `isWritablePrimary: true`, and a ping reply now carries cluster time (`$clusterTime`, `operationTime`) that a standalone does not send:
+
+```text
+{ setName: 'rs0', isWritablePrimary: true, me: 'localhost:27017' }
+{ ok: 1, '$clusterTime': { clusterTime: Timestamp({ t: 1790747453, i: 18 }), ... }, operationTime: Timestamp({ t: 1790747453, i: 18 }) }
+```
+
+For a file you can commit, let a **healthcheck** do the initiation, so `docker compose up --wait` returns only when the replica set is ready:
+
+```yaml
+# docker-compose.replset.yml
+services:
+  mongo:
+    image: mongo:8
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-rs-data:/data/db
+    healthcheck:
+      test: >
+        mongosh --quiet --eval
+        "try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }).ok }"
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  mongo-rs-data:
+```
+
+`docker compose -f docker-compose.replset.yml up -d --wait` printed `Container ... Healthy` and `ps` showed `Up 5 seconds (healthy)`. The member host is `localhost:27017`, which is reachable from your machine because the published port is also `27017`. From the host, this Node script (run against that container) completed a transaction and opened a change stream - both impossible on the standalone:
+
+```js
+// app/connect-replset.mjs @skip-verify needs the lesson's own replica-set container on host port 27017
+import { MongoClient } from "mongodb";
+
+const client = new MongoClient("mongodb://localhost:27017/?replicaSet=rs0");
+await client.connect();
+console.log(Object.keys(await client.db("app").command({ ping: 1 })));   // [ 'ok', '$clusterTime', 'operationTime' ]
+
+const session = client.startSession();
+await session.withTransaction(async () => {
+  await client.db("app").collection("t").insertOne({ x: 1 }, { session });
+});
+console.log("txn ok");
+await client.close();
+```
+
+<Callout title="Publish a different host port and the set breaks">
+The replica-set config stores the member address `localhost:27017`. If you map `-p 27018:27017`, the driver reads that address from the set and tries to connect to `localhost:27017` - not your published port. Either keep both ports equal, or add `directConnection=true` to the connection string so the driver talks only to the address you gave it.
+</Callout>
 
 ## How the pieces fit together
 
-The container runs MongoDB and listens on port `27017`. Your published port forwards `localhost:27017` into it, the named volume keeps the data safe outside the container, and anything that speaks the MongoDB protocol — mongosh, Compass, or your application — connects through that port.
+The container runs MongoDB and listens on port `27017`. Your published port forwards `localhost:27017` into it, the named volume keeps the data safe outside the container, and anything that speaks the MongoDB protocol - mongosh, Compass, or your application - connects through that port.
 
 export const dockerDiagram = `flowchart LR
   App["Your app / mongosh / Compass"] -->|"mongodb://localhost:27017"| Port["Host port 27017"]
@@ -89,57 +226,83 @@ export const dockerDiagram = `flowchart LR
 
 <Mermaid code={dockerDiagram} title="Your client connects through the published port to the container, which persists data in a named volume" />
 
-## Verify it is running
+The two mongosh checks below run against the lesson harness (a one-node replica set), so both print what you would see on the replica-set variant:
 
-Check that the container is up with `docker ps`:
-
-```bash
-docker ps
+```js
+// mongosh/setup-hello.js
+const h = db.hello();
+console.log({ setName: h.setName, isWritablePrimary: h.isWritablePrimary, version: db.version() });
+assert.strictEqual(h.isWritablePrimary, true);
+assert.strictEqual(db.runCommand({ ping: 1 }).ok, 1);
 ```
 
-You should see a row for the `mongo` image with a status of `Up` and the port mapping `0.0.0.0:27017->27017/tcp`. Now connect with the shell. The `mongosh` client ships inside the image, so you can run it without installing anything:
-
-```bash
-docker exec -it mongo-dev mongosh "mongodb://root:secret@localhost:27017"
+```text
+{ setName: 'rs0', isWritablePrimary: true, version: '8.3.11' }
 ```
-
-If you have `mongosh` installed on your host instead, point it at the published port directly:
-
-```bash
-mongosh "mongodb://localhost:27017"
-```
-
-A successful connection drops you at a `test>` prompt. From there, typing `db.runCommand({ ping: 1 })` and getting back `{ ok: 1 }` confirms the server is alive and answering.
 
 ## Tips and gotchas
 
-- **Data persistence lives in the volume, not the container.** As long as you keep the `mongo-data` volume, you can stop, remove, and recreate the container without losing anything. Running `docker volume rm mongo-data` is what actually deletes the data.
-- **The root user is created only on first init.** The `MONGO_INITDB_ROOT_*` variables take effect when the data directory is empty. If you change them later against an existing volume, they are ignored — the existing user stays.
-- **Port `27017` is the MongoDB default.** If something else already uses it, change the host side of the mapping, for example `-p 27018:27017`, and connect to `27018`.
-- **Pin a major version** like `mongo:8` rather than `mongo:latest` so an image update does not surprise you with a different server version.
+- **Data persistence lives in the volume, not the container.** As long as you keep the `mongo-data` volume, you can stop, remove, and recreate the container without losing anything. `docker volume rm mongo-data` is what deletes the data.
+- **The root user is created only on first init.** We proved it: after `docker rm -f` we recreated the container on the same volume with `MONGO_INITDB_ROOT_PASSWORD=other`. Logging in with the **old** password `secret` still worked (`authenticatedUsers: [ { user: 'root', db: 'admin' } ]`), and the new password gave `MongoServerError: Authentication failed.` The variables are ignored once the data directory is not empty.
+- **Port `27017` is the MongoDB default.** If something else already uses it, change the host side of the mapping, for example `-p 27018:27017`, and connect to `27018` (see the replica-set callout above).
+- **Pin a major version** like `mongo:8` rather than `mongo:latest` so an image update does not surprise you with a different server version. `mongo:8` resolved to 8.3.11 on 2026-09-30; 8.3 is a rapid-release minor of the 8 major; `mongo:8.0` pins the 8.0 release series instead.
 
-<Callout title="One command, real MongoDB">
-Docker turns "install and configure a database" into "run an image." Keep your data in a named volume, pin a version tag, and you have a disposable yet persistent MongoDB you can wipe and recreate at will.
-</Callout>
+## Reading AI-generated code
+
+Ask an assistant for "a MongoDB replica set in Docker for transactions" and you often get this compose file. It looks complete:
+
+<SpotTheBug lang="yaml" code={`# AI comment: "replica set enabled, so transactions and change streams will work"
+services:
+  mongo:
+    image: mongo:latest
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"`}>
+
+`--replSet rs0` only tells `mongod` **which set it would belong to**. Nobody ever calls `rs.initiate`, so the node has no config and no primary. Real result on `mongo:8`: `db.members.insertOne({ a: 1 })` fails with `NotWritablePrimary not primary`, and `db.hello().isWritablePrimary` is `false` - every write and every transaction is refused, exactly the opposite of the comment's promise. (It also pins `latest`.) The fix is the healthcheck initiation from the previous section, which we ran to `Healthy`, followed by a host-side transaction that committed:
+
+```yaml
+# docker-compose.fixed.yml
+services:
+  mongo:
+    image: mongo:8
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: >
+        mongosh --quiet --eval
+        "try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }).ok }"
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A container is a **process plus a directory**: `mongod` running against `/data/db`. Everything else - the port mapping, the volume, the env vars - is wiring around those two things. The env vars are read **once, by the image's entrypoint, only when the directory is empty**; after that, the directory (its users, its replica-set config) is the truth. That single idea explains the root-password surprise, the "replica set that was never initiated", and why deleting the volume is the real reset button.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Run MongoDB via Docker | Fast to wipe and recreate, nothing permanent left on the machine, and an environment close to production where teams typically run the same container | Requires a running Docker engine at all times, and a container adds a little overhead compared to running directly on the host |
-| Install MongoDB directly on the machine | No container layer in between; connect through `localhost` directly | Harder to reset or change versions, and different machines on the team can end up with mismatched versions or config |
+| Run MongoDB via Docker | Fast to wipe and recreate, nothing permanent left on the machine, and an environment close to production | Requires a running Docker engine at all times, and a container adds a little overhead compared to running directly on the host |
+| Install MongoDB directly on the machine | No container layer in between; connect through `localhost` directly | Harder to reset or change versions, and machines on the team can end up with mismatched versions or config |
+| Standalone container | Simplest; supports root-user auth out of the box | No transactions, no change streams (proven above) |
+| One-node replica set | Transactions and change streams work; matches how production runs | Extra `rs.initiate` step, no auth without a keyfile, and the member-host/port-mapping pitfall |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Forgetting to pin the image tag and using `mongo:latest`** — the next time you pull the image, the server version can change unexpectedly and break config or behavior you relied on. Always pin a major version like `mongo:8`.
-- **Removing a container with `docker rm` and assuming the data is gone too** — if the data lives in a named volume, removing the container does not touch it; conversely, someone who never mounted a volume at all is surprised the data disappears every time the container restarts.
-- **Exposing port `27017` with no password set and assuming a "dev machine nobody touches"** — if the machine unintentionally exposes that port to an outside network (such as a cloud VM), skipping authentication lets outsiders connect directly.
+- **"Use `mongo:latest`, it is the newest."** - the next `docker pull` can change the server version under you. Pin `mongo:8` (or `8.0`).
+- **"Removing the container deletes the data."** - with a named volume it does not; conversely, with no volume at all the data disappears with the container. `docker rm` and `docker volume rm` are different operations.
+- **"`MONGO_INITDB_ROOT_PASSWORD` resets the password."** - it does not; it only applies to an empty data directory (proven above).
+- **"`--replSet` makes it a replica set."** - it needs `rs.initiate` too, otherwise writes fail with `NotWritablePrimary`.
+- **"It is a dev machine nobody touches, so no password."** - without the root variables the image binds `*` and requires no login; anything that can reach port 27017 can read and write.
 
-> 💡 Real-world example
->
-> **Many teams' CI pipelines** — create and tear down a fresh `mongo` container on every integration test run, so every test starts from the same empty database with no state carried over between runs.
->
-> **A backend team working across machines** — commit a `docker-compose.yml` file into the project so everyone on the team (and CI) gets the exact same MongoDB version with a single command, instead of everyone installing it themselves and ending up with mismatched versions.
+_Python/Go/Rust are not used in this lesson: it is Docker and shell only._
 
 export const quizDocker = [
   {
@@ -151,21 +314,46 @@ export const quizDocker = [
       'It disables authentication',
     ],
     answer: 1,
+    explain: 'The volume lives outside the container, so docker rm and a fresh docker run against the same volume keep every document.',
   },
   {
     q: 'Which port does MongoDB listen on by default?',
     options: ['8081', '5432', '27017', '3306'],
     answer: 2,
+    explain: '27017 is the MongoDB default; 8081 was mongo-express, 5432 is PostgreSQL, 3306 is MySQL.',
   },
   {
-    q: 'When do the MONGO_INITDB_ROOT_USERNAME and PASSWORD variables take effect?',
+    q: 'You recreate the container on the same volume with a different MONGO_INITDB_ROOT_PASSWORD. Which password logs in?',
     options: [
-      'Every time the container restarts',
-      'Only the first time, when the data directory is empty',
-      'Only when mongo-express is also running',
-      'Never — they are ignored by the image',
+      'The new one',
+      'The old one - the variables only apply to an empty data directory',
+      'Both',
+      'Neither - the container refuses to start',
     ],
     answer: 1,
+    explain: 'In the real run the old password secret still authenticated and the new one gave Authentication failed.',
+  },
+  {
+    q: 'A container started with `mongod --replSet rs0` rejects your first insert with NotWritablePrimary. What is missing?',
+    options: [
+      'A bigger volume',
+      'A call to rs.initiate(...), which creates the replica-set config and elects the primary',
+      'The --auth flag',
+      'The mongo:latest tag',
+    ],
+    answer: 1,
+    explain: '--replSet only names the set. Until rs.initiate runs there is no config, no primary, and db.hello().isWritablePrimary is false.',
+  },
+  {
+    q: 'Which of these does NOT work on a standalone mongod container?',
+    options: [
+      'insertOne / find',
+      'createIndex',
+      'A multi-document transaction (session.withTransaction) or a change stream',
+      'Creating a root user with MONGO_INITDB_ROOT_USERNAME',
+    ],
+    answer: 2,
+    explain: 'Real errors: "This MongoDB deployment does not support retryable writes" for the transaction and "$changeStream stage is only supported on replica sets or mongos" (code 40573).',
   },
 ]
 
