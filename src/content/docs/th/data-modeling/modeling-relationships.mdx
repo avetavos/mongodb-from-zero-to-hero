@@ -1,6 +1,6 @@
 ---
-title: การ modeling ความสัมพันธ์
-description: วิธี model ความสัมพันธ์แบบ one-to-one, one-to-many และ many-to-many ใน MongoDB ด้วย embedding และ referencing รวมถึงข้อจำกัด document ขนาด 16 MB และอันตรายของ array ที่ไม่มีขอบเขต
+title: การออกแบบความสัมพันธ์
+description: "one-to-one, one-to-many และ many-to-many ใน MongoDB - พร้อมวัดเพดาน document 16 MiB: array ที่โตทำให้ทุก update ช้าลงและสุดท้ายล้มเหลวอย่างไร พร้อมวิธีแก้"
 sidebar:
   order: 3
 ---
@@ -9,56 +9,72 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ทุกความสัมพันธ์ระหว่าง entity ตกอยู่ในหนึ่งในสามรูปร่างตาม **cardinality** — ของอย่างหนึ่งมีความสัมพันธ์กับของอีกอย่างหนึ่งจำนวนเท่าไร ผู้ใช้มี profile หนึ่งอัน (one-to-one) ผู้ใช้เขียน post หลายอัน (one-to-many) นักเรียนลงทะเบียนหลายวิชา และแต่ละวิชามีนักเรียนหลายคน (many-to-many) ใน relational database รูปร่างเป็นตัวกำหนดกลไกตายตัว คือ foreign key กับ join table ส่วนใน MongoDB รูปร่างแค่ช่วยจำกัดตัวเลือกให้แคบลง คุณยังต้องเลือกเองอยู่ดีว่าจะ embed หรือ reference โดยใช้ข้อแลกเปลี่ยนจากบทเรียนก่อนเป็นแนวทาง บทเรียนนี้จะพาไล่ทั้งสามรูปร่าง พร้อมข้อจำกัดด้านขนาดที่คุมทุกอย่างไว้
+ทุกความสัมพันธ์เข้ากับหนึ่งในสามรูปแบบตาม **cardinality** - จำนวนของสิ่งหนึ่งที่สัมพันธ์กับจำนวนของอีกสิ่ง ผู้ใช้มีโปรไฟล์หนึ่งอัน (one-to-one) ผู้ใช้เขียนหลายโพสต์ (one-to-many) นักเรียนลงหลายคอร์สและคอร์สมีหลายนักเรียน (many-to-many) ใน relational database รูปแบบกำหนดกลไก: foreign key และ join table ใน MongoDB รูปแบบเพียงจำกัดตัวเลือก คุณยังเลือก embed หรือ reference สำหรับแต่ละอันโดยใช้ข้อแลกเปลี่ยนจากบทก่อน
+
+บทนี้เตรียมข้อมูลของตัวเอง: `users` 1 000 รายการที่มี `profile` แบบ embed, `posts` 20 000 รายการที่อ้าง author และ collection เล็ก ๆ `students` / `courses` จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว (ตัวอย่าง transaction ต้องใช้ container replica set จากบท setup); แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
+
+```js
+// mongosh/rel-seed.js
+globalThis.plan = (cur) => {
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+db.users.insertMany(Array.from({ length: 1000 }, (_, i) => ({ _id: "user_" + i, email: "u" + i + "@example.test", profile: { displayName: "User " + i, bio: "Writes algorithms.", joinedYear: 2020 + (i % 7) } })));
+db.posts.insertMany(Array.from({ length: 20000 }, (_, i) => ({ _id: "post_" + i, authorId: "user_" + (i % 1000), title: "Post " + i, tags: ["mongodb", "modeling", "tag" + (i % 5)], at: new Date(1700000000000 + i * 60000) })));
+db.students.insertMany(Array.from({ length: 5 }, (_, i) => ({ _id: "student_" + i, name: "S" + i, courseIds: [] })));
+db.courses.insertMany(Array.from({ length: 3 }, (_, i) => ({ _id: "c_" + i, title: "Course " + i, studentIds: [] })));
+console.log("users:", db.users.countDocuments(), "| posts:", db.posts.countDocuments(), "| students:", db.students.countDocuments(), "| courses:", db.courses.countDocuments());
+```
+
+```text
+users: 1000 | posts: 20000 | students: 5 | courses: 3
+```
 
 ## One-to-one
 
-เมื่อ document หนึ่งสัมพันธ์กับอีก document หนึ่งเพียงหนึ่งเดียว embedding มักเป็นทางที่เหมาะตามธรรมชาติ — ข้อมูลที่เกี่ยวข้องมีขอบเขตจำกัด เป็นของ parent เดียว และถูกอ่านควบคู่กันไป ผู้ใช้และ profile ของเขากลายเป็น document เดียว:
-
-```json
-{
-  "_id": "user_42",
-  "email": "ada@example.com",
-  "profile": {
-    "displayName": "Ada Lovelace",
-    "bio": "Writes algorithms for engines that do not exist yet.",
-    "joinedYear": 2024
-  }
-}
-```
+เมื่อ document หนึ่งสัมพันธ์กับอีกอันเพียงอันเดียว การ embed มักเป็นทางที่เป็นธรรมชาติ - ข้อมูลที่เกี่ยวข้องมีขอบเขต เป็นของแม่ตัวเดียว และอ่านไปพร้อมกัน ผู้ใช้และโปรไฟล์กลายเป็น document เดียว:
 
 export const oneToOneDiagram = `flowchart LR
   U["User document"] --> P["profile sub-object embedded inside"]`
 
 <Mermaid code={oneToOneDiagram} title="One-to-one: embed ข้อมูลที่เกี่ยวข้องเป็น sub-object ใน document เดียวกัน" />
 
-คุณจะแยก one-to-one ออกเป็นสอง document ก็ต่อเมื่อส่วนที่เกี่ยวข้องนั้นใหญ่ ถูกอ่านไม่บ่อย หรือถูกเข้าถึงอย่างอิสระ — เช่น แยกไฟล์ binary ก้อนหนักหรือ audit block ที่แทบไม่เคยแตะออกไปอีก collection เพื่อให้ document ที่ร้อนยังคงเล็ก
+```js
+// mongosh/rel-one-to-one.js
+const u = db.users.findOne({ _id: "user_42" });
+console.log(u);
+console.log("one read returns the profile:", u.profile.displayName);
+assert.strictEqual(u.profile.displayName, "User 42");
+```
+
+```text
+{
+  _id: 'user_42',
+  email: 'u42@example.test',
+  profile: {
+    displayName: 'User 42',
+    bio: 'Writes algorithms.',
+    joinedYear: 2020
+  }
+}
+one read returns the profile: User 42
+```
+
+แยก one-to-one ก็ต่อเมื่อส่วนที่เกี่ยวข้องใหญ่ ไม่ค่อยถูกอ่าน หรือเข้าถึงแยกต่างหาก - เช่นไบนารีขนาดใหญ่หรือบล็อก audit ใน collection ของมัน เพื่อให้ document ที่ใช้บ่อยเล็ก
 
 ## One-to-many
 
-ความสัมพันธ์แบบ one-to-many — parent หนึ่ง ลูกหลายตัว — มีสองรูปร่างที่ดี ถ้าลูกมีจำนวนน้อยและมีขอบเขต ให้ **embed เป็น array** ไปเลย อย่างบล็อกโพสต์กับ tag ไม่กี่ตัวก็เป็นการ embed ที่สะอาดมาก:
-
-```json
-{
-  "_id": "post_310",
-  "title": "Why documents win",
-  "tags": ["mongodb", "modeling", "nosql"]
-}
-```
-
-แต่เมื่อฝั่ง "many" สามารถโตได้ใหญ่ หรือถูก query ด้วยตัวเอง ให้ **reference จากฝั่งลูก** แทน: แต่ละ document ลูกเก็บ id ของ parent ผู้ใช้ที่อาจมี post เป็นพันควรเก็บ post ไว้อีก collection แล้วให้แต่ละ post ชี้กลับมา:
-
-```json
-{ "_id": "post_310", "authorId": "user_42", "title": "Why documents win" }
-```
+กับแม่หนึ่งและลูกจำนวนมาก มีสองรูปแบบที่ดี ถ้าลูกมีน้อยและจำกัด **embed เป็น array**: tag สามอันของโพสต์คือ embed ที่สะอาด เมื่อฝั่ง "many" โตได้หรือถูก query แยก **reference จากฝั่งลูก**: โพสต์แต่ละอันเก็บ `authorId` reference นั้นต้องมี index ไม่เช่นนั้นการแสดงโพสต์ของผู้ใช้จะสแกนทุกโพสต์:
 
 export const oneToManyDiagram = `flowchart TB
-  subgraph FewBounded["Few and bounded — embed array"]
+  subgraph FewBounded["Few and bounded - embed array"]
     A0["Post document"] --> A1["tags: array of values"]
   end
-  subgraph ManyUnbounded["Many or unbounded — reference from child"]
+  subgraph ManyUnbounded["Many or unbounded - reference from child"]
     B0["User document"]
     B1["Post: authorId points to user"]
     B2["Post: authorId points to user"]
@@ -66,23 +82,29 @@ export const oneToManyDiagram = `flowchart TB
     B2 --> B0
   end`
 
-<Mermaid code={oneToManyDiagram} title="One-to-many: embed เป็น array เมื่อลูกมีจำนวนน้อยและมีขอบเขต; reference จากฝั่งลูกเมื่อฝั่ง many โตได้ใหญ่" />
+<Mermaid code={oneToManyDiagram} title="One-to-many: embed array เมื่อลูกมีน้อยและจำกัด; reference จากฝั่งลูกเมื่อฝั่ง many โตมาก" />
 
-คำถามชี้ขาดคือ "รายการนี้จะโตได้ไม่จำกัดหรือไม่?" tag ของ post จะไม่ ส่วน post ของผู้ใช้อาจโต คำถามเดียวนั้นมักเลือก model ให้คุณได้
+```js
+// mongosh/rel-one-to-many.js
+console.log("embedded tags (bounded)          :", db.posts.findOne({ _id: "post_7" }).tags);
+console.log("posts of user_42, no index on authorId :", plan(db.posts.find({ authorId: "user_42" })));
+db.posts.createIndex({ authorId: 1, at: -1 });
+console.log("posts of user_42, with the index       :", plan(db.posts.find({ authorId: "user_42" }).sort({ at: -1 })));
+console.log("page 1 (10 newest)                     :", plan(db.posts.find({ authorId: "user_42" }).sort({ at: -1 }).limit(10)));
+```
+
+```text
+embedded tags (bounded)          : [ 'mongodb', 'modeling', 'tag2' ]
+posts of user_42, no index on authorId : COLLSCAN  returned=20 keys=0 docs=20000
+posts of user_42, with the index       : FETCH > IXSCAN(authorId_1_at_-1)  returned=20 keys=20 docs=20
+page 1 (10 newest)                     : LIMIT > FETCH > IXSCAN(authorId_1_at_-1)  returned=10 keys=10 docs=10
+```
+
+คำถามที่แบ่งคือ "รายการนี้โตไม่จำกัดได้หรือไม่" tag ของโพสต์ไม่โต; โพสต์ของผู้ใช้อาจโต
 
 ## Many-to-many
 
-ในความสัมพันธ์แบบ many-to-many แต่ละฝั่งสัมพันธ์กับอีกฝั่งหลายตัว — นักเรียนกับวิชา บทความกับ tag นักแสดงกับภาพยนตร์ แนวทางที่สะอาดคือ **referencing ด้วย array ของ id** บนฝั่งใดฝั่งหนึ่งหรือทั้งสองฝั่ง การวาง array ไว้บนฝั่งที่คุณอ่านบ่อยที่สุดให้ query ที่ใช้ทั่วไปเร็วที่สุด ตรงนี้นักเรียนแต่ละคนพาวิชาที่ตนลงทะเบียนติดตัวมา:
-
-```json
-{ "_id": "student_7", "name": "Linus", "courseIds": ["c_db", "c_os", "c_net"] }
-```
-
-และ document วิชายืนด้วยตัวเอง ถูก reference ด้วย id:
-
-```json
-{ "_id": "c_db", "title": "Database Systems", "term": "Fall 2026" }
-```
+แต่ละฝั่งสัมพันธ์กับหลายรายการของอีกฝั่ง - นักเรียนและคอร์ส แนวทางที่สะอาดคือ **reference ด้วย array ของ id** ฝั่งเดียวหรือสองฝั่ง array บนฝั่งที่อ่านคือหนึ่งการเขียนต่อการลงทะเบียน array ทั้ง **สองฝั่ง** ทำให้อ่านเร็วทั้งสองทิศทางแต่ทุกการลงทะเบียนเป็นสองการเขียนที่ต้องสำเร็จด้วยกัน - ไม่เช่นนั้น crash ระหว่างทางทิ้งข้อมูลที่ไม่สอดคล้องดังที่ครึ่งแรกของการรันนี้แสดง multi-document transaction (ครึ่งหลัง และแท็บ Node.js) แก้ได้:
 
 export const manyToManyDiagram = `flowchart TB
   S1["Student: courseIds array"]
@@ -93,86 +115,272 @@ export const manyToManyDiagram = `flowchart TB
   S1 --> C2
   S2 --> C1`
 
-<Mermaid code={manyToManyDiagram} title="Many-to-many: เก็บ array ของ id ที่ถูก reference ไว้บนฝั่งที่คุณอ่านบ่อยที่สุด" />
+<Mermaid code={manyToManyDiagram} title="Many-to-many: เก็บ array ของ id ที่อ้างอิงบนฝั่งที่อ่านบ่อยที่สุด" />
 
-การเก็บ array ของ reference ไว้บน **ทั้งสอง** ฝั่ง (นักเรียนแสดงรายการวิชาของตน *และ* วิชาแสดงรายการนักเรียนของตน) ทำให้อ่านได้เร็วทั้งสองทิศทาง แต่เพิ่มงานเขียนเป็นสองเท่า — การลงทะเบียนนักเรียนหนึ่งคนตอนนี้หมายถึงการอัปเดตสอง document และคอยทำให้สอดคล้องกัน เลือก reference สองฝั่งเฉพาะเมื่อคุณอ่านทั้งสองทิศทางบ่อยจริง ๆ
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/rel-many-to-many.js
+    const enroll = (sid, cid, failBetween, session) => {
+      db.students.updateOne({ _id: sid }, { $addToSet: { courseIds: cid } }, { session });
+      if (failBetween) throw new Error("crash between the two writes");
+      db.courses.updateOne({ _id: cid }, { $addToSet: { studentIds: sid } }, { session });
+    };
+    try { enroll("student_0", "c_0", true); } catch (e) { console.log("without a transaction:", e.message); }
+    console.log("  student side:", db.students.findOne({ _id: "student_0" }).courseIds, "| course side:", db.courses.findOne({ _id: "c_0" }).studentIds, "<- inconsistent");
+    const session = db.getMongo().startSession();
+    const sdb = session.getDatabase(db.getName());
+    try { session.withTransaction(() => { sdb.students.updateOne({ _id: "student_1" }, { $addToSet: { courseIds: "c_1" } }); throw new Error("crash between the two writes"); }); }
+    catch (e) { console.log("with a transaction   :", e.message); }
+    session.endSession();
+    console.log("  student side:", db.students.findOne({ _id: "student_1" }).courseIds, "| course side:", db.courses.findOne({ _id: "c_1" }).studentIds, "<- rolled back, consistent");
+    assert.strictEqual(db.students.findOne({ _id: "student_1" }).courseIds.length, 0);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/rel-many-to-many.mjs
+    const students = db.collection("students"), courses = db.collection("courses");
+    await students.insertOne({ _id: "student_7", name: "Linus", courseIds: [] });
+    await courses.insertOne({ _id: "c_db", title: "Database Systems", studentIds: [] });
+    const session = client.startSession();
+    try {
+      await session.withTransaction(async () => {                                   // both sides or neither
+        await students.updateOne({ _id: "student_7" }, { $addToSet: { courseIds: "c_db" } }, { session });
+        await courses.updateOne({ _id: "c_db" }, { $addToSet: { studentIds: "student_7" } }, { session });
+      });
+    } finally { await session.endSession(); }
+    console.log(await students.findOne({ _id: "student_7" }), await courses.findOne({ _id: "c_db" }));
+    const s = await students.findOne({ _id: "student_7" }), c = await courses.findOne({ _id: "c_db" });
+    if (!s.courseIds.includes("c_db") || !c.studentIds.includes("student_7")) throw new Error("both sides should be updated");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with client.start_session() as s:
+        def enroll(s):
+            db.students.update_one({"_id": "student_7"}, {"$addToSet": {"courseIds": "c_db"}}, session=s)
+            db.courses.update_one({"_id": "c_db"}, {"$addToSet": {"studentIds": "student_7"}}, session=s)
+        s.with_transaction(enroll)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    session, err := client.StartSession()
+    if err != nil {
+        return err
+    }
+    defer session.EndSession(ctx)
+    _, err = session.WithTransaction(ctx, func(sc context.Context) (any, error) {
+        if _, err := db.Collection("students").UpdateOne(sc, bson.M{"_id": "student_7"},
+            bson.M{"$addToSet": bson.M{"courseIds": "c_db"}}); err != nil {
+            return nil, err
+        }
+        return db.Collection("courses").UpdateOne(sc, bson.M{"_id": "c_db"},
+            bson.M{"$addToSet": bson.M{"studentIds": "student_7"}})
+    })
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut session = client.start_session().await?;
+    session.start_transaction().await?;
+    db.collection::<Document>("students")
+        .update_one(doc! { "_id": "student_7" }, doc! { "$addToSet": { "courseIds": "c_db" } })
+        .session(&mut session)
+        .await?;
+    db.collection::<Document>("courses")
+        .update_one(doc! { "_id": "c_db" }, doc! { "$addToSet": { "studentIds": "student_7" } })
+        .session(&mut session)
+        .await?;
+    session.commit_transaction().await?;
+    ```
+  </TabItem>
+</Tabs>
 
-## ข้อจำกัด 16 MB และ array ที่ไม่มีขอบเขต
+```text
+without a transaction: crash between the two writes
+  student side: [ 'c_0' ] | course side: [] <- inconsistent
+with a transaction   : crash between the two writes
+  student side: [] | course side: [] <- rolled back, consistent
+```
 
-ทุก document ของ MongoDB มีเพดานแข็งที่ **16 เมกะไบต์** ซึ่งเหลือเฟือสำหรับข้อมูลทั่วไป แต่กลายเป็นกับดักทันทีเมื่อ array ที่ embed ไว้ไม่มีเพดานตามธรรมชาติ คำสั่งซื้อที่มีรายการสินค้าไม่กี่อันปลอดภัยตลอดไป ส่วนห้องแชทที่ embed ทุกข้อความ หรือ stock ticker ที่ embed ทุก price tick ในที่สุดจะกระแทกข้อจำกัด — และก่อนหน้านั้นนานแล้ว document ที่โตขึ้นเรื่อย ๆ จะกลายเป็นอ่านและเขียนใหม่ได้ช้า เพราะ server ย้ายทั้ง document ในแต่ละครั้งที่อัปเดต
+```text
+{ _id: 'student_7', name: 'Linus', courseIds: [ 'c_db' ] } { _id: 'c_db', title: 'Database Systems', studentIds: [ 'student_7' ] }
+```
 
-กฎที่ตามมาคือ **อย่า embed array ที่สามารถโตได้ไม่จำกัด** ถ้าจำนวนเปิดกว้างไม่จำกัด ให้แยกลูกไปอีก collection แล้ว reference หรือใช้ Bucket pattern จากบทเรียนถัดไปเพื่อจำกัดการเติบโตของแต่ละ document Embed เฉพาะสิ่งที่จำกัดตามธรรมชาติ
+transaction ต้องใช้ replica set (container แบบ standalone จากบท setup ปฏิเสธ) และเพิ่มต้นทุนการประสานงาน เลือก reference สองฝั่งเฉพาะเมื่ออ่านทั้งสองทิศทางบ่อยจริง ๆ
+
+## ขีดจำกัด 16 MiB และ array ที่ไม่จำกัด
+
+ทุก document มีเพดานตายตัว 16 mebibyte ([limits](https://www.mongodb.com/docs/manual/reference/limits/), ตรวจ 2026-09-30) เพียงพอสำหรับข้อมูลปกติ แต่ทำให้ embed กลายเป็นกับดักเมื่อ array ไม่มีขอบเขตตามธรรมชาติ ที่นี่ห้องแชต `$push` ข้อความขนาด 8 KB ลง document เดียว ที่แต่ละจุดตรวจเราวัดเวลาของ `$set` *เล็ก ๆ* ของ field ที่ไม่เกี่ยวข้อง:
+
+```js
+// mongosh/rel-16mb.js
+db.rooms.insertOne({ _id: "room1", messages: [] });
+const pad = "x".repeat(8000), size = () => db.rooms.aggregate([{ $match: { _id: "room1" } }, { $project: { b: { $bsonSize: "$$ROOT" } } }]).toArray()[0].b;
+const marks = [1, 100, 500, 1000, 1500, 2000], rows = [];
+let n = 0, err = null;
+for (;;) {
+  try { db.rooms.updateOne({ _id: "room1" }, { $push: { messages: { n, text: pad } } }); } catch (e) { err = "code " + e.code + ": " + e.message.slice(e.message.indexOf("Resulting")); break; }
+  n++;
+  if (marks.includes(n)) {                                   // time a tiny update ($set one field) on the document as it is now
+    const t = Date.now(); for (let i = 0; i < 5; i++) db.rooms.updateOne({ _id: "room1" }, { $set: { lastActive: i } });
+    rows.push({ pushes: n, docMB: +(size() / 1048576).toFixed(2), msPerTinyUpdate: (Date.now() - t) / 5 });
+  }
+}
+console.log(rows);
+console.log("first failure after", n, "pushes ->", err);
+assert.ok(err.includes("16777216"));
+```
+
+```text
+[
+  { pushes: 1, docMB: 0.01, msPerTinyUpdate: 1.4 },
+  { pushes: 100, docMB: 0.77, msPerTinyUpdate: 1 },
+  { pushes: 500, docMB: 3.83, msPerTinyUpdate: 3.2 },
+  { pushes: 1000, docMB: 7.66, msPerTinyUpdate: 5.8 },
+  { pushes: 1500, docMB: 11.48, msPerTinyUpdate: 6.4 },
+  { pushes: 2000, docMB: 15.31, msPerTinyUpdate: 7.6 }
+]
+first failure after 2089 pushes -> code 10334: Resulting document after update is larger than 16777216
+```
+
+ก่อนจะเกิด error ใด ๆ update เล็กตัวเดิมช้าลงราว **ราวห้าเท่า** (1.4 ms ที่ 0.01 MB เป็น 7.6 ms ที่ 15.3 MB) เพราะ server เขียน document ที่ใหญ่ขึ้นเรื่อย ๆ ใหม่ทุกครั้งที่เปลี่ยน - document ไม่ได้ "ย้าย" จริง ๆ (นั่นคือ storage engine MMAPv1 รุ่นเก่า); WiredTiger เขียนเวอร์ชันใหม่ของมัน push ครั้งที่ 2 090 ชนกำแพงด้วย `Resulting document after update is larger than 16777216` ทางแก้คือ reference ข้อความจากฝั่งลูก เหมือนในหัวข้อ one-to-many:
+
+```js
+// mongosh/rel-16mb-fix.js
+db.roomMessages.createIndex({ roomId: 1, n: -1 });
+const pad = "x".repeat(8000);
+db.roomMessages.insertMany(Array.from({ length: 2100 }, (_, n) => ({ roomId: "room2", n, text: pad })));       // more than the array version could hold
+const t = Date.now(); for (let i = 0; i < 5; i++) db.rooms.updateOne({ _id: "room2" }, { $set: { lastActive: i } }, { upsert: true });
+console.log("room document stays tiny; tiny update:", (Date.now() - t) / 5, "ms");
+console.log("last 20 messages:", plan(db.roomMessages.find({ roomId: "room2" }).sort({ n: -1 }).limit(20)));
+console.log("messages stored:", db.roomMessages.countDocuments({ roomId: "room2" }), "(no per-document ceiling)");
+```
+
+```text
+room document stays tiny; tiny update: 1.4 ms
+last 20 messages: LIMIT > FETCH > IXSCAN(roomId_1_n_-1)  returned=20 keys=20 docs=20
+messages stored: 2100 (no per-document ceiling)
+```
+
+document ของห้องเล็กเสมอ การอัปเดตเสียเท่ากับวันแรก และ 20 ข้อความล่าสุดคือการอ่าน index 20 key ก่อนถึง 16 MiB นานแล้ว การโตคือศัตรู ไม่ใช่แค่เพดาน; รูปแบบ Bucket (บทถัดไป) คือทางสายกลางเมื่อต้องการหลายรายการต่อ document แต่จำกัดขนาดแต่ละอัน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- รูปร่าง cardinality จำกัดตัวเลือกของคุณให้แคบลง แต่คุณยังคงเลือก embed หรือ reference สำหรับแต่ละความสัมพันธ์ตามขนาด การเติบโต และการเข้าถึง — ไม่มีคำตอบอัตโนมัติ
-- One-to-one เกือบทุกครั้ง embed; ข้อยกเว้นคือส่วนย่อยที่ใหญ่หรือแทบไม่ถูกอ่าน ซึ่งคุ้มที่จะแยกออกไปอีก collection
-- สำหรับ one-to-many ถามว่า "ฝั่ง many โตได้ไม่จำกัดหรือไม่?" ถ้าใช่ ให้ reference จากฝั่งลูก ถ้าไม่ array ที่ embed นั้นง่ายและเร็วกว่า
-- Reference สองฝั่งใน many-to-many ทำให้อ่านได้เร็วทั้งสองทิศทาง แต่ทุกการเขียนต้องอัปเดตทั้งสองฝั่ง — คุ้มเมื่อทั้งสองทิศทางร้อนเท่านั้น
-- ข้อจำกัด 16 MB เป็นกำแพงแข็ง แต่ *ประสิทธิภาพ* ของ document เสื่อมลงนานก่อนที่คุณจะไปถึง จงปฏิบัติต่อการเติบโตที่ไม่มีขอบเขตว่าเป็นศัตรูตัวจริง ไม่ใช่แค่เพดาน
+- cardinality จำกัดตัวเลือก; การเข้าถึงและการเติบโตเป็นตัวตัดสิน
+- one-to-one เกือบทั้งหมด embed; ส่วนย่อยที่ใหญ่หรือไม่ค่อยอ่านอาจมี collection ของตัวเอง
+- สำหรับ one-to-many ถามว่า "ฝั่ง many โตไม่จำกัดได้ไหม" ถ้าได้ ให้ reference จากฝั่งลูกและทำ index ให้ reference
+- many-to-many แบบ reference สองฝั่งเสียสองการเขียนต่อการเปลี่ยน; ใช้ transaction และเฉพาะเมื่อสองทิศทางร้อนทั้งคู่
+- ประสิทธิภาพเสื่อมก่อนถึง 16 MiB นานแล้ว (update เล็กช้าลงราว 5 เท่าที่ 15 MB ที่นี่)
 
-<Callout title="Cardinality จำกัด; การเข้าถึงตัดสิน">
-ปล่อยให้รูปร่างของความสัมพันธ์ตัดตัวเลือกที่ผิดอย่างชัดเจนออกไป แล้วปล่อยให้ access pattern และคำถามเรื่องการเติบโตเลือกระหว่างสิ่งที่เหลืออยู่ และไม่ว่าคุณจะทำอะไร อย่า embed array ที่ไม่มีขอบเขตตามธรรมชาติ — นั่นคือวิธีที่การตัดสินใจ embed กลายเป็นหน้าผา 16 MB
+<Callout title="cardinality จำกัด; การเข้าถึงตัดสิน">
+ให้รูปทรงของความสัมพันธ์ตัดตัวเลือกที่ผิดชัดเจนออก แล้วให้รูปแบบการเข้าถึงและคำถามเรื่องการเติบโตเลือกจากที่เหลือ อย่า embed array ที่ไม่มีขีดจำกัดตามธรรมชาติ - นั่นคือวิธีที่การตัดสินใจ embed กลายเป็นหน้าผา 16 MiB
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอให้ "เก็บประวัติแชตของห้อง" AI เก็บทุกอย่างไว้ใน document ของห้อง:
+
+<SpotTheBug lang="js" code={`// AI comment: "one document per room - reads are a single lookup"
+await db.collection("rooms").updateOne(
+  { _id: roomId },
+  { $push: { messages: { n, text } } }
+);`}>
+
+ใช้ได้กับข้อความหลักร้อย ซึ่งเป็นเหตุผลที่ผ่านรีวิว การรันด้านบนไปต่อจนถึง push ที่ 2 090 แล้วล้มเหลวถาวร และทุก update ก่อนหน้าช้าลงเมื่อ array โต ไม่มีทางตัดทอนจากการเขียนที่ล้มเหลว ห้องจึงติดจนกว่าจะ migrate เก็บหนึ่ง document ต่อข้อความพร้อม `roomId` ที่มี index (บล็อกวิธีแก้ด้านบนเก็บ 2 100 ข้อความ มากกว่าที่ array จะเก็บได้) และเก็บแค่ตัวนับและ metadata ไว้ที่ห้อง
+
+</SpotTheBug>
+
+## Mental Model
+
+ถามทุกฝั่ง "many": มีค่าสูงสุดตามธรรมชาติที่ระบุชื่อได้ไหม tag ต่อโพสต์: มี, embed ข้อความต่อห้อง: ไม่มี, reference การลงทะเบียน: ไม่จำกัดทั้งสองฝั่ง จึง reference และตัดสินว่าอ่านทิศทางไหน ขอบเขตที่คุณระบุไม่ได้คือขอบเขตที่คุณไม่มี
 
 ## ข้อแลกเปลี่ยน
 
-| รูปแบบ | Benefit | Cost |
+| รูปแบบ | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| One-to-few embedding | อ่าน parent กับ child ได้ในครั้งเดียว เขียนแบบ atomic | ใช้ได้ดีเฉพาะเมื่อจำนวนลูกมีขอบเขตจริง ๆ |
-| One-to-many referencing (จากฝั่งลูก) | parent เล็กตลอดเวลา ลูกโตได้ไม่จำกัดและ query แยกได้อิสระ | ต้อง query ที่สองเพื่อดึงลูกทั้งหมดของ parent |
-| Many-to-many ด้วย reference array ทั้งสองฝั่ง | อ่านเร็วทั้งสองทิศทางโดยไม่ต้อง `$lookup` | ทุกการเขียนต้องอัปเดตสอง document พร้อมกัน เสี่ยง inconsistency ถ้าล้มเหลวกลางทาง |
+| embed แบบ one-to-few | อ่านครั้งเดียว; เขียนแบบ atomic | ปลอดภัยเฉพาะเมื่อจำนวนลูกมีขอบเขตจริง |
+| one-to-many, reference จากฝั่งลูก | ตัวแม่เล็กเสมอ; อ่านหน้า 10 key ด้วย index | ต้อง query ที่สอง; ต้องมี index บน reference |
+| many-to-many, array ทั้งสองฝั่ง | อ่านเร็วทั้งสองทาง ไม่ต้อง `$lookup` | สองการเขียนต่อการเปลี่ยน; ต้องใช้ transaction เพื่อความสอดคล้อง |
+| array ที่ embed แบบไม่จำกัด | ง่ายตอนแรก | update ช้าลง 5 เท่าที่ 15 MB แล้วล้มเหลวถาวร |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า cardinality (one-to-many, many-to-many) ตัดสินใจ embed หรือ reference ให้เองโดยอัตโนมัติ** — cardinality บอกแค่รูปร่างที่เป็นไปได้ ส่วน access pattern และการเติบโตต่างหากที่ตัดสินระหว่างตัวเลือกที่เหลือ
-- **มองข้ามว่า one-to-many ที่ "ดูน้อย" วันนี้อาจไม่มีขอบเขตในอนาคต** — tag ของ post ไม่โต แต่ comment ของ post โตได้ไม่จำกัด ต้องถามคำถาม "โตได้ไม่จำกัดหรือไม่" ทุกครั้ง ไม่ใช่แค่ดูจำนวนปัจจุบัน
-- **ทำ many-to-many แบบ reference สองฝั่งโดยไม่จำเป็น** — ถ้าคุณอ่านจากทิศทางเดียวเป็นหลัก การเก็บ reference array แค่ฝั่งเดียวก็พอ การเก็บสองฝั่งเพิ่มต้นทุนการเขียนโดยไม่มีประโยชน์ถ้าไม่มีใครอ่านอีกทิศทาง
+- **"cardinality ตัดสิน embed หรือ reference"** - มันแค่จำกัด; การเข้าถึงและการเติบโตตัดสิน
+- **"รายการที่เล็กวันนี้คือมีขอบเขต"** - ถามว่าโตได้ไหม ไม่ใช่ตอนนี้ใหญ่แค่ไหน
+- **"server ย้ายทั้ง document ทุกครั้งที่ update"** - นั่นคือ MMAPv1; WiredTiger เขียนใหม่ และต้นทุนยังโตตามขนาด
+- **"array ของ reference ทั้งสองฝั่งฟรี"** - crash ระหว่างสองการเขียนทำให้ไม่ตรงกัน
+- **"16 MiB คือปัญหาเดียว"** - update ช้าลง 5 เท่าแล้วที่ 15 MB
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ทีมที่รวมข้อมูลลูกค้าจากหลายระบบเดิม** — รวมข้อมูลลูกค้าจากระบบเดิมหลายระบบเข้าเป็น "single view" ด้วยการ embed ข้อมูลที่เกี่ยวข้องกับลูกค้าคนเดียว (one-to-few) ไว้ใน document เดียว แทนที่จะกระจายอยู่หลายตารางเหมือนระบบเดิม
->
-> **แพลตฟอร์มเรียนออนไลน์ทั่วไป** — model ความสัมพันธ์แบบ many-to-many ระหว่างผู้เรียนกับคอร์สด้วย reference array บนทั้งสองฝั่ง เพื่อให้ query ทั้ง "คอร์สที่ผู้เรียนคนนี้ลง" และ "ผู้เรียนที่ลงคอร์สนี้" เร็วทั้งสองทิศทาง
+> คู่มือ MongoDB ระบุกรณีเดียวกับที่ใช้ที่นี่: reference เมื่อ "Your embedded data grows without bounds" และระบุขีดจำกัดขนาด BSON document 16 mebibyte ที่ตายตัว ([Embedded Data Versus References](https://www.mongodb.com/docs/manual/data-modeling/concepts/embedding-vs-references/); [limits](https://www.mongodb.com/docs/manual/reference/limits/), ตรวจ 2026-09-30)
 
-export const quizRelationships = [
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server แบบ replica set เดียวกัน (การลงทะเบียนสองฝั่ง commit ทั้งสองข้าง) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
+
+export const quizRel = [
   {
-    q: 'สำหรับความสัมพันธ์แบบ one-to-one ที่ข้อมูลที่เกี่ยวข้องมีขนาดเล็กและถูกอ่านด้วยกัน อะไรมักดีที่สุด?',
+    q: 'ผู้ใช้มีโปรไฟล์หนึ่งอันที่อ่านพร้อมผู้ใช้เสมอ โมเดลใดเหมาะ',
     options: [
-      'reference จาก collection แยกต่างหาก',
-      'embed เป็น sub-object ใน document เดียวกัน',
-      'เก็บไว้ใน join table',
-      'แยกออกเป็นหลาย document',
+      'embed โปรไฟล์เป็น sub-object',
+      'collection แยกที่ join ทุกครั้งที่อ่าน',
+      'สองฐานข้อมูล',
+      'capped collection',
     ],
-    answer: 1,
+    answer: 0,
+    explain: 'findOne ครั้งเดียวคืน user_42 พร้อมโปรไฟล์ข้างใน; ไม่มีอะไรต้อง join',
   },
   {
-    q: 'ในความสัมพันธ์แบบ one-to-many เมื่อใดที่คุณควร reference จากฝั่งลูกแทนที่จะ embed เป็น array?',
+    q: 'one-to-many ที่ฝั่ง many โตไม่จำกัด reference ควรอยู่ที่ไหน',
     options: [
-      'เสมอ ไม่ว่าขนาดจะเป็นอย่างไร',
-      'เมื่อฝั่ง many สามารถโตได้ใหญ่ หรือถูก query ด้วยตัวเอง',
-      'เฉพาะเมื่อมีลูกเพียงตัวเดียวเท่านั้น',
-      'ไม่มีวัน — embedding ถูกต้องเสมอ',
+      'ใน array ที่โตไม่หยุดบนตัวแม่',
+      'บนลูกแต่ละตัว (authorId) พร้อม index',
+      'ไม่ต้องมี',
+      'ใน text index',
     ],
     answer: 1,
+    explain: 'posts.authorId กับ { authorId, at } ให้ FETCH > IXSCAN อ่าน 10 key สำหรับหน้า 10 โพสต์; ถ้าไม่มี index เป็น COLLSCAN 20 000',
   },
   {
-    q: 'ขนาดสูงสุดแบบแข็งของ document หนึ่งใน MongoDB คือเท่าไร?',
-    options: ['1 MB', '16 MB', '256 MB', 'ไม่มีข้อจำกัด'],
-    answer: 1,
-  },
-  {
-    q: 'ทำไมการ embed array แบบไม่มีขอบเขตจึงอันตราย ทั้งที่ยังไม่ถึง 16 MB?',
+    q: 'เกิดอะไรขึ้นกับห้องแชตที่ $push ทุกข้อความลง document เดียว',
     options: [
-      'MongoDB ปฏิเสธ array ทั้งหมดที่เกินสิบ element',
-      'document ที่โตขึ้นเรื่อย ๆ กลายเป็นอ่านและเขียนใหม่ได้ช้า',
-      'array ไม่สามารถ index ได้',
-      'ลบ element เก่าให้อัตโนมัติ',
+      'ไม่มี - array ไม่จำกัด',
+      'update ช้าลงเมื่อโต และล้มเหลวที่ 16 MiB ("Resulting document after update is larger than 16777216")',
+      'MongoDB แยกให้อัตโนมัติ',
+      'กลายเป็น read-only ที่ 1 MB',
     ],
     answer: 1,
+    explain: '$set เล็ก ๆ จาก 1.4 ms (0.01 MB) เป็น 7.6 ms (15.3 MB); push ครั้งที่ 2 090 ล้มเหลว',
+  },
+  {
+    q: 'การลงทะเบียนนักเรียนใน many-to-many สองฝั่งต้องเขียนสองครั้ง อะไรทำให้สอดคล้อง',
+    options: [
+      'ไม่ต้องทำอะไร - เป็น atomic พร้อมกันอัตโนมัติ',
+      'multi-document transaction (crash ระหว่างสองการเขียนธรรมดาทำให้ฝั่งนักเรียนอัปเดตแต่ฝั่งคอร์สว่าง)',
+      'unique index',
+      '$lookup',
+    ],
+    answer: 1,
+    explain: 'ไม่มี transaction: student_0 มี c_0 แต่ c_0 ไม่มีนักเรียน ใน transaction การลงทะเบียนที่ล้มเหลว rollback ทั้งสองฝั่ง',
+  },
+  {
+    q: 'ทำไมจึงเก็บ array ของ reference ไว้เฉพาะฝั่งที่อ่าน',
+    options: [
+      'array สองฝั่งไม่อนุญาต',
+      'การลงทะเบียนแต่ละครั้งจึงเขียนหนึ่งครั้งแทนสอง และไม่มีอะไรต้องซิงก์',
+      'ทำให้ document ใหญ่ขึ้น',
+      '$lookup บังคับ',
+    ],
+    answer: 1,
+    explain: 'แบบสองฝั่งต้องใช้ transaction เพื่อความสอดคล้อง; array ฝั่งเดียวใช้ $addToSet ครั้งเดียว',
   },
 ]
 
-<Quiz client:visible id="data-modeling/modeling-relationships" questions={quizRelationships} />
+<Quiz client:visible id="data-modeling/modeling-relationships" questions={quizRel} />
 
 <ProgressTracker client:visible id="data-modeling/modeling-relationships" />
