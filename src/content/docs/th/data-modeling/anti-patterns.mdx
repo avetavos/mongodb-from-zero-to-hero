@@ -1,6 +1,6 @@
 ---
-title: Anti-patterns
-description: ความผิดพลาดในการ modeling ที่พบบ่อยใน MongoDB — array ขนาดมหึมาที่ไม่มีขอบเขต, document เดียวที่อ้วนเกิน, การ over-referencing, การจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กโดยไม่ใช้ collation และกับดัก one-giant-collection — และวิธีแก้แต่ละข้อ
+title: Anti-pattern
+description: ข้อผิดพลาดในการออกแบบที่ดูโอเคตอนแรกแต่เจ็บตอนโต - array ไม่จำกัด, document บวม, reference มากเกินไป, regex แบบไม่สนตัวพิมพ์ใหญ่เล็ก, collection เดียวสำหรับทุกอย่าง - วัดผลทุกอัน พร้อมแก้ข้ออ้างเรื่อง collation
 sidebar:
   order: 6
 ---
@@ -9,140 +9,365 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-schema ของ MongoDB ที่แย่ส่วนใหญ่ไม่ได้แย่เพราะใครเมินกฎ แต่แย่เพราะการตัดสินใจที่ดูสมเหตุสมผลค่อย ๆ เสื่อมไปตามเวลา array ที่ embed ไว้ไม่มีปัญหาตอนมีสิบ element แต่กลายเป็นภาระตอนมีหมื่น สัญชาตญาณ "เก็บทุกอย่างไว้ด้วยกัน" ที่ทำให้เวอร์ชันแรกดูเรียบง่าย กลับลาก database จมในเวอร์ชันสอง
+schema MongoDB ที่แย่ส่วนใหญ่ไม่ได้แย่เพราะมีคนเมินกฎ - แต่แย่เพราะการตัดสินใจที่ดูสมเหตุสมผลเสื่อมเมื่อเวลาผ่านไป array ที่ embed ซึ่งโอเคที่สิบสมาชิกกลายเป็นภาระที่หมื่นสมาชิก บทสุดท้ายนี้รวบรวม **anti-pattern** ที่เกิดซ้ำบ่อยที่สุด: หน้าตาเป็นอย่างไร ทำไมเจ็บ (พร้อมตัวเลขเมื่อมี) และวิธีแก้ที่ชัดเจน
 
-บทเรียนสุดท้ายนี้รวม **anti-pattern** ที่เจอบ่อยที่สุด: แต่ละแบบหน้าตาเป็นอย่างไร เจ็บตรงไหน และแก้ยังไงให้เป็นรูปธรรม การมองออกตั้งแต่ตอน design review คือหนึ่งในทักษะ modeling ที่คุ้มค่าที่สุดที่คุณจะฝึกได้
+จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch บทนี้เตรียม collection `people` ที่มีชื่อ 50 003 รายการสำหรับสาธิต collation ส่วนอื่นเตรียมสิ่งที่ต้องใช้เอง
 
-## array ขนาดมหึมาที่ไม่มีขอบเขต
+```js
+// mongosh/anti-seed.js
+globalThis.plan = (cur) => {
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+const names = ["Ada", "Grace", "Linus", "Margaret", "Edsger"];
+db.people.insertMany(Array.from({ length: 50000 }, (_, i) => ({ name: (i % 500 === 0 ? ["ADA", "ada", "Ada"][(i / 500) % 3] : names[i % 5]) + i, city: "c" + (i % 100) })));
+db.people.insertMany([{ name: "Ada" }, { name: "ada" }, { name: "ADA" }]);
+console.log("people:", db.people.countDocuments());
+```
 
-anti-pattern ที่เจอบ่อยที่สุดคือการ embed array ที่โตแบบไม่มีเพดาน — ทุก comment บน post ยอดนิยม ทุก event ในประวัติของผู้ใช้ การ append แต่ละครั้งทำให้ document ใหญ่ขึ้นและโหลดช้าลง แล้วก็ค่อย ๆ ไต่เข้าหาลิมิต 16 MB
+```text
+people: 50003
+```
 
-**วิธีแก้:** แยกลูกออกไปเป็น collection ต่างหาก แล้วให้ลูกแต่ละตัว reference กลับมาที่ parent หรือใช้ Bucket pattern เพื่อจำกัดการเติบโตต่อช่วงเวลา อย่างเช่น post ก้อนนี้ *ไม่ควร* embed ทุก comment:
+## array ขนาดใหญ่ที่ไม่จำกัด
+
+anti-pattern ที่พบบ่อยที่สุดคือการ embed array ที่โตไม่จำกัด - ทุกคอมเมนต์ของโพสต์ยอดนิยม ทุกเหตุการณ์ในประวัติของผู้ใช้ บทก่อนวัดไว้แล้ว: update เล็ก ๆ จาก 1.4 ms เป็น 7.6 ms เมื่อ array ถึง 15 MB และการเขียนล้มเหลวที่ push ที่ 2 090 ด้วย `Resulting document after update is larger than 16777216` **วิธีแก้:** ย้ายลูกไป collection ของมันและ reference แม่จากลูกแต่ละตัว (พร้อม index) หรือใช้ pattern Bucket จำกัดการโตต่อช่วง โพสต์เก็บตัวนับ และคอมเมนต์อยู่แยกเพื่อแบ่งหน้าได้:
 
 ```json
 { "_id": "post_310", "title": "Why documents win", "commentCount": 8421 }
-```
-
-comment อยู่แยก แต่ละตัวชี้กลับมาที่ post  post จึงยังเล็กอยู่ และ comment ก็แบ่งหน้าได้:
-
-```json
 { "_id": "cmt_9", "postId": "post_310", "user": "Grace", "text": "Great read." }
 ```
 
-## document เดียวที่อ้วนเกิน
+## document เดี่ยวที่บวม
 
-ปัญหาใกล้เคียงกันคือความอยากยัด *ทุกอย่าง* ของ entity หนึ่งเข้าไปใน document เดียว — ผู้ใช้พร้อม activity log ฉบับเต็ม ทุกคำสั่งซื้อ ทุก preference ทุก session nest ซ้อนกันอยู่ข้างใน จนสุดท้าย document ใหญ่เกินตัว อ่านทีเดียวแค่จะเอา email address ก็ลากข้อมูลเป็นเมกะไบต์ออกจากดิสก์
+ที่เกี่ยวข้องกันคือความอยากยัด *ทุกอย่าง* ของ entity ลง document เดียว - ผู้ใช้พร้อมบันทึกกิจกรรมทั้งหมดข้างใน การอ่านแค่อีเมลยังแตะ document ขนาดใหญ่ และ cache ถือมันทั้งหมด ผู้ใช้ 300 คน กิจกรรมคนละ 1 000 รายการ เทียบกับผู้ใช้ชุดเดียวกันที่ย้ายกิจกรรมออก:
 
-**วิธีแก้:** เก็บเฉพาะ field ร้อนที่อ่านบ่อยไว้ใน document หลัก แล้วย้ายข้อมูลเย็นหรือก้อนใหญ่ไปไว้อีก collection แล้ว reference เอา read locality ช่วยได้ก็ต่อเมื่อข้อมูลถูกอ่านพร้อมกันจริง ๆ การ embed ข้อมูลเย็นไม่ได้อะไรกลับมาเลย แต่คุณจ่ายค่าปรับทุกครั้งที่อ่าน
+```js
+// mongosh/anti-bloat.js
+const event = { at: new Date(), kind: "page_view", url: "/some/path/with/query?x=1", ua: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", tags: ["a", "b", "c"] };
+db.usersFat.insertMany(Array.from({ length: 300 }, (_, i) => ({ _id: i, email: "u" + i + "@example.test", activity: Array.from({ length: 1000 }, () => event) })));
+db.usersSlim.insertMany(Array.from({ length: 300 }, (_, i) => ({ _id: i, email: "u" + i + "@example.test", activityCount: 1000 })));
+db.usersActivity.insertMany(Array.from({ length: 300 }, (_, i) => ({ userId: i, activity: Array.from({ length: 1000 }, () => event) })));         // the cold data, moved out
+const size = (c) => { const b = db[c].stats().size; return b > 1048576 ? +(b / 1048576).toFixed(1) + " MB" : Math.round(b / 1024) + " KB"; };
+const time = (f) => { const t = Date.now(); f(); return Date.now() - t; };
+console.log("data size - fat:", size("usersFat"), "| slim:", size("usersSlim"), "(+ the moved-out activity collection:", size("usersActivity") + ")");
+console.log("3 000 reads of just the email (projection { email: 1 }):");
+console.log({ fat: time(() => { for (let i = 0; i < 3000; i++) db.usersFat.findOne({ _id: i % 300 }, { email: 1 }); }) + " ms", slim: time(() => { for (let i = 0; i < 3000; i++) db.usersSlim.findOne({ _id: i % 300 }, { email: 1 }); }) + " ms" });
+```
 
-## Over-referencing
+```text
+data size - fat: 49.8 MB | slim: 18 KB (+ the moved-out activity collection: 49.8 MB)
+3 000 reads of just the email (projection { email: 1 }):
+{ fat: '891 ms', slim: '787 ms' }
+```
 
-ความผิดพลาดฝั่งตรงข้ามคือแยกข้อมูลออกมากเกินไป จน render หน้าจอเดียวต้องยิง query สิบกว่าครั้ง เท่ากับสร้างปัญหา relational join ที่ MongoDB ตั้งใจจะเลี่ยงขึ้นมาใหม่ ถ้าการแสดงคำสั่งซื้อหนึ่งใบต้องดึงคำสั่งซื้อ แล้วลูกค้า แล้วสินค้าทีละตัว แล้ว category ของสินค้าแต่ละตัวอีก — คุณ over-reference แล้ว
+การอ่านบนเครื่องที่ warm พร้อม projection ต่างกันไม่มาก (891 ms เทียบ 787 ms สำหรับอ่าน 3 000 ครั้ง) - projection ประหยัดเครือข่าย ไม่ใช่งานของ server - แต่ข้อมูลที่อยู่ประจำคือ 49.8 MB เทียบ 18 KB และรอยเท้านั้น (cache, I/O, backup) คือต้นทุนถาวร **วิธีแก้:** เก็บ field ที่ร้อนใน document หลักและย้ายข้อมูลย่อยที่เย็นหรือใหญ่ไปยัง collection ที่ reference การ embed ข้อมูลเย็นไม่ได้อะไรเลย
 
-**วิธีแก้:** embed ข้อมูลที่อ่านพร้อมกันจริงและมีขอบเขตชัดเจน หรือใช้ Extended Reference pattern คัดลอกแค่ field หนึ่งสองตัวที่คุณแสดงทุกครั้ง การอ่านที่ใช้บ่อยจะได้ไม่แตกออกเป็น join ฝั่งแอป
+## reference มากเกินไป
 
-## การจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กโดยไม่ใช้ collation
+ความผิดพลาดตรงข้ามคือแยกจนหน้าจอเดียวต้อง lookup เป็นโหล - ปัญหา join แบบ relational อีกครั้ง order ลูกค้า สินค้าสามรายการ และหมวดของมัน นับด้วย profiler:
 
-อันนี้แนบเนียนกว่า: คุณอยากได้การค้นหาแบบไม่สนตัวพิมพ์ใหญ่เล็ก (ให้ `"Ada"`, `"ada"` และ `"ADA"` match กันหมด) เลยหันไปใช้ regular expression อย่าง `/^ada$/i` ผลลัพธ์ถูก แต่ใช้ index ปกติได้ไม่เต็มที่ query จึงค่อย ๆ ตกไปเป็น scan แบบเงียบ ๆ
+```js
+// mongosh/anti-over-reference.js
+db.categories.insertMany([{ _id: "cat_1", name: "Databases" }, { _id: "cat_2", name: "Systems" }]);
+db.customers.insertOne({ _id: "cust_77", name: "Grace Hopper", city: "Cambridge" });
+db.prods.insertMany([{ _id: "BK-1", title: "Distributed Systems", categoryId: "cat_2" }, { _id: "BK-2", title: "Designing Data-Intensive Applications", categoryId: "cat_1" }, { _id: "BK-3", title: "Compilers", categoryId: "cat_2" }]);
+db.ordersRef2.insertOne({ _id: "o1", customerId: "cust_77", items: [{ productId: "BK-1", qty: 1 }, { productId: "BK-2", qty: 2 }, { productId: "BK-3", qty: 1 }] });
+db.ordersExt.insertOne({ _id: "o1", customer: { id: "cust_77", name: "Grace Hopper" }, items: [{ productId: "BK-1", title: "Distributed Systems", category: "Systems", qty: 1 }, { productId: "BK-2", title: "Designing Data-Intensive Applications", category: "Databases", qty: 2 }, { productId: "BK-3", title: "Compilers", category: "Systems", qty: 1 }] });
+db.setProfilingLevel(2);
+const o = db.ordersRef2.findOne({ _id: "o1" });                                           // 1: the order
+db.customers.findOne({ _id: o.customerId });                                              // 2: its customer
+for (const i of o.items) { const p = db.prods.findOne({ _id: i.productId }); db.categories.findOne({ _id: p.categoryId }); }   // 3 products + 3 categories
+db.setProfilingLevel(0);
+const n1 = db.system.profile.countDocuments({ "command.find": { $in: ["ordersRef2", "customers", "prods", "categories"] } });
+db.system.profile.drop(); db.setProfilingLevel(2);
+db.ordersExt.findOne({ _id: "o1" });
+db.setProfilingLevel(0);
+const n2 = db.system.profile.countDocuments({ "command.find": "ordersExt" });
+console.log("queries to render the order page - fully normalized:", n1, "| embedded snapshot + extended reference:", n2);
+assert.strictEqual(n2, 1);
+```
 
-**วิธีแก้:** ตั้ง **collation** แบบไม่สนตัวพิมพ์ใหญ่เล็กไว้ที่ collection หรือที่ index แล้ว query equality ธรรมดาก็จะ match ข้ามตัวพิมพ์ *และ* ใช้ index ได้ด้วย ทางที่ MongoDB รองรับอย่างเป็นทางการและ index ได้คือ collation ไม่ใช่ flag ของ regex
+```text
+queries to render the order page - fully normalized: 8 | embedded snapshot + extended reference: 1
+```
 
-## ทุกอย่างอยู่ใน collection เดียว
+แปดคิวรีเทียบหนึ่ง **วิธีแก้:** embed ข้อมูลที่อ่านด้วยกันจริงและมีขอบเขต หรือใช้ pattern Extended Reference คัดลอกหนึ่งสอง field ที่แสดงเสมอ (title, category, ชื่อลูกค้า) เพื่อให้การอ่านทั่วไปไม่กระจายออก snapshot บน order ยังถูกต้องเชิงประวัติศาสตร์ ดังที่บท embedding แสดง
 
-ข้อสุดท้ายคือความอยากโยน entity ที่ไม่เกี่ยวกันเลย — ผู้ใช้ คำสั่งซื้อ สินค้า log — ลงไปใน collection เดียว แล้วแยกกันด้วย field `type` อย่างเดียว ผลคือ index บวมด้วย document ที่ไม่เกี่ยวข้อง validation อธิบายรูปร่างที่สม่ำเสมอไม่ได้ และทุก query ต้อง filter `type` ก่อนเสมอ
+## การจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็ก
 
-**วิธีแก้:** ให้ entity แต่ละชนิดมี collection ของตัวเอง collection ราคาถูกมาก เลย์เอาต์แบบหนึ่ง entity ต่อหนึ่ง collection ทำให้ index กระชับ validator มีความหมาย และ query เรียบง่าย
+การค้นแบบไม่สนตัวพิมพ์ใหญ่เล็ก (`"Ada"`, `"ada"`, `"ADA"`) ล่อให้ใช้ regex อย่าง `/^ada$/i` บทเดิมบอกว่า **collation** "บน collection **หรือ index**" ทำให้ query equality ธรรมดาไม่สนตัวพิมพ์ *และ* ใช้ index ได้ ครึ่งหนึ่งผิด สี่การตั้งค่าบนชื่อ 50 003 รายการ ซึ่งสามอันตรงกับ `ada` ทุกตัวพิมพ์:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/anti-collation.js
+    console.log("1. regex /^ada$/i, plain index on name   :");
+    db.people.createIndex({ name: 1 });
+    console.log("   ", plan(db.people.find({ name: /^ada$/i })));
+    db.people.dropIndex("name_1");
+    db.people.createIndex({ name: 1 }, { collation: { locale: "en", strength: 2 }, name: "name_ci" });
+    console.log("2. index with collation, plain query      :", plan(db.people.find({ name: "ada" })), "-> matches:", db.people.find({ name: "ada" }).toArray().length);
+    console.log("3. index with collation, SAME collation   :", plan(db.people.find({ name: "ada" }).collation({ locale: "en", strength: 2 })), "-> matches:", db.people.find({ name: "ada" }).collation({ locale: "en", strength: 2 }).toArray().length);
+    db.createCollection("peopleCI", { collation: { locale: "en", strength: 2 } });
+    db.peopleCI.insertMany(db.people.find({}, { _id: 0 }).toArray());
+    db.peopleCI.createIndex({ name: 1 });                                                       // inherits the collection collation
+    console.log("4. collection default collation, plain   :", plan(db.peopleCI.find({ name: "ada" })), "-> matches:", db.peopleCI.find({ name: "ada" }).toArray().length);
+    assert.strictEqual(db.peopleCI.find({ name: "ada" }).toArray().length, 3);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/anti-collation.mjs
+    const people = db.collection("people");
+    await people.insertMany(["Ada", "ada", "ADA", "Grace"].map((name) => ({ name })));
+    await people.createIndex({ name: 1 }, { collation: { locale: "en", strength: 2 }, name: "name_ci" });
+    const plain = await people.find({ name: "ada" }).toArray();
+    const ci = await people.find({ name: "ada" }).collation({ locale: "en", strength: 2 }).toArray();
+    const stage = async (cur) => { const e = await cur.explain("queryPlanner"); let p = e.queryPlanner.winningPlan; while (p.inputStage) p = p.inputStage; return p.stage; };
+    console.log({ plainMatches: plain.length, plainStage: await stage(people.find({ name: "ada" })), ciMatches: ci.length, ciStage: await stage(people.find({ name: "ada" }).collation({ locale: "en", strength: 2 })) });
+    if (plain.length !== 1 || ci.length !== 3) throw new Error("collation behaviour unexpected");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from pymongo.collation import Collation
+
+    ci = Collation(locale="en", strength=2)
+    db.people.create_index([("name", 1)], collation=ci, name="name_ci")
+    rows = list(db.people.find({"name": "ada"}, collation=ci))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    ci := &options.Collation{Locale: "en", Strength: 2}
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys:    bson.D{{Key: "name", Value: 1}},
+        Options: options.Index().SetName("name_ci").SetCollation(ci),
+    })
+    if err != nil {
+        return err
+    }
+    cur, err := coll.Find(ctx, bson.M{"name": "ada"}, options.Find().SetCollation(ci))
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let ci = Collation::builder()
+        .locale("en".to_string())
+        .strength(CollationStrength::Secondary)
+        .build();
+    coll.create_index(
+        IndexModel::builder()
+            .keys(doc! { "name": 1 })
+            .options(
+                IndexOptions::builder()
+                    .name("name_ci".to_string())
+                    .collation(ci.clone())
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    let mut cursor = coll
+        .find(doc! { "name": "ada" })
+        .collation(ci)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+1. regex /^ada$/i, plain index on name   :
+    FETCH > IXSCAN(name_1)  returned=3 keys=50003 docs=3
+2. index with collation, plain query      : COLLSCAN  returned=1 keys=0 docs=50003 -> matches: 1
+3. index with collation, SAME collation   : FETCH > IXSCAN(name_ci)  returned=3 keys=3 docs=3 -> matches: 3
+4. collection default collation, plain   : FETCH > IXSCAN(name_1)  returned=3 keys=3 docs=3 -> matches: 3
+```
+
+```text
+{
+  plainMatches: 1,
+  plainStage: 'COLLSCAN',
+  ciMatches: 3,
+  ciStage: 'IXSCAN'
+}
+```
+
+1. regex ใช้ index แต่เป็น **การสแกนทั้ง 50 003 key** เพื่อคืน 3 document (seek ไม่ได้)
+2. index ที่มี collation ถูกใช้ **เฉพาะโดย query ที่ระบุ collation เดียวกัน** query ธรรมดาเป็น COLLSCAN และ match แค่ document ที่ตัวพิมพ์ตรง
+3. ส่ง collation เดียวกันใน query ได้ 3 key, 3 match
+4. **collation เริ่มต้นบน collection** คือการตั้งค่าที่ query ธรรมดาและ index ของมัน match แบบไม่สนตัวพิมพ์ได้โดยไม่ต้องจำ option ทุกครั้ง
+
+## ทุกอย่างใน collection เดียว
+
+สัญชาตญาณที่จะโยนหลาย entity ที่ไม่เกี่ยวกันลง collection เดียวโดยแยกด้วย field `type` ทำให้ index ครอบคลุม document ที่ไม่เกี่ยว และ validator อธิบายรูปทรงเดียวไม่ได้ index ธรรมดาบน `email` ยังเก็บ entry ของทุก document ที่ไม่มี field นั้นด้วย:
+
+```js
+// mongosh/anti-one-collection.js
+const kb = (c, n) => Math.round(db[c].stats().indexSizes[n] / 1024);
+db.everything.insertMany(Array.from({ length: 30000 }, (_, i) => ({ type: "user", email: "u" + i + "@example.test", name: "User " + i })));
+db.everything.insertMany(Array.from({ length: 30000 }, (_, i) => ({ type: "order", total: i % 100, userId: i % 30000 })));
+db.everything.insertMany(Array.from({ length: 30000 }, (_, i) => ({ type: "log", level: "info", message: "event " + i })));
+db.users2.insertMany(Array.from({ length: 30000 }, (_, i) => ({ email: "u" + i + "@example.test", name: "User " + i })));
+db.everything.createIndex({ email: 1 });
+db.everything.createIndex({ email: 1 }, { name: "email_partial", partialFilterExpression: { type: "user" } });
+db.users2.createIndex({ email: 1 });
+console.log("documents:", db.everything.countDocuments(), "| with an email:", db.everything.countDocuments({ email: { $exists: true } }), "| without one (indexed as null by a plain index):", db.everything.countDocuments({ email: { $exists: false } }));
+console.log("index KB  - mixed collection, plain { email: 1 }:", kb("everything", "email_1"), "| mixed, partial on type:user:", kb("everything", "email_partial"), "| users-only collection:", kb("users2", "email_1"));
+console.log("a lookup for a missing email on the plain index does an index seek into the null entries:", plan(db.everything.find({ email: null }).limit(1)));
+```
+
+```text
+documents: 90000 | with an email: 30000 | without one (indexed as null by a plain index): 60000
+index KB  - mixed collection, plain { email: 1 }: 952 | mixed, partial on type:user: 748 | users-only collection: 748
+a lookup for a missing email on the plain index does an index seek into the null entries: LIMIT > FETCH > IXSCAN(email_1)  returned=1 keys=1 docs=1
+```
+
+ที่นี่ความสิ้นเปลืองไม่มาก (952 KB เทียบ 748 KB) แต่โตตามจำนวน document ที่ไม่เกี่ยวกัน **วิธีแก้:** หนึ่ง collection ต่อ entity หรืออย่างน้อยใช้ partial index ที่กรองด้วย `type` ส่วนสุดโต่งอีกด้านก็เป็นกับดัก: Atlas ระบุ "Reduce Number of Collections" ในคำแนะนำ schema จึงควรแยกตาม *entity* ไม่ใช่ตาม tenant หรือรายวัน ([Atlas schema suggestions](https://www.mongodb.com/docs/atlas/performance-advisor/schema-suggestions/), ตรวจ 2026-09-30)
 
 ## anti-pattern และวิธีแก้
-
-แต่ละความผิดพลาดมีทางแก้ตรง ๆ ที่คุณเจอมาแล้วในโมดูลนี้:
 
 export const antiPatternDiagram = `flowchart LR
   A1["Massive unbounded array"] --> F1["Reference children or use the Bucket pattern"]
   A2["Bloated single document"] --> F2["Keep hot fields, reference cold and large data"]
   A3["Over-referencing everywhere"] --> F3["Embed co-accessed data or extend the reference"]
-  A4["Case-insensitive via regex"] --> F4["Use a case-insensitive collation"]
+  A4["Case-insensitive via regex"] --> F4["Collection default collation, or pass the index collation"]
   A5["Everything in one collection"] --> F5["One entity per collection"]`
 
-<Mermaid code={antiPatternDiagram} title="แต่ละ anti-pattern ในการ modeling จับคู่กับวิธีแก้ที่เป็นรูปธรรมซึ่งดึงมาจากบทเรียนก่อนหน้า" />
-
-สังเกตว่าทุกวิธีแก้คือการเอาบทเรียนก่อนหน้ามาใช้อย่างมีวินัย: model ตาม access pattern จำกัดขอบเขต array ที่ embed reference สิ่งที่แชร์กันและก้อนใหญ่ embed สิ่งที่อ่านพร้อมกัน แล้วปล่อยให้ cardinality กับ access pattern เป็นคนตัดสินแต่ละความสัมพันธ์ ไม่ใช่ความเคยชิน
+<Mermaid code={antiPatternDiagram} title="anti-pattern ในการออกแบบแต่ละแบบเชื่อมกับวิธีแก้ที่ชัดเจนจากบทก่อนหน้า" />
 
 ## เคล็ดลับและข้อควรระวัง
 
-- anti-pattern แทบไม่เคยดูผิดในวันแรก แต่จะโผล่ตอนสเกล ดังนั้น review schema โดยคิดถึงการเติบโต ไม่ใช่แค่ขนาดข้อมูลวันนี้
-- "unbounded array" กับ "bloated document" คือโรคเดียวกันคนละหน้า: embed ข้อมูลที่ควรจะ reference วิธีรักษาก็อันเดียวกัน
-- Over-referencing คือการแก้เกินตัว — แยกทุกอย่างเพราะเคยเจ็บจากการ embed มาครั้งหนึ่ง คำตอบคือใช้วิจารณญาณเป็นราย ๆ ไป ไม่ใช่ตั้งกฎเหมารวม
-- MongoDB Atlas ดันหลายข้อพวกนี้ขึ้นมาเป็นคำแนะนำ **Schema Anti-Pattern** ในเครื่องมือด้าน performance ถ้าคุณรันบน Atlas ก็ปล่อยให้ Atlas ชี้ array ไร้ขอบเขตและ document ที่ใหญ่เกินให้
-- collection ราคาถูก ถ้าลังเลว่าจะผสม entity หลายชนิดไว้ด้วยกันไหม ให้แยก — เลย์เอาต์แบบแยกต่อ entity มักเสื่อมสภาพช้ากว่าเสมอ
+- anti-pattern แทบไม่เคยดูผิดในวันแรก; ทบทวน schema โดยคิดถึงการเติบโต
+- "array ไม่จำกัด" และ "document บวม" คือสองหน้าของการ embed ข้อมูลที่ควร reference
+- การ reference มากเกินไปคือการแก้เกินจริง: 8 query สำหรับหนึ่งหน้า ตัดสินทีละความสัมพันธ์
+- สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กใช้ collation เริ่มต้นของ collection หรือให้ query ระบุ collation ของ index; regex ที่มี `i` สแกนทั้ง index
+- MongoDB Atlas แสดงหลายข้อเหล่านี้ (array ไม่จำกัด, document บวม, `$lookup` มากเกินไป, collection มากเกินไป, index ที่ไม่จำเป็น) ใน Performance Advisor ซึ่งใช้ได้บน cluster M10 ขึ้นไป และใน Compass Performance Insights
 
-<Callout title="schema ที่แย่ส่วนใหญ่เคยสมเหตุสมผลมาก่อน">
-anti-pattern ไม่ใช่ความผิดพลาดพิสดาร แต่คือการตัดสินใจธรรมดาที่ไม่รอดจากการเติบโต แนวป้องกันคือนิสัยจากทั้งโมดูลนี้: จำกัดขอบเขต array reference สิ่งที่แชร์กันและก้อนใหญ่ embed สิ่งที่อ่านพร้อมกัน ให้ entity แต่ละชนิดมี collection ของตัวเอง และใช้ collation แทน regex สำหรับการ match ข้ามตัวพิมพ์ใหญ่เล็ก
+<Callout title="schema ที่แย่ส่วนใหญ่เคยสมเหตุสมผล">
+anti-pattern คือการตัดสินใจธรรมดาที่ไม่รอดการเติบโต เกราะป้องกันคือนิสัยจากโมดูลนี้: จำกัด array, reference สิ่งที่ใช้ร่วมกันและใหญ่, embed สิ่งที่อ่านด้วยกัน, ให้แต่ละ entity มี collection ของตัวเอง และใช้ collation - ไม่ใช่ regex - สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็ก
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอให้ "ทำให้การค้นชื่อไม่สนตัวพิมพ์ใหญ่เล็กและเร็ว" AI สร้าง index แบบไม่สนตัวพิมพ์ใหญ่เล็กและ query เหมือนเดิม:
+
+<SpotTheBug lang="js" code={`// AI comment: "the index is case-insensitive, so this find is too - and it uses the index"
+await people.createIndex({ name: 1 }, { collation: { locale: "en", strength: 2 } });
+const rows = await people.find({ name: "ada" }).toArray();`}>
+
+query ใช้ index ที่มี collation ก็ต่อเมื่อระบุ collation เดียวกัน หากไม่ระบุ find ข้างบนเป็น COLLSCAN ทั้ง 50 003 document และ match แค่ `ada` ที่ตัวพิมพ์ตรง (1 match ไม่ใช่ 3) - ผลผิด *และ* ช้า โดยไม่มี error ให้เพิ่ม `.collation({ locale: "en", strength: 2 })` ในทุก query หรือ (ดีกว่า) สร้าง collection ด้วย collation เริ่มต้นนั้น output ของ fence ข้างบนแสดงว่าทั้งสองวิธีใช้ได้ (IXSCAN, 3 match)
+
+</SpotTheBug>
+
+## Mental Model
+
+anti-pattern คือการตัดสินใจที่ต้นทุนโตตามข้อมูลขณะที่ประโยชน์คงที่: array ที่โต document ที่แบกน้ำหนักเย็น query ที่สแกนทั้ง index ถามทุกการเลือกออกแบบว่า "ที่ข้อมูลมากขึ้น 100 เท่าเกิดอะไร" - คำตอบคือตัวเลขที่คงที่ หรือตัวเลขที่อธิบายเหตุการณ์ปีหน้า
 
 ## ข้อแลกเปลี่ยน
 
-| แนวทาง | Benefit | Cost |
+| แนวทาง | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| มีวินัยในการ modeling ตั้งแต่ต้น (จำกัดขอบเขต array, เลือก embed/reference ตาม access pattern) | anti-pattern น้อยลง แก้ปัญหาตอนสเกลง่ายกว่ามาก | ใช้เวลาออกแบบล่วงหน้ามากขึ้นก่อนเริ่มเขียนโค้ด |
-| model แบบรวดเร็วโดยไม่วางแผนล่วงหน้า | เริ่มต้นเร็ว ส่งของได้ไว | anti-pattern สะสมเงียบ ๆ แล้วเจ็บหนักตอนสเกล ต้อง migrate schema ทีหลังภายใต้แรงกดดัน |
+| ออกแบบอย่างมีวินัยล่วงหน้า | anti-pattern น้อยกว่า; แก้ตอนโตง่ายกว่า | ใช้เวลาออกแบบมากกว่าก่อนเขียนโค้ด |
+| ออกแบบเร็ว แก้ทีหลัง | ส่งมอบเร็วกว่า | migration ท่ามกลางแรงกดดัน (dual-write, backfill) |
+| collation บน collection | query ธรรมดาไม่สนตัวพิมพ์และใช้ index | การเปรียบเทียบ string ทั้งหมดใน collection เปลี่ยน |
+| collation บน index เดียว | เปลี่ยนเฉพาะ index นั้น | ทุก query ต้องระบุ collation ซ้ำ |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า anti-pattern เป็นความผิดพลาดของมือใหม่เท่านั้น** — ส่วนใหญ่คือการตัดสินใจที่สมเหตุสมผลตอน design แรก แล้วค่อยเสื่อมตามการเติบโตของข้อมูล ไม่ใช่ความประมาท
-- **แก้ anti-pattern โดยเปลี่ยน schema ทันทีโดยไม่มีแผน migration** — การย้ายจาก embedded array ไปเป็น reference บน collection ที่มีข้อมูล production อยู่แล้ว ต้องมี rollout ทีละขั้น (dual-write แล้วค่อย backfill) ไม่ใช่ deploy แล้วจบ
+- **"anti-pattern คือความผิดพลาดของมือใหม่"** - ส่วนใหญ่สมเหตุสมผลตอนออกแบบและเสื่อมเมื่อข้อมูลโต
+- **"collation บน index ทำให้ query ธรรมดาไม่สนตัวพิมพ์"** - query ธรรมดาเป็น COLLSCAN และ match 1 รายการ
+- **"regex บน field ที่มี index ไม่เป็นไร"** - `/^ada$/i` อ่านทั้ง 50 003 key
+- **"collection ฟรี จึงแยกได้ไม่จำกัด"** - Atlas เตือนเรื่อง collection มากเกินไป; แยกตาม entity
+- **"แก้ schema ด้วยการ deploy การเปลี่ยนแปลง"** - การย้าย array ที่ embed ไปเป็น reference บนข้อมูลจริงต้อง rollout เป็นขั้น (dual-write แล้ว backfill)
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **พจนานุกรมออนไลน์ขนาดใหญ่ทั่วไป** — กรณีคลาสสิกของ unbounded array: เก็บทุก occurrence ของคำในประโยคตัวอย่างไว้ใน array เดียวของ document คำศัพท์ จนบาง document โตจนเป็นปัญหา ต้องย้ายไป reference แยก collection ภายหลัง
->
-> **แพลตฟอร์ม backend-as-a-service ทั่วไป** — เจอปัญหา performance เสื่อมจาก document ที่อ้วนเกินและ query pattern ที่ over-reference ข้าม collection มากเกินไป จนต้อง refactor schema กลางคัน
+> Atlas เปลี่ยนสิ่งเหล่านี้เป็นฟีเจอร์ของผลิตภัณฑ์: Performance Advisor และ Compass Performance Insights "identify schema design anti-patterns in your database" - array ไม่จำกัด, document บวม, `$lookup` มากเกินไป, collection มากเกินไป และ index ที่ไม่จำเป็น ([schema suggestions](https://www.mongodb.com/docs/atlas/performance-advisor/schema-suggestions/), ตรวจ 2026-09-30; Performance Advisor ต้องใช้ cluster M10 ขึ้นไป)
 
-export const quizAntiPatterns = [
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (query ที่ระบุ collation คืนทั้งสามรูปแบบตัวพิมพ์) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
+
+export const quizAnti = [
   {
-    q: 'document embed array ที่โตโดยไม่มีขอบเขต วิธีแก้ที่แนะนำคืออะไร?',
+    q: 'คุณสร้าง index ด้วย collation { locale: "en", strength: 2 } แล้วรัน find({ name: "ada" }) โดยไม่ระบุ collation เกิดอะไรขึ้น',
     options: [
-      'เพิ่มข้อจำกัด document 16 MB',
-      'แยกลูกไปอีก collection แล้ว reference หรือใช้ Bucket pattern',
-      'ลบ element เก่าแบบสุ่ม',
-      'แปลง array เป็น string',
+      'match แบบไม่สนตัวพิมพ์ใหญ่เล็กโดยใช้ index',
+      'COLLSCAN และ match แค่ 1 รายการที่ตัวพิมพ์ตรง - query ต้องระบุ collation เดียวกัน',
+      'error',
+      'IXSCAN และ 3 match',
     ],
     answer: 1,
+    explain: 'query ธรรมดา: COLLSCAN 50 003 document, 1 match เมื่อใส่ .collation(เดียวกัน): IXSCAN(name_ci), 3 key, 3 match',
   },
   {
-    q: 'over-referencing สร้างปัญหาใดขึ้นมาใหม่?',
+    q: 'การตั้งค่าใดทำให้ find({ name: "ada" }) ธรรมดา match แบบไม่สนตัวพิมพ์ใหญ่เล็กและใช้ index ได้',
     options: [
-      'ปัญหา relational join — หน้าจอเดียวต้องการการค้นหาหลายครั้ง',
-      'ข้อจำกัด document 16 MB',
-      'การสูญเสียความซ้ำซ้อนทั้งหมด',
-      'schema validation error',
+      'collation บน index อย่างเดียว',
+      'collation เริ่มต้นบน collection (createCollection) เพื่อให้ query และ index รับสืบทอด',
+      'regex ที่มี flag i',
+      '$toLower ใน $match',
+    ],
+    answer: 1,
+    explain: 'peopleCI ที่สร้างด้วย collation: find ธรรมดาใช้ name_1, 3 key, 3 match บทเดิมพูดผิดว่า "collection หรือ index"',
+  },
+  {
+    q: 'ทำไม /^ada$/i บน index ธรรมดายังช้า',
+    options: [
+      'มันสแกนทั้ง index (50 003 key) เพื่อคืน 3 document - seek ไม่ได้',
+      'มันสแกนทั้ง collection',
+      'เร็ว',
+      'ล้มเหลว',
     ],
     answer: 0,
+    explain: 'FETCH > IXSCAN(name_1) ด้วย keys=50003, docs=3: ใช้ index แต่เป็นการสแกนทุก key',
   },
   {
-    q: 'วิธีที่ได้รับการสนับสนุนและเป็นมิตรกับ index สำหรับการจับคู่แบบไม่สนตัวพิมพ์ใหญ่เล็กใน MongoDB คืออะไร?',
+    q: 'การแสดงหน้า order ต้องใช้ order, ลูกค้า, สินค้า 3 รายการ และหมวด 3 รายการ โมเดล normalize เต็มใช้กี่ query',
     options: [
-      'regular expression แบบไม่สนตัวพิมพ์ใหญ่เล็ก',
-      'collation ด้วย strength แบบไม่สนตัวพิมพ์ใหญ่เล็ก',
-      'เก็บทุกค่าเป็นตัวพิมพ์เล็กเท่านั้น',
-      'ปิดการใช้งาน index บน field',
+      '1',
+      '3',
+      '8',
+      '4',
     ],
-    answer: 1,
+    answer: 2,
+    explain: 'profiler นับได้ 8 query; snapshot แบบ embed พร้อม extended reference ใช้ 1',
   },
   {
-    q: 'ทำไมการเก็บ entity ที่ไม่เกี่ยวข้องกันไว้ใน collection เดียวพร้อม field type จึงเป็น anti-pattern?',
+    q: 'ต้นทุนหลักของ document ที่บวมซึ่งเก็บข้อมูลกิจกรรมเย็นไว้ข้าง field ที่ร้อนคืออะไร',
     options: [
-      'MongoDB ห้ามมีมากกว่าหนึ่ง type ต่อ document',
-      'index บวม validator อธิบายรูปร่างที่สม่ำเสมอไม่ได้ และทุก query ต้อง filter ด้วย type',
-      'เกิน document size limit โดยอัตโนมัติ',
-      'collection แพงเกินไปที่จะสร้าง',
+      'ทุกการอ่านและ slot ของ cache แบก น้ำหนักส่วนเย็น: 49.8 MB เทียบ 18 KB สำหรับผู้ใช้ 300 คนเดิม',
+      'ไม่มี',
+      'index หยุดทำงาน',
+      'การอ่านล้มเหลว',
     ],
-    answer: 1,
+    answer: 0,
+    explain: 'การอ่านอีเมลบนเครื่องที่ warm ต่างกันแค่ 891 ms เทียบ 787 ms; ต้นทุนถาวรคือรอยเท้าหน่วยความจำและ I/O ที่โตตามข้อมูล',
+  },
+  {
+    q: 'ทำไมควรเลี่ยง collection เดียวที่มี field type สำหรับทุกอย่าง',
+    options: [
+      'index และ validator ครอบคลุม document ที่ไม่เกี่ยวข้อง: index email ธรรมดา 952 KB เทียบ 748 KB โดยมี 60 000 entry ที่เป็น null',
+      'MongoDB ห้าม',
+      'เร็วกว่าเสมอ',
+      'collection ฟรี จึงไม่เคยเป็นปัญหา',
+    ],
+    answer: 0,
+    explain: 'partial index บน type: "user" (หรือ collection เฉพาะ users) มี 748 KB Atlas ยังเตือนเรื่อง collection มากเกินไป จึงแยกตาม entity ไม่ใช่ตาม tenant',
   },
 ]
 
-<Quiz client:visible id="data-modeling/anti-patterns" questions={quizAntiPatterns} />
+<Quiz client:visible id="data-modeling/anti-patterns" questions={quizAnti} />
 
 <ProgressTracker client:visible id="data-modeling/anti-patterns" />
