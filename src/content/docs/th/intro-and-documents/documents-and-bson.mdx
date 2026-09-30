@@ -8,6 +8,7 @@ sidebar:
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 คุณเขียน document เป็น JSON แต่ MongoDB ไม่ได้เก็บเป็น JSON text จริง ๆ แล้วเก็บเป็น **BSON** ย่อมาจาก **Binary JSON** เป็นรูปแบบไบนารีกระชับที่เติมสิ่งที่ JSON ขาดเข้ามา ทั้ง type ตัวเลขจริง วันที่ ข้อมูลไบนารี และ type เฉพาะตัวอีกสองสามอย่าง BSON คือสิ่งที่ทำให้ document สแกนได้เร็ว แม่นยำเรื่องตัวเลข และสามารถพก type ที่ JSON text ธรรมดาแทนค่าไม่ได้
@@ -30,27 +31,99 @@ field ของ document เก็บอันใดอันหนึ่งใ�
 - **Null** — ค่าว่างที่ระบุชัด (ต่างจากการที่ field ไม่มีอยู่)
 - **Decimal128** — เลขทศนิยม 128 บิตสำหรับเลขคณิตฐาน 10 ที่แม่นยำ เป็น type ที่ถูกต้องสำหรับเงิน
 
-document ก็แค่ type เหล่านี้ประกอบกัน ตัวอย่างข้างล่างนี้ใช้ type เกือบทั้งหมดพร้อมกันในก้อนเดียว:
+document ก็แค่ type เหล่านี้ประกอบกัน นี่คือตัวอย่างที่ใช้ type เกือบทั้งหมดพร้อมกัน insert จริง แล้วตามด้วยคำตอบของ server เองต่อคำถาม "แต่ละ field เป็น type อะไร?" (ตัวดำเนินการ `$type` โดยใช้ alias จาก [BSON types reference](https://www.mongodb.com/docs/manual/reference/bson-types/)):
 
-```json
+```js
+// mongosh/bson-types.js
+db.members.insertOne({
+  _id: ObjectId("65f0b3d4e4b0a1c2e4b0a1d1"),
+  name: "Ada",
+  active: true,
+  fines: 0,
+  balance: Decimal128("12.50"),
+  visits: Long("4815162342"),
+  joined: ISODate("2023-04-12T09:30:00Z"),
+  borrowed: ["Compilers", "Algorithms"],
+  address: { city: "Cambridge", zip: "02139" },
+  nickname: null,
+});
+console.log(db.members.findOne());
+
+const types = db.members.aggregate([{ $project: { _id: 0, t: { $arrayToObject: { $map: {
+  input: { $objectToArray: "$$ROOT" }, in: { k: "$$this.k", v: { $type: "$$this.v" } },
+} } } } }]).toArray()[0].t;
+console.log(types);
+assert.strictEqual(types.fines, "int");
+assert.strictEqual(types.visits, "long");
+assert.strictEqual(types.balance, "decimal");
+```
+
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Ada",
-  "active": true,
-  "fines": 0,
-  "balance": "12.50",
-  "visits": 4815162342,
-  "joined": "2023-04-12T09:30:00Z",
-  "borrowed": ["Compilers", "Algorithms"],
-  "address": {
-    "city": "Cambridge",
-    "zip": "02139"
-  },
-  "nickname": null
+  _id: ObjectId('65f0b3d4e4b0a1c2e4b0a1d1'),
+  name: 'Ada',
+  active: true,
+  fines: 0,
+  balance: Decimal128('12.50'),
+  visits: Long('4815162342'),
+  joined: ISODate('2023-04-12T09:30:00.000Z'),
+  borrowed: [ 'Compilers', 'Algorithms' ],
+  address: { city: 'Cambridge', zip: '02139' },
+  nickname: null
+}
+{
+  _id: 'objectId',
+  name: 'string',
+  active: 'bool',
+  fines: 'int',
+  balance: 'decimal',
+  visits: 'long',
+  joined: 'date',
+  borrowed: 'array',
+  address: 'object',
+  nickname: 'null'
 }
 ```
 
-ใน document นั้น `name` เป็น string, `active` เป็น boolean, `fines` เป็น int32, `balance` เป็น Decimal128 (เขียนเป็น string เพื่อรักษาความแม่นยำไว้), `visits` เป็น int64, `joined` เป็น Date, `borrowed` เป็น array, `address` เป็น embedded document, และ `nickname` เป็น null ที่ระบุชัด หนึ่ง field ต่อหนึ่ง type แต่ document เดียวผสม type ได้อย่างอิสระ
+`name` เป็น string, `active` เป็น boolean, `fines` เป็น int32 (`'int'`), `balance` เป็น Decimal128, `visits` เป็น int64 (`'long'`), `joined` เป็น Date, `borrowed` เป็น array, `address` เป็น embedded document (`'object'`) และ `nickname` เป็น null ที่ระบุชัด สังเกตว่า `mongosh` พิมพ์ `Decimal128('12.50')`, `Long('4815162342')` และ `ISODate(...)` — ไม่ใช่ string ธรรมดาอย่างที่ JSON dump จะแสดง นั่นคือ BSON ไม่ใช่ JSON
+
+### แต่ละ type กินกี่ไบต์?
+
+`bsonsize()` คืนขนาดที่เข้ารหัสของ document document ว่างคือ 5 ไบต์; document หนึ่ง field แต่ละอันด้านล่างเพิ่มไบต์ type ชื่อ field และค่า:
+
+```js
+// mongosh/bson-sizes.js
+const sizes = {
+  empty: bsonsize({}),
+  int32: bsonsize({ a: 1 }),
+  double: bsonsize({ a: 1.5 }),
+  int64: bsonsize({ a: Long("1") }),
+  decimal128: bsonsize({ a: Decimal128("1") }),
+  string_abc: bsonsize({ a: "abc" }),
+  date: bsonsize({ a: new Date() }),
+  objectId: bsonsize({ a: new ObjectId() }),
+  bool: bsonsize({ a: true }),
+};
+console.log(sizes);
+assert.strictEqual(sizes.int32, 12);
+assert.strictEqual(sizes.double, 16);
+```
+
+```text
+{
+  empty: 5,
+  int32: 12,
+  double: 16,
+  int64: 16,
+  decimal128: 24,
+  string_abc: 16,
+  date: 16,
+  objectId: 20,
+  bool: 9
+}
+```
+
+field `int32` เสียค่า 4 ไบต์, double หรือ int64 เสีย 8, Decimal128 เสีย 16 และ ObjectId เสีย 12 (บวก 1 ไบต์ type ชื่อ `a` และตัวปิด) การเลือก `int32` เมื่อใส่ได้ประหยัดเล็กน้อยแต่ฟรีเมื่อคูณกับหลายล้าน document
 
 ## type ซ้อนกันอย่างไร
 
@@ -65,79 +138,297 @@ export const bsonDiagram = `flowchart TD
 
 <Mermaid code={bsonDiagram} title="document คือ scalar field บวกกับ array และ embedded document ที่ซ้อนกันลึกเท่าใดก็ได้" />
 
-## field _id และ ObjectId
+## ตัวเลขคือจุดที่ type กัด
 
-ทุก document มี field `_id` ซึ่งคือ **primary key** ของ document และห้ามซ้ำภายใน collection เดียวกัน ถ้าคุณไม่ใส่มาตอน insert MongoDB จะสร้างให้เอง โดย type เริ่มต้นคือ **ObjectId**: ค่าขนาด 12 ไบต์ที่ออกแบบให้ไม่ซ้ำกันโดยไม่ต้องประสานงานกับ server 
+shell และ driver ตัดสิน BSON type ของตัวเลขจากค่าในภาษา และไม่ได้ตัดสินเหมือนกันทั้งหมด เรา insert ตัวเลขชนิดเดียวกันจาก `mongosh` และ Node.js 24 กับ driver 7.7.0 แล้วถาม server หา `$type` ที่เก็บจริงของแต่ละอัน:
 
-12 ไบต์เหล่านั้นไม่ใช่ค่าสุ่ม ObjectId เข้ารหัสตามลำดับดังนี้:
+| ค่าที่เขียน | mongosh | Node driver |
+|---|---|---|
+| `1` หรือ `1.0` | `int` | `int` (JavaScript แยก `1.0` จาก `1` ไม่ได้) |
+| `Double(1)` | `double` | - (ไม่มี type แยก; ใช้ค่าที่มีเศษ) |
+| `1.5` | `double` | `double` |
+| `2**31` (2 147 483 648) หรือ `3000000000` | `double` | `double` |
+| `2**53` | `double` | `double` |
+| `Long("2147483648")` (`NumberLong`) | `long` | `Long.fromNumber(2**31)` -> `long` |
+| `BigInt(4815162342)` / `4815162342n` | `long` | `long` |
 
-- **timestamp 4 ไบต์** — วินาทีที่ id ถูกสร้าง นี่คือเหตุผลที่ ObjectId เรียงลำดับคร่าว ๆ ตามเวลาที่สร้าง และเป็นเหตุผลที่คุณดึงวันที่สร้างคร่าว ๆ ออกมาจาก ObjectId ได้
-- **ค่าสุ่ม 5 ไบต์** — ไม่ซ้ำกันต่อเครื่องและ process ดังนั้นสอง process จึงไม่ชนกัน
-- **counter 3 ไบต์** — เพิ่มขึ้นต่อ process ดังนั้นแม้แต่ id ที่สร้างในวินาทีเดียวกันก็ต่างกัน
-
-เพราะ timestamp มาก่อน การเรียง collection ตาม `_id` จึงเกือบเหมือนการเรียงตามเวลาที่ insert — ผลพลอยได้ฟรีที่สะดวก
-
-```json
-{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Ada" }
+```js
+// app/bson-node-numbers.mjs
+const c = db.collection("n");
+await c.insertOne({ i: 1, whole: 1.0, half: 1.5, big: 2 ** 31, safe: 2 ** 53,
+  l: Long.fromNumber(2 ** 31), bi: 4815162342n, dec: Decimal128.fromString("12.50") });
+const t = await c.aggregate([{ $project: { _id: 0,
+  i: { $type: "$i" }, whole: { $type: "$whole" }, half: { $type: "$half" }, big: { $type: "$big" },
+  safe: { $type: "$safe" }, l: { $type: "$l" }, bi: { $type: "$bi" }, dec: { $type: "$dec" } } }]).next();
+console.log(t);
+console.log(await c.findOne({}, { projection: { _id: 0, l: 1, bi: 1, dec: 1 } }));
+console.log(await c.findOne({}, { projection: { _id: 0, l: 1 }, promoteLongs: false }));
+if (t.whole !== "int" || t.big !== "double" || t.l !== "long") throw new Error("unexpected types");
 ```
 
-คุณสามารถตั้ง `_id` เองเป็นค่าใดก็ได้ที่ไม่ซ้ำกัน — string, ตัวเลข, อีเมล — เมื่อข้อมูลของคุณมี key ตามธรรมชาติอยู่แล้ว MongoDB ขอแค่ให้ `_id` มีอยู่และไม่ซ้ำ ไม่จำเป็นต้องเป็น ObjectId
+```text
+{
+  i: 'int',
+  whole: 'int',
+  half: 'double',
+  big: 'double',
+  safe: 'double',
+  l: 'long',
+  bi: 'long',
+  dec: 'decimal'
+}
+{ l: 2147483648, bi: 4815162342, dec: new Decimal128('12.50') }
+{ l: new Long('2147483648') }
+```
+
+สามผลที่ลงมือทำได้: (1) JavaScript number ที่เกิน 2^31 ถูกเก็บเป็น **double** ดังนั้นใช้ `Long` หรือ `BigInt` สำหรับตัวนับ int64 จริง; (2) การอ่าน `long` กลับมาให้ JavaScript `number` โดยค่าเริ่มต้น (`promoteLongs`) ซึ่งสูญเสียความแม่นยำเงียบ ๆ เกิน 2^53 — ส่ง `promoteLongs: false` (หรือ `useBigInt64: true`) เพื่อรับ `Long` กลับมา; (3) validator ที่ใช้ `bsonType: "int"` จะปฏิเสธ `2**31` จาก Node เพราะมาถึงเป็น double
+
+### Double เทียบ Decimal128 สำหรับเงิน
+
+```js
+// mongosh/bson-money.js
+console.log(0.1 + 0.2);
+db.prices_double.insertMany([{ v: 0.1 }, { v: 0.2 }]);
+db.prices_dec.insertMany([{ v: Decimal128("0.1") }, { v: Decimal128("0.2") }]);
+const sum = (c) => db[c].aggregate([{ $group: { _id: null, sum: { $sum: "$v" } } }]).toArray()[0].sum;
+console.log(sum("prices_double"), sum("prices_dec"));
+assert.strictEqual(sum("prices_double") === 0.3, false);
+assert.strictEqual(sum("prices_dec").toString(), "0.3");
+```
+
+```text
+0.30000000000000004
+0.30000000000000004 Decimal128('0.3')
+```
+
+`$sum` ของ server เองบนสอง double ให้ `0.30000000000000004`; ตัวเลขชุดเดียวกันเป็น Decimal128 ให้ `0.3` พอดี (ความแม่นยำ 34 หลักทศนิยม ตาม BSON types reference)
+
+## field _id และ ObjectId
+
+ทุก document มี field `_id` ซึ่งคือ **primary key** ของ document และห้ามซ้ำภายใน collection เดียวกัน ถ้าคุณไม่ใส่มาตอน insert MongoDB จะสร้างให้เอง โดย type เริ่มต้นคือ **ObjectId**: ค่าขนาด 12 ไบต์ที่ออกแบบให้ไม่ซ้ำกันโดยไม่ต้องประสานงานกับ server
+
+12 ไบต์เหล่านั้นไม่ใช่ค่าสุ่ม ตาม [BSON types reference](https://www.mongodb.com/docs/manual/reference/bson-types/) ObjectId คือ:
+
+- **timestamp 4 ไบต์** — วินาทีนับจาก Unix epoch ตอนสร้าง id
+- **ค่าสุ่ม 5 ไบต์** สร้างครั้งเดียวต่อ process ฝั่ง client (ไม่ซ้ำต่อเครื่องและ process; สร้างใหม่เมื่อ process restart)
+- **ตัวนับที่เพิ่มขึ้น 3 ไบต์** ต่อ process ฝั่ง client **เริ่มจากค่าสุ่ม**
+
+คุณแกะมันเองได้ นี่คือการถอดรหัส id จริงใน `mongosh`:
+
+```js
+// mongosh/bson-objectid.js
+const id = ObjectId("65f0b3d4e4b0a1c2e4b0a1d1");
+const hex = id.toHexString();
+console.log(id.getTimestamp());
+console.log(hex.slice(0, 8), parseInt(hex.slice(0, 8), 16), new Date(parseInt(hex.slice(0, 8), 16) * 1000).toISOString());
+console.log("random:", hex.slice(8, 18), "counter:", hex.slice(18));
+assert.strictEqual(hex.length, 24);                 // 12 bytes = 24 hex characters
+assert.strictEqual(id.getTimestamp().toISOString(), "2024-03-12T19:58:12.000Z");
+```
+
+```text
+ISODate('2024-03-12T19:58:12.000Z')
+65f0b3d4 1710273492 2024-03-12T19:58:12.000Z
+random: e4b0a1c2e4 counter: b0a1d1
+```
+
+และข้ออ้างเรื่อง "counter" กับ "random" พิสูจน์ด้วยสาม id ที่ process Node เดียวสร้างติดกัน (driver 7.7.0):
+
+```js
+// app/bson-objectid-node.mjs
+const ids = [new ObjectId(), new ObjectId(), new ObjectId()];
+for (const id of ids) {
+  const h = id.toHexString();
+  console.log(h, "ts", h.slice(0, 8), "rand", h.slice(8, 18), "counter", h.slice(18), parseInt(h.slice(18), 16));
+}
+await db.collection("ord").insertMany(Array.from({ length: 1000 }, (_, i) => ({ seq: i })));
+const bySeq = await db.collection("ord").find({}).sort({ _id: 1 }).project({ seq: 1, _id: 0 }).toArray();
+console.log("sorted by _id equals insertion order:", bySeq.every((d, i) => d.seq === i));
+if (!bySeq.every((d, i) => d.seq === i)) throw new Error("_id order differs from insertion order");
+```
+
+```text
+6abca5dd3c98eeca8695c79f ts 6abca5dd rand 3c98eeca86 counter 95c79f 9815967
+6abca5dd3c98eeca8695c7a0 ts 6abca5dd rand 3c98eeca86 counter 95c7a0 9815968
+6abca5dd3c98eeca8695c7a1 ts 6abca5dd rand 3c98eeca86 counter 95c7a1 9815969
+sorted by _id equals insertion order: true
+```
+
+timestamp เดียวกัน ส่วนสุ่มเดียวกัน counter +1 ทุกครั้ง: นั่นคือเหตุผลที่ id ที่สร้างในวินาทีเดียวกันโดย process เดียวจึงต่างกัน **และ** เรียงตามลำดับการสร้าง สอง process ต่างกันในวินาทีเดียวกันใช้ร่วมกันแค่ timestamp ดังนั้นข้าม process ลำดับจึงเป็นเพียง "คร่าว ๆ" ตามเวลา
+
+คุณตั้ง `_id` เองเป็นค่าไม่ซ้ำใดก็ได้ — string, ตัวเลข, อีเมล — เมื่อข้อมูลมี natural key อยู่แล้ว MongoDB ต้องการเพียงว่ามีและไม่ซ้ำ; ไม่จำเป็นต้องเป็น ObjectId แต่ type จะมีผลต่อทุกการค้นหา ดังที่ fence ถัดไปแสดง:
+
+```js
+// mongosh/bson-string-id.js
+db.s.insertOne({ _id: "65f0b3d4e4b0a1c2e4b0a1d1", name: "string-id" });
+console.log(db.s.find({ _id: ObjectId("65f0b3d4e4b0a1c2e4b0a1d1") }).toArray());
+console.log(db.s.find({ _id: "65f0b3d4e4b0a1c2e4b0a1d1" }).toArray());
+console.log(db.s.aggregate([{ $project: { t: { $type: "$_id" } } }]).toArray());
+assert.strictEqual(db.s.countDocuments({ _id: ObjectId("65f0b3d4e4b0a1c2e4b0a1d1") }), 0);
+```
+
+```text
+[]
+[ { _id: '65f0b3d4e4b0a1c2e4b0a1d1', name: 'string-id' } ]
+[ { _id: '65f0b3d4e4b0a1c2e4b0a1d1', t: 'string' } ]
+```
+
+hex 24 ตัวเดียวกันที่เก็บเป็น string **ไม่ถูกพบ** โดย query แบบ ObjectId (และกลับกัน)
+
+## Null ไม่ใช่ absent
+
+```js
+// mongosh/bson-null-missing.js
+db.z.insertMany([{ _id: 1, nickname: null }, { _id: 2 }, { _id: 3, nickname: "Al" }]);
+console.log("nickname: null          ", db.z.find({ nickname: null }, { _id: 1 }).toArray());
+console.log("$exists: false          ", db.z.find({ nickname: { $exists: false } }, { _id: 1 }).toArray());
+console.log("$type: 'null'           ", db.z.find({ nickname: { $type: "null" } }, { _id: 1 }).toArray());
+console.log("$exists: true, $eq: null", db.z.find({ nickname: { $exists: true, $eq: null } }, { _id: 1 }).toArray());
+assert.strictEqual(db.z.countDocuments({ nickname: null }), 2);
+```
+
+```text
+nickname: null           [ { _id: 1 }, { _id: 2 } ]
+$exists: false           [ { _id: 2 } ]
+$type: 'null'            [ { _id: 1 } ]
+$exists: true, $eq: null [ { _id: 1 } ]
+```
+
+`{ nickname: null }` ตรงกับ **ทั้ง** null ที่ระบุชัด (`_id: 1`) และ field ที่ไม่มี (`_id: 2`) หากต้องการแยกให้ใช้ `$exists` หรือ `$type: "null"`
+
+## ขนาด: เพดาน 16 MiB
+
+หนึ่ง document จำกัดที่ 16 MiB (`hello.maxBsonObjectSize` = `16777216`) เรา insert string ขนาด 16 MiB จาก Node:
+
+```js
+// app/bson-16mib.mjs
+try {
+  await db.collection("big").insertOne({ blob: "x".repeat(16 * 1024 * 1024) });
+} catch (e) { console.log(e.name + ":", e.message); }
+const ok = await db.collection("big").insertOne({ blob: "x".repeat(16 * 1024 * 1024 - 100) });
+console.log("just under the limit:", ok.acknowledged);
+if (!ok.acknowledged) throw new Error("expected the near-limit insert to succeed");
+```
+
+```text
+MongoServerError: object to insert too large. size in bytes: 16777249, max size: 16777216
+just under the limit: true
+```
+
+ขีดจำกัดนับทั้ง document ที่เข้ารหัสแล้ว (ชื่อ field ไบต์ type `_id`) ไม่ใช่แค่ payload ของคุณ — string 16 MiB อย่างเดียวก็เกินไป 33 ไบต์
 
 ## เคล็ดลับและข้อควรระวัง
 
-- **ObjectId ถูกสร้างฝั่ง client** โดย driver ไม่ใช่ server แปลว่าแอปของคุณรู้ `_id` ใหม่ทันทีที่สร้าง document ก่อนที่การ insert จะไปถึง database ด้วยซ้ำ
-- **Date ไม่เหมือนกับ BSON Timestamp type** ใช้ **Date** สำหรับเวลาที่คุณสนใจ — เมื่อมีบางสิ่งเกิดขึ้น ส่วน **Timestamp** ที่แยกออกไปเป็นค่าภายในที่ MongoDB ใช้สำหรับการจัดลำดับ replication และแทบไม่ใช่สิ่งที่คุณต้องการในข้อมูลของคุณเอง
-- **ใช้ Decimal128 สำหรับเงิน** **Double** ไม่สามารถแทนค่าเช่น `0.10` ได้อย่างแม่นยำ ซึ่งนำไปสู่ข้อผิดพลาดในการปัดเศษเวลารวมยอด Decimal128 ทำเลขคณิตฐาน 10 ได้อย่างแม่นยำ
-- **Null ไม่ใช่การไม่มีอยู่** field ที่ตั้งเป็น `null` มีอยู่ด้วยค่า null; field ที่ไม่เคยถูกตั้งค่าเลยจะไม่มีอยู่เลย query สามารถแยกแยะสองอย่างนี้ได้ ดังนั้นเลือกอย่างตั้งใจ
+- **ObjectId ถูกสร้างฝั่ง client** โดย driver ไม่ใช่ server (การรัน Node ด้านบนสร้าง id โดยไม่เรียก server) แอปพลิเคชันของคุณรู้ `_id` ใหม่ทันทีที่สร้าง document ก่อนที่ insert จะถึง database
+- **Date ไม่ใช่ BSON Timestamp type** BSON reference ระบุว่า Timestamp type "สำหรับการใช้ *ภายใน* ของ MongoDB" และโค้ดแอปพลิเคชันควรใช้ Date type
+- **ใช้ Decimal128 สำหรับเงิน** พิสูจน์แล้วด้านบน: `$sum` ของ double `0.1` และ `0.2` คือ `0.30000000000000004`; เป็น Decimal128 คือ `0.3` พอดี
+- **Null ไม่ใช่ absent** `{ field: null }` ตรงกับทั้งสองอย่าง แต่ `$exists` และ `$type: "null"` แยกได้ (พิสูจน์ด้านบน)
 
-<Callout title="JSON เข้าไป BSON อยู่ข้างใต้">
-คุณคิดเป็น JSON แต่ MongoDB เก็บ BSON — รูปแบบไบนารีที่มีตัวเลขจริง, วันที่, และ ObjectId การรู้ว่า field หนึ่งเก็บ type อะไรจริง ๆ โดยเฉพาะสำหรับตัวเลขและวันที่ ป้องกัน bug เงียบ ๆ ทั้งหมวด
+<Callout title="JSON เข้า BSON อยู่ข้างใต้">
+คุณคิดเป็น JSON แต่ MongoDB เก็บ BSON — รูปแบบไบนารีที่มีตัวเลขจริง วันที่ และ ObjectId การรู้ว่า field เก็บ type อะไรจริง ๆ โดยเฉพาะตัวเลขและวันที่ ป้องกัน bug เงียบ ๆ ได้ทั้งกลุ่ม
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ลองขอผู้ช่วย AI ว่า "collection ใบแจ้งหนี้พร้อมยอดรวม" ยอดรวมมักเป็นตัวเลข JavaScript ธรรมดา:
+
+<SpotTheBug lang="js" code={`// AI comment: "store totals as numbers, sum them on the server"
+await db.collection("invoices").insertMany([{ total: 0.1 }, { total: 0.2 }]);
+const [{ sum }] = await db.collection("invoices")
+  .aggregate([{ $group: { _id: null, sum: { $sum: "$total" } } }])
+  .toArray();
+if (sum === 0.3) markLedgerBalanced();   // never runs`}>
+
+field ถูกเก็บเป็น BSON **double** ดังนั้น `$sum` ของ server คืน `0.30000000000000004` และการเช็คเท่ากับเป็น false — output จริงบน mongo 8.3.11 (การรันใน shell ด้านบนพิมพ์ตัวเลขเดียวกัน) บัญชีจะ "ไม่มีวันสมดุล" โดยไม่มีใครเห็นสาเหตุ วิธีแก้คือเก็บเงินเป็น **Decimal128** (หรือเป็น integer cents แบบ int64) แล้วเทียบตรง ๆ fence นี้รันบน server เดียวกัน:
+
+```js
+// app/bson-money-fix.mjs
+await db.collection("invoices").insertMany([
+  { total: Decimal128.fromString("0.1") },
+  { total: Decimal128.fromString("0.2") },
+]);
+const [{ sum }] = await db.collection("invoices")
+  .aggregate([{ $group: { _id: null, sum: { $sum: "$total" } } }])
+  .toArray();
+console.log(sum, sum.toString() === "0.3");
+if (sum.toString() !== "0.3") throw new Error("expected exact 0.3");
+```
+
+```text
+new Decimal128('0.3') true
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+ทุก field คือ **(ชื่อ, type, ค่า)** ไม่ใช่แค่ชื่อกับค่า JSON ซ่อน type ไว้หลังไวยากรณ์; BSON เขียนมันลงไป bug ส่วนใหญ่ในบทนี้คือ bug เดียวกัน: ค่าดูถูก (`0.1`, `1.0`, string hex 24 ตัว) แต่ *type* ที่ driver เลือกไม่ใช่ที่คุณตั้งใจ และ query, sort และ `$sum` ล้วนเคารพ type ไม่ใช่หน้าตา
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| BSON (type เพิ่มเติมอย่าง Date, ObjectId, Decimal128, Binary) | เก็บค่าตรง type จริง query และ sort ได้ถูกต้องตาม type เช่นเรียงตามวันที่จริงหรือคำนวณเงินแม่นยำด้วย Decimal128 | ไม่ portable เท่า JSON ทันที ระบบภายนอกที่รับเฉพาะ JSON text ต้องแปลง type พวกนี้ก่อน ซึ่งอาจสูญเสียความแม่นยำถ้าทำไม่ถูกวิธี |
-| JSON ธรรมดา | portable ข้ามระบบได้ทันที อ่านง่าย เครื่องมือรองรับทุกที่ | มี type พื้นฐานน้อย (string, number, boolean, null, array, object) เท่านั้น ต้องเข้ารหัส Date และเลขแม่นยำสูงเป็น string เอง แล้วเสี่ยงตีความผิดฝั่ง |
+| BSON (type เพิ่มเติมเช่น Date, ObjectId, Decimal128, Binary) | เก็บค่าตาม type จริง; query และ sort ทำงานถูกต้องตาม type เช่นเรียงตามวันที่จริงหรือคำนวณเงินแม่นด้วย Decimal128 | พกพาไม่ทันทีเท่า JSON ธรรมดา — ระบบภายนอกที่รับเฉพาะ JSON text ต้องแปลง type เหล่านี้ก่อน ซึ่งอาจเสียความแม่นยำถ้าทำสะเพร่า |
+| JSON ธรรมดา | พกพาข้ามระบบได้ทันที อ่านง่าย tooling รองรับทุกที่ | มีเพียง type พื้นฐานไม่กี่ตัว (string, number, boolean, null, array, object) — ต้อง encode Date และตัวเลขความแม่นยำสูงเป็น string เอง |
+| Double สำหรับเงิน | เป็น JavaScript number ธรรมชาติ เขียนเร็วที่สุด | `0.1 + 0.2` -> `0.30000000000000004`; ยอดรวมคลาดเคลื่อน |
+| Decimal128 สำหรับเงิน | เลขคณิตฐาน 10 แม่นยำ 34 หลัก | 16 ไบต์ต่อค่า เทียบ 8 และต้องสร้างอย่างชัดเจนในทุก driver |
+| `_id` แบบ ObjectId | 12 ไบต์ สร้างฝั่ง client เรียงตามลำดับการสร้างต่อ process | อ่านไม่ออก; มีเวลาสร้างที่คุณอาจไม่อยากเปิดเผย |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เก็บ ObjectId เป็น string ธรรมดาแทนที่จะเป็น BSON type ObjectId** — ทำให้เสีย type-aware querying และการเรียงลำดับตามเวลาที่เป็นผลพลอยได้ของ ObjectId ไปฟรี ๆ ถ้าเก็บเป็น string การเปรียบเทียบจะเป็นการเทียบตัวอักษร ไม่ใช่เทียบค่าจริง
-- **คิดว่า BSON กับ JSON เป็นสิ่งเดียวกัน** — คุณ*เขียน*และ*อ่าน*เป็น JSON ผ่าน shell/driver แต่สิ่งที่เก็บบนดิสก์คือ BSON การไม่รู้ความต่างนี้ทำให้งงว่าทำไม type ตัวเลขหรือวันที่ถึงหน้าตาเปลี่ยนไปตอนย้ายข้อมูลผ่านระบบที่ใช้ JSON text ล้วน
-- **ใช้ Double เก็บเงินเพราะคิดว่าเป็น "ตัวเลขทศนิยม"** — Double แทนค่าเช่น `0.10` ไม่แม่นยำ ทำให้ยอดรวมคลาดเคลื่อนสะสม ต้องใช้ Decimal128 สำหรับจำนวนเงิน
+- **"BSON กับ JSON คือสิ่งเดียวกัน"** — คุณ *เขียน* และ *อ่าน* ค่าคล้าย JSON แต่ server เก็บ BSON ที่มี type `Long('4815162342')` และ `Decimal128('12.50')` ที่พิมพ์ด้านบนไม่ใช่ JSON
+- **"ตัวเลขก็คือตัวเลข"** — `1` และ `1.0` เป็น `int` ทั้งคู่จาก Node, `2**31` กลายเป็น `double` และ `promoteLongs` ส่ง `long` กลับมาเป็น JavaScript number ที่เสียความแม่นยำเกิน 2^53
+- **"ObjectId ก็แค่ string hex"** — เก็บเป็น string จะ *ไม่ถูกพบ* โดย query แบบ ObjectId (`[]` ด้านบน) และกลับกัน
+- **"`{ field: null }` หา document ที่ field เป็น null"** — มันหา document ที่ไม่มี field ด้วย
+- **"ใช้ Double เก็บเงินเพราะดูเหมือนทศนิยม"** — ดู SpotTheBug ด้านบน
+- **"ไม่มีขีดจำกัดขนาด"** — 16 MiB ต่อ document นับจากไบต์ที่เข้ารหัส
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบ fintech / e-commerce ที่ต้องคำนวณยอดเงิน** — มักบังคับใช้ Decimal128 สำหรับทุก field ที่เป็นเงิน เพื่อไม่ให้เกิดข้อผิดพลาดสะสมจากการปัดเศษแบบ floating-point เวลารวมยอด invoice จำนวนมาก
->
-> **ระบบ metadata สเกลใหญ่ทั่วไป** — ใช้ ObjectId เป็นทั้ง primary key และตัวช่วยเรียงลำดับคร่าว ๆ ตามเวลาสร้างของ document จำนวนมหาศาล โดยไม่ต้องเก็บ field `created_at` แยกต่างหากสำหรับ use case ที่ไม่ต้องการความแม่นยำระดับมิลลิวินาที
+> BSON reference ของ MongoDB เองแนะนำ `decimal128` สำหรับ "แอปพลิเคชันความแม่นยำสูงเช่นการเงินและธนาคาร" และเรียก Timestamp type ว่า "สำหรับการใช้ภายในของ MongoDB" ([BSON types](https://www.mongodb.com/docs/manual/reference/bson-types/), เรียกอ่านเมื่อ 2026-09-30)
+
+_บทนี้ไม่ใช้ Python/Go/Rust; fence รันใน `mongosh` และ Node driver_
 
 export const quizBson = [
   {
-    q: 'BSON ย่อมาจากอะไร และทำไม MongoDB ถึงใช้?',
+    q: 'BSON ย่อมาจากอะไร และทำไม MongoDB จึงใช้?',
     options: [
       'Basic Storage Object Notation; เรียบง่ายกว่า JSON',
-      'Binary JSON; รูปแบบไบนารีที่กระชับซึ่งเพิ่ม type จริงอย่างวันที่และ ObjectId',
-      'Buffered Serial Object Network; stream ข้อมูลได้เร็วกว่า',
-      'Block Structured Object Notation; เก็บข้อมูลเป็นบล็อกขนาดตายตัว',
+      'Binary JSON; รูปแบบไบนารีกระชับที่เพิ่ม type จริงอย่างวันที่และ ObjectId',
+      'Buffered Serial Object Network; สตรีมข้อมูลได้เร็วกว่า',
+      'Block Structured Object Notation; เก็บข้อมูลเป็นบล็อกตายตัว',
     ],
     answer: 1,
+    explain: 'BSON คือ binary JSON: กระชับ และเพิ่ม type ที่ JSON ไม่มี (Date, ObjectId, Decimal128, int64)',
   },
   {
-    q: 'ส่วนแรกของ ObjectId เข้ารหัสอะไรไว้?',
+    q: 'ส่วนแรกของ ObjectId เข้ารหัสอะไร?',
     options: [
-      'ตัวเลขสุ่มเท่านั้น',
-      'timestamp 4 ไบต์ของตอนที่สร้าง ObjectId',
+      'ตัวเลขสุ่มอย่างเดียว',
+      'timestamp 4 ไบต์ของเวลาที่สร้าง',
       'ชื่อ collection',
       'ขนาดของ document',
     ],
     answer: 1,
+    explain: '4 ไบต์แรกคือวินาทีนับจาก epoch; ตามด้วยค่าสุ่ม 5 ไบต์ต่อ process และ counter 3 ไบต์',
   },
   {
-    q: 'ควรใช้ BSON type ไหนเก็บจำนวนเงินให้แม่นยำ?',
+    q: 'ควรใช้ BSON type ใดเก็บเงินให้แม่นยำ?',
     options: ['Double', 'Int32', 'Decimal128', 'String'],
     answer: 2,
+    explain: 'Decimal128 รวม 0.1 + 0.2 ได้ 0.3 พอดี; Double ได้ 0.30000000000000004 ในการรันจริง',
+  },
+  {
+    q: 'ใน Node คุณ insert { visits: 2 ** 31 } server รายงาน BSON type อะไร?',
+    options: ['int', 'long', 'double', 'decimal'],
+    answer: 2,
+    explain: 'JavaScript number นอกช่วง int32 ถูกเก็บเป็น double; ใช้ Long หรือ BigInt เพื่อได้ int64 จริง (long)',
+  },
+  {
+    q: 'collection มี { _id: 1, nickname: null }, { _id: 2 } และ { _id: 3, nickname: "Al" } find({ nickname: null }) คืนอะไร?',
+    options: ['เฉพาะ _id 1', 'เฉพาะ _id 2', '_id 1 และ _id 2', 'ทั้งสาม'],
+    answer: 2,
+    explain: '{ field: null } ตรงกับ null ที่ระบุชัดและ field ที่ไม่มี; ใช้ $exists หรือ $type: "null" เพื่อแยก',
   },
 ]
 
