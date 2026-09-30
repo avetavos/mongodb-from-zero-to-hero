@@ -1,6 +1,6 @@
 ---
 title: Schema validation
-description: บังคับใช้ schema แบบ optional ใน MongoDB ด้วย $jsonSchema validator — bsonType, required และ properties — และควบคุมว่าจะใช้อย่างเข้มงวดแค่ไหนด้วย validationLevel และ validationAction
+description: กลับมาบังคับ schema ด้วย $jsonSchema - validator ตัวจริงที่รันกับการปฏิเสธจริง (รายละเอียด errInfo), strict เทียบ moderate บนข้อมูลเก่า, warn พร้อมบรรทัด log จริง, collMod, bypassDocumentValidation และกับดักชนิดตัวเลขของ driver
 sidebar:
   order: 5
 ---
@@ -9,19 +9,16 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-MongoDB เป็นแบบ schema-flexible โดยปริยาย: collection จะยอมรับ document ที่มีรูปร่างต่างกันอย่างมากอย่างเต็มใจ ซึ่งให้อิสระระหว่างการ prototype และอันตรายใน production **Schema validation** ให้คุณเลือกกลับเข้าสู่การบังคับใช้ — เพื่อประกาศ สำหรับ collection หนึ่ง ว่า field ใดต้องมี ต้องเป็นชนิดใด และค่าใดที่อนุญาต — โดยไม่ต้องทิ้งความยืดหยุ่นของ document model ในจุดที่ยังต้องใช้ คุณแนบกฎผ่าน **`$jsonSchema`** validator แล้ว server จะตรวจทุกการเขียนเทียบกับกฎนั้น ถือเป็นราวกันตกที่ค่อยเพิ่มทีหลังตอนรูปร่างของ collection ลงตัวแล้ว
+MongoDB ยืดหยุ่นเรื่อง schema เป็นค่าเริ่มต้น: collection รับ document รูปทรงต่างกันมาก ซึ่งอิสระตอนทำต้นแบบและอันตรายตอน production **Schema validation** ให้คุณเลือกกลับมาบังคับ - field ใดต้องมี ชนิดอะไร ค่าใดอนุญาต - โดยไม่ทิ้งโมเดล document ในที่ที่ยังต้องการ คุณแนบกฎด้วย validator **`$jsonSchema`** และ server ตรวจทุกการเขียนตามกฎนั้น
+
+ทุกอย่างด้านล่างรันบน mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch บทนี้สร้าง collection `members` ของตัวเองด้วย validator ที่แสดงตรงนี้
 
 ## validator หน้าตาเป็นอย่างไร
 
-validator คือ query expression ที่ทุก document ต้องเป็นไปตาม operator `$jsonSchema` เป็นวิธีมาตรฐานในการเขียน สร้างขึ้นจาก keyword หลักสามตัว:
-
-- **`bsonType`** — ชนิดที่ field (หรือ document) ต้องเป็น เช่น `"object"`, `"string"`, `"int"` หรือ `"array"`
-- **`required`** — array ของชื่อ field ที่ต้องมีอยู่
-- **`properties`** — map ต่อ field ที่อธิบายชนิดและข้อจำกัดของแต่ละ field
-
-นี่คือ validator สำหรับ `members` collection: สมาชิกทุกคนต้องมี `name` เป็น string และปี `joined` เป็น integer ที่อย่างน้อย 1900 และถ้ามี `fines` ก็ต้องเป็นตัวเลขที่ไม่ติดลบ
+validator คือ query expression ที่ทุก document ต้องผ่าน `$jsonSchema` สร้างจากสาม keyword หลัก: **`bsonType`** (ชนิดที่ field หรือ document ต้องเป็น: `"object"`, `"string"`, `"int"`, `"array"`), **`required`** (ชื่อ field ที่ต้องมี) และ **`properties`** (แผนที่ต่อ field ของชนิดและข้อจำกัด) ด้านล่าง: สมาชิกทุกคนต้องมี `name` แบบ string และปี `joined` แบบ integer ไม่น้อยกว่า 1900 และ `fines` ถ้ามีต้องเป็นตัวเลขไม่ติดลบ
 
 export const validationFlowDiagram = `flowchart LR
   W["Incoming write"] --> V{"Matches $jsonSchema?"}
@@ -29,15 +26,16 @@ export const validationFlowDiagram = `flowchart LR
   V -->|"No, action error"| R["Rejected with a validation error"]
   V -->|"No, action warn"| L["Stored but logged as a warning"]`
 
-<Mermaid code={validationFlowDiagram} title="ทุกการเขียนต้องผ่าน validator ก่อน แล้ว validationAction ตัดสินว่าจะ reject ทิ้งหรือแค่บันทึก log" />
+<Mermaid code={validationFlowDiagram} title="ทุกการเขียนถูกตรวจกับ validator; validationAction ตัดสินว่าความล้มเหลวถูกปฏิเสธหรือแค่บันทึก log" />
 
-## การสร้าง collection พร้อม validator
+## สร้าง collection พร้อม validator
 
-การแนบ validator เป็นส่วนหนึ่งของการสร้าง collection การเรียกด้านล่างสร้าง `members` ด้วยกฎที่อธิบายไว้ข้างต้น นี่เป็น operation จริง จึงดูแตกต่างกันเล็กน้อยใน shell และในแต่ละ driver:
+การแนบ validator เป็นส่วนของการสร้าง collection (`collMod` เพิ่มทีหลังได้) แท็บ mongosh พิมพ์ options ที่เก็บกลับมา ส่วนแท็บ Node.js คือการสาธิตกับดักเรื่องชนิดข้อมูลที่ครอบคลุมด้านล่าง
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/val-create.js
     db.createCollection("members", {
       validator: {
         $jsonSchema: {
@@ -52,43 +50,38 @@ export const validationFlowDiagram = `flowchart LR
       },
       validationLevel: "strict",
       validationAction: "error"
-    })
+    });
+    console.log(db.getCollectionInfos({ name: "members" })[0].options);
+    db.members.insertOne({ name: "Ada", joined: 2024, fines: 0 });
+    console.log("valid document stored:", db.members.countDocuments());
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.createCollection("members", {
-      validator: {
-        $jsonSchema: {
-          bsonType: "object",
-          required: ["name", "joined"],
-          properties: {
-            name: { bsonType: "string" },
-            joined: { bsonType: "int", minimum: 1900 },
-            fines: { bsonType: "number", minimum: 0 },
-          },
-        },
-      },
-      validationLevel: "strict",
-      validationAction: "error",
-    });
+    // app/val-types.mjs
+    const members = db.collection("members");
+    await db.createCollection("members", { validator: { $jsonSchema: { bsonType: "object", required: ["name", "joined"], properties: { name: { bsonType: "string" }, joined: { bsonType: "int", minimum: 1900 } } } } });
+    const tryInsert = async (label, doc) => { try { await members.insertOne(doc); console.log(label.padEnd(24), "stored"); return true; } catch (e) { console.log(label.padEnd(24), "REJECTED", e.code, e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied[0].details[0].consideredType); return false; } };
+    const a = await tryInsert("joined: 2024", { name: "a", joined: 2024 });
+    const b = await tryInsert("joined: new Double(2024)", { name: "b", joined: new Double(2024) });
+    const c = await tryInsert("joined: 2 ** 31", { name: "c", joined: 2 ** 31 });
+    const d = await tryInsert("joined: new Int32(2024)", { name: "d", joined: new Int32(2024) });
+    if (!(a && !b && !c && d)) throw new Error("unexpected type behaviour");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     db.create_collection(
         "members",
-        validator={
-            "$jsonSchema": {
-                "bsonType": "object",
-                "required": ["name", "joined"],
-                "properties": {
-                    "name": {"bsonType": "string"},
-                    "joined": {"bsonType": "int", "minimum": 1900},
-                    "fines": {"bsonType": "number", "minimum": 0},
-                },
-            }
-        },
+        validator={"$jsonSchema": {
+            "bsonType": "object",
+            "required": ["name", "joined"],
+            "properties": {
+                "name": {"bsonType": "string"},
+                "joined": {"bsonType": "int", "minimum": 1900},
+                "fines": {"bsonType": "number", "minimum": 0},
+            },
+        }},
         validationLevel="strict",
         validationAction="error",
     )
@@ -96,42 +89,36 @@ export const validationFlowDiagram = `flowchart LR
   </TabItem>
   <TabItem label="Go">
     ```go
-    schema := bson.M{
-        "$jsonSchema": bson.M{
-            "bsonType": "object",
-            "required": bson.A{"name", "joined"},
-            "properties": bson.M{
-                "name":   bson.M{"bsonType": "string"},
-                "joined": bson.M{"bsonType": "int", "minimum": 1900},
-                "fines":  bson.M{"bsonType": "number", "minimum": 0},
-            },
+    validator := bson.M{"$jsonSchema": bson.M{
+        "bsonType": "object",
+        "required": bson.A{"name", "joined"},
+        "properties": bson.M{
+            "name":   bson.M{"bsonType": "string"},
+            "joined": bson.M{"bsonType": "int", "minimum": 1900},
+            "fines":  bson.M{"bsonType": "number", "minimum": 0},
         },
-    }
+    }}
     opts := options.CreateCollection().
-        SetValidator(schema).
+        SetValidator(validator).
         SetValidationLevel("strict").
         SetValidationAction("error")
-    err := db.CreateCollection(ctx, "members", opts)
-    if err != nil {
+    if err := db.CreateCollection(ctx, "members", opts); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let validator = doc! {
-        "$jsonSchema": {
+    db.create_collection("members")
+        .validator(doc! { "$jsonSchema": {
             "bsonType": "object",
             "required": ["name", "joined"],
             "properties": {
                 "name": { "bsonType": "string" },
                 "joined": { "bsonType": "int", "minimum": 1900 },
-                "fines": { "bsonType": "number", "minimum": 0 }
-            }
-        }
-    };
-    db.create_collection("members")
-        .validator(validator)
+                "fines": { "bsonType": "number", "minimum": 0 },
+            },
+        } })
         .validation_level(ValidationLevel::Strict)
         .validation_action(ValidationAction::Error)
         .await?;
@@ -139,92 +126,323 @@ export const validationFlowDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-document ที่ผ่านครบทุกกฎจะบันทึกลงไปได้เลย ไม่มีเสียงบ่น:
-
-```json
-{ "name": "Ada", "joined": 2024, "fines": 0 }
+```text
+{
+  validator: {
+    '$jsonSchema': {
+      bsonType: 'object',
+      required: [ 'name', 'joined' ],
+      properties: {
+        name: { bsonType: 'string' },
+        joined: { bsonType: 'int', minimum: 1900 },
+        fines: { bsonType: 'number', minimum: 0 }
+      }
+    }
+  },
+  validationLevel: 'strict',
+  validationAction: 'error'
+}
+valid document stored: 1
 ```
 
-ส่วน document ที่ผิดกฎจะโดน reject อันนี้ขาด field `joined` ที่ required และใส่ `name` ผิด type การเขียนจึงล้มเหลวด้วย validation error แทนที่จะบันทึกเงียบ ๆ:
+## การเขียนที่ถูกปฏิเสธ และอ่านสาเหตุอย่างไร
 
-```json
-{ "name": 42 }
+document ที่ผิดกฎถูกปฏิเสธด้วย error code 121 และข้อความเปล่า ๆ `Document failed validation` เหตุผลอยู่ใน `error.errInfo.details` ซึ่งแสดงทุกกฎที่ล้มเหลวพร้อมค่าและชนิดที่ server พิจารณา:
+
+```js
+// mongosh/val-reject.js
+try { db.members.insertOne({ name: 42 }); }
+catch (e) { console.log(e.code, e.codeName || "", "-", e.message); console.log(JSON.stringify(e.errInfo.details.schemaRulesNotSatisfied, null, 1)); }
+try { db.members.insertOne({ name: "Zed", joined: 1800, fines: -1 }); }
+catch (e) { console.log("second try:", JSON.stringify(e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied.map((p) => p.propertyName + ": " + p.details[0].operatorName + " " + p.details[0].reason))); }
+try { db.members.insertOne({ name: "Zed", joined: 2024.5 }); }
+catch (e) { console.log("third try :", e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied[0].details[0].reason, "- considered type:", e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied[0].details[0].consideredType); }
+assert.strictEqual(db.members.countDocuments(), 1);
+```
+
+```text
+121  - Document failed validation
+[
+ {
+  "operatorName": "properties",
+  "propertiesNotSatisfied": [
+   {
+    "propertyName": "name",
+    "details": [
+     {
+      "operatorName": "bsonType",
+      "specifiedAs": {
+       "bsonType": "string"
+      },
+      "reason": "type did not match",
+      "consideredValue": 42,
+      "consideredType": "int"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "operatorName": "required",
+  "specifiedAs": {
+   "required": [
+    "name",
+    "joined"
+   ]
+  },
+  "missingProperties": [
+   "joined"
+  ]
+ }
+]
+second try: ["joined: minimum comparison failed","fines: minimum comparison failed"]
+third try : type did not match - considered type: double
+```
+
+### กับดักชนิดตัวเลข
+
+`bsonType` เข้มงวดกว่า JSON: `"int"`, `"long"`, `"double"` และ `"decimal"` ต่างกัน และ `"number"` รับทั้งหมด server เห็นชนิดไหนขึ้นกับ driver mongosh เก็บ `2024` เป็น int; driver Node.js เก็บตัวเลข JavaScript ในช่วง 32 บิตเป็น int32 และที่เหลือ (ทศนิยม หรือ `2 ** 31`) เป็น double:
+
+```text
+joined: 2024             stored
+joined: new Double(2024) REJECTED 121 double
+joined: 2 ** 31          REJECTED 121 double
+joined: new Int32(2024)  stored
 ```
 
 ## validationLevel และ validationAction
 
-มีปุ่มสองตัวควบคุมว่ากฎจะกัดแรงแค่ไหน **`validationLevel`** ตัดสินว่าจะตรวจ *การเขียนแบบไหนบ้าง*: `"strict"` (ค่าปริยาย) validate ทุก insert และ update ส่วน `"moderate"` validate insert และ update ต่อ document ที่เป็นไปตาม schema อยู่แล้ว แต่ปล่อย document ที่ invalid เดิมไว้เฉย ๆ — มีประโยชน์เมื่อคุณเพิ่ม validation ให้กับ collection ที่มีข้อมูลรกอยู่แล้ว **`validationAction`** ตัดสินว่าจะเกิดอะไรขึ้นเมื่อล้มเหลว: `"error"` (ค่าปริยาย) ปฏิเสธการเขียน ส่วน `"warn"` อนุญาตให้เขียนแต่บันทึก warning ไว้ใน server log — วิธีอ่อนโยนในการค้นหาการละเมิดโดยไม่ทำให้การเขียนพังระหว่างการ migration
+สองปุ่มควบคุมว่ากฎกัดแค่ไหน **`validationLevel`** ตัดสินว่าตรวจการเขียน *ไหน*: `"strict"` (ค่าเริ่มต้น) ตรวจทุก insert และ update; `"moderate"` ตรวจ insert และ update ของ document ที่ผ่านกฎอยู่แล้ว และไม่แตะ document ที่ไม่ถูกต้องอยู่เดิม **`validationAction`** ตัดสินว่าเมื่อล้มเหลวเกิดอะไร: `"error"` (ค่าเริ่มต้น) ปฏิเสธ; `"warn"` อนุญาตและบันทึก log document สามรายการที่เขียน *ก่อน* มีกฎ (ถูกหนึ่ง ผิดสอง) ภายใต้แต่ละ level:
 
-การ rollout ที่พบบ่อยคือเริ่มด้วย `validationAction: "warn"` และ `validationLevel: "moderate"` เฝ้าดู log เพื่อเรียนรู้ว่าข้อมูลเดิมละเมิดกฎใหม่มากแค่ไหน แก้ไขตัวที่ผิด แล้วค่อยเข้มขึ้นเป็น `"error"` และ `"strict"`
+```js
+// mongosh/val-levels.js
+db.legacy.insertMany([{ _id: 1, name: "ok", joined: 2020 }, { _id: 2, name: 7 }, { _id: 3, joined: 1500 }]);      // written before any rules existed
+const rules = { $jsonSchema: { bsonType: "object", required: ["name", "joined"], properties: { name: { bsonType: "string" }, joined: { bsonType: "int", minimum: 1900 } } } };
+const attempt = (label, f) => { try { const r = f(); console.log(label.padEnd(46), "allowed, modified:", r.modifiedCount ?? r.insertedId ?? "yes"); } catch (e) { console.log(label.padEnd(46), "REJECTED", e.code); } };
+for (const level of ["strict", "moderate"]) {
+  db.runCommand({ collMod: "legacy", validator: rules, validationLevel: level, validationAction: "error" });
+  console.log("--- validationLevel:", level);
+  attempt("update the VALID doc so it breaks the rules", () => db.legacy.updateOne({ _id: 1 }, { $set: { joined: 1500 } }));
+  db.legacy.updateOne({ _id: 1 }, { $set: { name: "ok", joined: 2020 } }, { bypassDocumentValidation: true });
+  attempt("update an already INVALID doc (still invalid)", () => db.legacy.updateOne({ _id: 2 }, { $set: { note: "x" } }));
+  attempt("insert a new invalid doc", () => db.legacy.insertOne({ name: 1 }));
+  db.legacy.deleteMany({ name: 1 });
+}
+```
 
-**ใน Compass:** เปิด collection แล้วไปที่แท็บ **Validation** คุณสามารถวางหรือแก้ไข document `$jsonSchema` ที่นั่น เลือก validation level และ action จาก dropdown และ Compass จะแสดงตัวอย่างว่า document เดิมตัวใดจะผ่านหรือไม่ผ่านก่อนที่คุณจะบันทึกกฎ — วิธีปลอดภัยในการทดสอบ validator กับข้อมูลจริง
+```text
+--- validationLevel: strict
+update the VALID doc so it breaks the rules    REJECTED 121
+update an already INVALID doc (still invalid)  REJECTED 121
+insert a new invalid doc                       REJECTED 121
+--- validationLevel: moderate
+update the VALID doc so it breaks the rules    REJECTED 121
+update an already INVALID doc (still invalid)  allowed, modified: 1
+insert a new invalid doc                       REJECTED 121
+```
+
+การ rollout ที่พบบ่อยคือ `"moderate"` กับ `"warn"` ก่อน ดู log เพื่อรู้ว่าข้อมูลเดิมผิดกฎเท่าไร แก้ตัวที่ผิด แล้วค่อยเข้มเป็น `"strict"` และ `"error"` บรรทัด log warn จริง:
+
+```js
+// mongosh/val-warn.js
+db.runCommand({ collMod: "members", validationAction: "warn" });
+db.members.insertOne({ name: "warned", joined: "not a number" });                 // stored anyway
+console.log("stored despite the rules:", db.members.countDocuments({ name: "warned" }));
+const line = db.adminCommand({ getLog: "global" }).log.filter((l) => l.includes("Document would fail validation")).pop();
+const j = JSON.parse(line);
+console.log({ severity: j.s, component: j.c, id: j.id, msg: j.msg, namespace: j.attr.namespace.split(".").pop(), firstBrokenRule: j.attr.errInfo.details.schemaRulesNotSatisfied[0].operatorName });
+db.runCommand({ collMod: "members", validationAction: "error" });
+assert.strictEqual(j.id, 20294);
+```
+
+```text
+stored despite the rules: 1
+{
+  severity: 'W',
+  component: 'STORAGE',
+  id: 20294,
+  msg: 'Document would fail validation',
+  namespace: 'members',
+  firstBrokenRule: 'properties'
+}
+```
+
+บรรทัดเดียวกันถูกเขียนลง log ของ `mongod` (`docker logs <container>` แสดง) และ `getLog` อ่านผ่านเชลล์ได้
+
+## เปลี่ยนกฎภายหลัง: collMod และ bypass
+
+```js
+// mongosh/val-collmod.js
+const opts = () => db.getCollectionInfos({ name: "members" })[0].options;
+console.log("now     :", opts().validationLevel, opts().validationAction);
+db.runCommand({ collMod: "members", validationLevel: "moderate", validationAction: "warn" });
+console.log("relaxed :", opts().validationLevel, opts().validationAction);
+db.runCommand({ collMod: "members", validator: {} });
+console.log("removed :", "validator =", JSON.stringify(opts().validator ?? null));
+db.members.insertOne({ anything: "goes" });
+console.log("free-form insert stored:", db.members.countDocuments({ anything: "goes" }));
+db.members.deleteOne({ anything: "goes" });
+```
+
+```text
+now     : strict error
+relaxed : moderate warn
+removed : validator = null
+free-form insert stored: 1
+```
+
+validation ไม่ใช่ประตูทางเดียว สำหรับการโหลดจำนวนมากหรือ migration ที่เชื่อถือได้ option `bypassDocumentValidation` ข้ามกฎสำหรับการเขียนนั้น (เป็นสิทธิ์เฉพาะเมื่อเปิด authentication):
+
+```js
+// mongosh/val-bypass.js
+db.runCommand({ collMod: "members", validator: { $jsonSchema: { bsonType: "object", required: ["name", "joined"], properties: { name: { bsonType: "string" }, joined: { bsonType: "int", minimum: 1900 } } } }, validationLevel: "strict", validationAction: "error" });
+const doc = { name: "migration", joined: 1000 };
+try { db.members.insertOne(doc); } catch (e) { console.log("normal insert :", "REJECTED", e.code); }
+const r = db.runCommand({ insert: "members", documents: [doc], bypassDocumentValidation: true });
+console.log("with bypassDocumentValidation: n =", r.n, "(needs the bypassDocumentValidation privilege when auth is on)");
+assert.strictEqual(r.n, 1);
+```
+
+```text
+normal insert : REJECTED 121
+with bypassDocumentValidation: n = 1 (needs the bypassDocumentValidation privilege when auth is on)
+```
+
+**In Compass:** เปิด collection แล้วไปที่แท็บ **Validation** วางหรือแก้ document `$jsonSchema` เลือก level และ action จากดรอปดาวน์ และ Compass แสดงตัวอย่างว่า document เดิมใดผ่านหรือไม่ผ่านก่อนบันทึก
 
 ## เคล็ดลับและข้อควรระวัง
 
-- Validation เป็นแบบ opt-in และต่อ collection collection ที่ไม่มี validator ทำงานเหมือนเดิมทุกประการ — ไม่มีการบังคับใช้อะไร
-- `bsonType` เข้มงวดกว่าการจัดการตัวเลขแบบหลวม ๆ ของ JSON: `"int"`, `"long"`, `"double"` และ `"decimal"` แยกจากกัน ถ้า driver ส่งค่าเป็น double ในที่ที่คุณ required เป็น int การเขียนจะล้มเหลว — เป็นเรื่องที่ทำให้แปลกใจกันบ่อย
-- `required` ตรวจแค่ว่า field *มีอยู่* เท่านั้น ส่วนกฎราย field ใน `properties` ตรวจ type และค่า ใช้ทั้งสองด้วยกันเพื่อปักหมุด field ให้แน่นสมบูรณ์
-- ใช้ `"moderate"` บวก `"warn"` เมื่อเพิ่ม validation ให้กับ collection ที่มีอยู่ เพื่อที่คุณจะไม่ทำให้การเขียนต่อ document ที่มีมาก่อนกฎพัง
-- คุณสามารถเปลี่ยนหรือลบ validator ทีหลังด้วยคำสั่ง `collMod` — validation ไม่ใช่ประตูทางเดียว
+- validation เป็นแบบเลือกเปิดและต่อ collection; ไม่มี validator ก็ไม่มีอะไรถูกบังคับ
+- `bsonType` เข้มงวด: double ที่คุณกำหนดให้เป็น int ล้มเหลว (`2 ** 31` จาก Node, `2024.5`) ใช้ `"number"` เมื่อชนิดตัวเลขใดก็ได้
+- `required` ตรวจว่ามี; `properties` ตรวจชนิดและค่า ใช้ทั้งคู่
+- เพิ่ม validation ให้ collection ที่มีอยู่ด้วย `"moderate"` + `"warn"` เพื่อไม่ให้ document เก่าทำให้การเขียนพัง
+- มีเพียง `bsonType` ที่รองรับชนิด BSON; `type: "integer"` แบบ JSON Schema ไม่รองรับ
 
-<Callout title="ยืดหยุ่นโดยปริยาย เข้มงวดอย่างตั้งใจ">
-MongoDB ให้เริ่มต้นแบบไม่มี schema แล้วค่อยเพิ่มทีหลังเมื่อรูปร่างลงตัว `$jsonSchema` validator พร้อม `required` และ `properties` เปลี่ยน "อะไรก็ได้" ให้เป็น "field เหล่านี้ ชนิดเหล่านี้" และ `validationLevel` บวก `validationAction` ให้คุณ rollout ได้แบบนุ่มนวล คือ warn ก่อน แล้วค่อยบังคับตอนข้อมูลสะอาดแล้ว
+<Callout title="ยืดหยุ่นเป็นค่าเริ่มต้น เข้มงวดโดยเจตนา">
+MongoDB ให้เริ่มโดยไม่มี schema และเพิ่มเมื่อรูปทรงนิ่ง validator `$jsonSchema` เปลี่ยน "อะไรก็ได้" เป็น "field เหล่านี้ ชนิดเหล่านี้" และ `validationLevel` กับ `validationAction` ให้ rollout อย่างนุ่มนวล - เตือนก่อน บังคับเมื่อข้อมูลสะอาด
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ validator สำหรับปีที่เข้าร่วมแบบจำนวนเต็ม AI ใช้คำศัพท์ของ JSON Schema:
+
+<SpotTheBug lang="js" code={`// AI comment: "integer is the JSON Schema type for whole numbers"
+await db.createCollection("strictMembers", {
+  validator: { $jsonSchema: { bsonType: "object", properties: { joined: { type: "integer", minimum: 1900 } } } },
+});`}>
+
+MongoDB implement ชุดย่อยของ JSON Schema พร้อมส่วนขยาย BSON: keyword `integer` ของ type ถูกปฏิเสธตอนสร้าง collection (`FailedToParse: $jsonSchema type 'integer' is not currently supported`) ชื่อ BSON คือ `bsonType: "int"` (หรือ `"long"` หรือ `"number"` สำหรับตัวเลขชนิดใดก็ได้) โปรดสังเกตกับดักลำดับที่สองจากแท็บ Node.js: กับ `"int"` ค่าที่ driver ของคุณเข้ารหัสเป็น double จะถูกปฏิเสธตอนรัน ดังนั้นให้ตรวจสิ่งที่ driver ส่งจริง:
+
+```js
+// mongosh/val-bug.js
+// AI: JSON-Schema habit - "integer" is the type for whole numbers
+try { db.createCollection("strictMembers", { validator: { $jsonSchema: { bsonType: "object", properties: { joined: { type: "integer", minimum: 1900 } } } } }); }
+catch (e) { console.log(e.codeName + ":", e.message); }
+db.createCollection("strictMembers", { validator: { $jsonSchema: { bsonType: "object", properties: { joined: { bsonType: "int", minimum: 1900 } } } } });
+console.log("with bsonType: 'int' it works:", db.getCollectionInfos({ name: "strictMembers" }).length === 1);
+```
+
+```text
+FailedToParse: $jsonSchema type 'integer' is not currently supported.
+with bsonType: 'int' it works: true
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+validator คือตัวกรองบนเส้นทางเขียน: ทุก insert และ update ถูกทดสอบกับกฎรูปแบบ query ก่อนลงจริง `validationLevel` เลือกว่าการเขียนใดต้องผ่านการทดสอบ `validationAction` เลือกผลที่ตามมา และ `collMod` หมุนปุ่ม กฎมองเห็นชนิด BSON ไม่ใช่ชนิด JavaScript - driver ที่คุณใช้จึงเป็นส่วนหนึ่งของ schema
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| ใช้ `$jsonSchema` validation | จับการเขียนที่ผิดรูปแบบได้ตั้งแต่ระดับ database เหมือนมี schema แบบเบา ๆ คอยกันตก | เพิ่มขั้นตอนตอนเขียน ต้องคอย sync กฎกับโค้ดฝั่งแอปพลิเคชันเสมอ |
-| ไม่ใช้ validator (พึ่ง schema flexibility เดิมของ MongoDB) | ยืดหยุ่นเต็มที่ เขียนอะไรก็ได้โดยไม่มีแรงเสียดทาน | ข้อมูลผิดรูปแบบหลุดเข้า production ได้ง่าย กว่าจะรู้ก็สายเกินไปแล้ว |
+| `$jsonSchema` + `error` | การเขียนที่ผิดรูปไม่ลงเลย | กฎต้องตามโค้ดแอป; ชนิดไม่ตรงจาก driver โผล่เป็น 121 |
+| `moderate` + `warn` | rollout ปลอดภัยบนข้อมูลเก่า; การละเมิดอยู่ใน log | ข้อมูลผิดยังเข้าได้; ต้องมีคนอ่าน log |
+| `strict` | document เก่าที่ผิดแก้ไขไม่ได้ถ้าไม่ซ่อม | ทำให้ update document เก่าพัง |
+| `bypassDocumentValidation` | migration และการโหลดจำนวนมาก | ข้ามตาข่ายนิรภัย; ต้องมีสิทธิ์เมื่อเปิด auth |
+| ไม่มี validator | ยืดหยุ่นเต็มที่ | ข้อมูลผิดรูปถึง production โดยไม่มีใครสังเกต |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า `$jsonSchema` validator แทนที่การ validate ฝั่งแอปพลิเคชันได้ทั้งหมด** — validator เช็คแค่ shape พื้นฐานตอนเขียนเข้า database เท่านั้น ไม่รู้ business rule เชิงลึก เช่น "email นี้ต้องไม่ซ้ำกับ user อื่น" ยังต้องใช้ unique index หรือ logic แยกต่างหาก
-- **เพิ่ม validator เข้ม ๆ ทันทีบน collection ที่มีข้อมูลเก่าอยู่แล้ว** — ถ้าไม่ผ่าน `"moderate"` กับ `"warn"` ก่อน การเปิด `"strict"` กับ `"error"` ทันทีจะทำให้การเขียนต่อ document เก่าที่ไม่ตรง schema ล้มเหลวโดยไม่ทันตั้งตัว
-- **ลืมอัปเดต validator เมื่อ schema ของแอปพลิเคชันเปลี่ยน** — validator ไม่ sync กับโค้ดอัตโนมัติ ถ้าเพิ่ม field ใหม่ในแอปแต่ลืมแก้ `$jsonSchema` การเขียนอาจถูกปฏิเสธโดยไม่คาดคิด
+- **"validator แทนการตรวจสอบในแอปได้"** - มันตรวจรูปทรงและข้อจำกัดง่าย ๆ ไม่ใช่กฎอย่างความไม่ซ้ำ (ใช้ unique index)
+- **"`type: 'integer'` ใช้ได้เหมือน JSON Schema"** - parse ไม่ผ่าน; ใช้ `bsonType`
+- **"จำนวนเต็มของ JavaScript เป็น int เสมอ"** - `2 ** 31` และทศนิยมทุกตัวถึง server เป็น double และไม่ผ่าน `bsonType: "int"`
+- **"`moderate` ข้าม validation"** - insert document ที่ผิดและ update ที่ทำให้ document ที่ถูกกลายเป็นผิดยังถูกปฏิเสธ
+- **"validator ซิงก์กับโค้ดของฉัน"** - ไม่ซิงก์; เปลี่ยนแอปโดยไม่ `collMod` กฎเก่ายังอยู่
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **แพลตฟอร์มรถยนต์เชื่อมต่อทั่วไป** — validate payload telemetry จากรถยนต์ที่เชื่อมต่อด้วย `$jsonSchema` ก่อนเก็บ เพื่อกัน sensor ที่ส่งข้อมูลผิดรูปแบบไม่ให้ปนเข้าไปใน collection หลัก
->
-> **ระบบธนาคารและ fintech** — ใช้ `$jsonSchema` เป็นราวกันตกบน collection ธุรกรรม กำหนด required field อย่างจำนวนเงินและสกุลเงินให้ตรง type เสมอ ก่อนที่ข้อมูลผิดจะไหลต่อไปยัง downstream analytics
+> คู่มือ schema validation ของ MongoDB นิยามพฤติกรรมที่วัดข้างบน: ใน "moderate" "updates to existing documents in the collection that don't match the validation rules aren't required to pass validation" ส่วน "strict" "applies the same validation rules to all document inserts and updates" ([validation level](https://www.mongodb.com/docs/manual/core/schema-validation/specify-validation-level/), ตรวจ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (สร้าง collection พร้อม validator และ document ที่ผิดถูกปฏิเสธ) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizValidation = [
   {
-    q: 'operator ใดแสดง schema validation rule ของ MongoDB?',
-    options: ['$schema', '$jsonSchema', '$validate', '$type'],
-    answer: 1,
-  },
-  {
-    q: 'keyword required ใน $jsonSchema validator ทำอะไร?',
+    q: 'keyword bsonType ใดกำหนดให้เป็นจำนวนเต็มที่เก็บเป็น integer 32 บิต',
     options: [
-      'ตั้งค่าปริยายให้กับ field',
-      'แสดงรายการชื่อ field ที่ต้องมีอยู่ใน document',
-      'บังคับให้ทุก field เป็น string',
-      'ทำให้ collection อ่านได้อย่างเดียว',
+      '"integer" ผ่าน type',
+      'bsonType: "int"',
+      'bsonType: "number" หมายถึง int เสมอ',
+      'bsonType: "whole"',
     ],
     answer: 1,
+    explain: 'type: "integer" parse ไม่ผ่าน ("$jsonSchema type \'integer\' is not currently supported"); bsonType: "int" สร้าง collection ได้',
   },
   {
-    q: 'validator ตั้ง validationAction เป็น "warn" แล้ว document ที่ผิดกฎจะเป็นอย่างไร?',
+    q: 'Node.js insert { joined: 2 ** 31 } ลง collection ที่กำหนด bsonType "int" เกิดอะไรขึ้น',
     options: [
-      'การเขียนถูกปฏิเสธด้วย error',
-      'การเขียนถูกเก็บ และการละเมิดถูกบันทึกเป็น warning',
-      'collection ถูก drop',
-      'document ถูกแก้ไขให้ถูกต้องแบบเงียบ ๆ',
+      'เก็บเป็น int',
+      'ถูกปฏิเสธ: driver ส่งเป็น double (code 121)',
+      'เก็บเป็น string',
+      'driver throw ก่อนส่ง',
     ],
     answer: 1,
+    explain: '2024 (อยู่ในช่วง int32) ถูกเก็บ; new Double(2024) และ 2 ** 31 ถูกปฏิเสธด้วย consideredType: double; new Int32(2024) ผ่าน',
   },
   {
-    q: 'ทำไมคุณอาจเลือก validationLevel "moderate" เมื่อเพิ่มกฎให้กับ collection ที่มีอยู่?',
+    q: 'validationLevel "strict" ต่างจาก "moderate" อย่างไรบน collection ที่มี document เก่าที่ไม่ถูกต้อง',
     options: [
-      'validate เร็วกว่าแบบ strict',
-      'ปล่อย document เดิมที่ invalid ไว้เฉย ๆ แต่ยังตรวจการเขียนใหม่',
-      'ปิดการใช้งาน validator ทั้งหมด',
-      'จำเป็นต้องใช้คู่กับ $jsonSchema',
+      'ไม่ต่าง',
+      'moderate ข้ายการ update document ที่ไม่ถูกต้องอยู่แล้ว ส่วน strict ปฏิเสธด้วย',
+      'moderate ตรวจเฉพาะการลบ',
+      'strict ไม่สนใจ insert',
     ],
     answer: 1,
+    explain: 'update document ที่ไม่ถูกต้องอยู่แล้ว: ปฏิเสธ 121 ใน strict, อนุญาตใน moderate; insert document ใหม่ที่ไม่ถูกต้องถูกปฏิเสธทั้งสองแบบ',
+  },
+  {
+    q: 'เมื่อ validationAction: "warn" document ที่ผิดกฎเกิดอะไรขึ้น',
+    options: [
+      'ถูกปฏิเสธ',
+      'ถูกเก็บและ server log "Document would fail validation" (id 20294, severity W)',
+      'ถูกเก็บเงียบ ๆ',
+      'ถูกเข้าคิวรอตรวจ',
+    ],
+    answer: 1,
+    explain: 'getLog คืนบรรทัด W / STORAGE / 20294 ที่ระบุกฎที่ล้มเหลว (properties)',
+  },
+  {
+    q: 'จะอ่านสาเหตุที่การเขียนถูกปฏิเสธได้อย่างไร',
+    options: [
+      'message บอก field เป๊ะเสมอ',
+      'error.errInfo.details.schemaRulesNotSatisfied แสดงทุกกฎที่ผิด ค่าและชนิดที่พิจารณา',
+      'ดู oplog',
+      'รู้ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'message เปล่า ๆ มีแค่ "Document failed validation" (121); errInfo ระบุ properties.name (type did not match, 42) และ required.joined',
+  },
+  {
+    q: 'คำสั่งใดเปลี่ยนหรือลบ validator ภายหลัง',
+    options: [
+      'collMod',
+      'ต้อง drop collection',
+      'renameCollection',
+      'createIndex',
+    ],
+    answer: 0,
+    explain: 'collMod ย้าย members จาก strict/error เป็น moderate/warn และ { validator: {} } ลบกฎโดยไม่แตะข้อมูล',
   },
 ]
 

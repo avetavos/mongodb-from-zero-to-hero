@@ -1,6 +1,6 @@
 ---
 title: Schema validation
-description: Enforce an optional schema in MongoDB with $jsonSchema validators — bsonType, required, and properties — and control how strictly they apply with validationLevel and validationAction.
+description: Opt back into enforcement with $jsonSchema - the exact validator run against real rejections (errInfo details), strict versus moderate on legacy data, warn with the real log line, collMod, bypassDocumentValidation and the driver number-type trap.
 sidebar:
   order: 5
 ---
@@ -9,19 +9,16 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-MongoDB is schema-flexible by default: a collection will happily accept documents of wildly different shapes, which is freeing during prototyping and dangerous in production. **Schema validation** lets you opt back into enforcement — to declare, for a given collection, which fields must exist, what types they must be, and what values are allowed — without giving up the document model's flexibility where you still want it. You attach the rules with a **`$jsonSchema`** validator, and from then on the server checks every write against them. It is the safety rail you add once a collection's shape has settled.
+MongoDB is schema-flexible by default: a collection accepts documents of wildly different shapes, which is freeing during prototyping and dangerous in production. **Schema validation** lets you opt back into enforcement - which fields must exist, what types they must be, what values are allowed - without giving up the document model where you still want it. You attach rules with a **`$jsonSchema`** validator and the server checks every write against them.
+
+Everything below ran on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program. The lesson creates its own `members` collection with the exact validator shown.
 
 ## What a validator looks like
 
-A validator is a query expression that every document must satisfy. The `$jsonSchema` operator is the standard way to write one, built from three core keywords:
-
-- **`bsonType`** — the type a field (or the document) must be, such as `"object"`, `"string"`, `"int"`, or `"array"`.
-- **`required`** — an array of field names that must be present.
-- **`properties`** — a per-field map describing each field's type and constraints.
-
-Here is a validator for a `members` collection: every member must have a string `name` and an integer `joined` year of at least 1900, and if `fines` is present it must be a non-negative number.
+A validator is a query expression every document must satisfy. `$jsonSchema` builds one from three core keywords: **`bsonType`** (the type a field or the document must be: `"object"`, `"string"`, `"int"`, `"array"`), **`required`** (field names that must be present) and **`properties`** (a per-field map of type and constraints). Below: every member needs a string `name` and an integer `joined` year of at least 1900, and `fines`, if present, must be a non-negative number.
 
 export const validationFlowDiagram = `flowchart LR
   W["Incoming write"] --> V{"Matches $jsonSchema?"}
@@ -33,11 +30,12 @@ export const validationFlowDiagram = `flowchart LR
 
 ## Creating a collection with a validator
 
-Attaching a validator is part of creating the collection. The call below builds `members` with the rules described above. This is a real operation, so it looks slightly different in the shell and in each driver:
+Attaching a validator is part of creating the collection (`collMod` can add one later). The mongosh tab prints back the stored options; the Node.js tab is the type-trap demonstration covered below.
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/val-create.js
     db.createCollection("members", {
       validator: {
         $jsonSchema: {
@@ -52,43 +50,38 @@ Attaching a validator is part of creating the collection. The call below builds 
       },
       validationLevel: "strict",
       validationAction: "error"
-    })
+    });
+    console.log(db.getCollectionInfos({ name: "members" })[0].options);
+    db.members.insertOne({ name: "Ada", joined: 2024, fines: 0 });
+    console.log("valid document stored:", db.members.countDocuments());
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.createCollection("members", {
-      validator: {
-        $jsonSchema: {
-          bsonType: "object",
-          required: ["name", "joined"],
-          properties: {
-            name: { bsonType: "string" },
-            joined: { bsonType: "int", minimum: 1900 },
-            fines: { bsonType: "number", minimum: 0 },
-          },
-        },
-      },
-      validationLevel: "strict",
-      validationAction: "error",
-    });
+    // app/val-types.mjs
+    const members = db.collection("members");
+    await db.createCollection("members", { validator: { $jsonSchema: { bsonType: "object", required: ["name", "joined"], properties: { name: { bsonType: "string" }, joined: { bsonType: "int", minimum: 1900 } } } } });
+    const tryInsert = async (label, doc) => { try { await members.insertOne(doc); console.log(label.padEnd(24), "stored"); return true; } catch (e) { console.log(label.padEnd(24), "REJECTED", e.code, e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied[0].details[0].consideredType); return false; } };
+    const a = await tryInsert("joined: 2024", { name: "a", joined: 2024 });
+    const b = await tryInsert("joined: new Double(2024)", { name: "b", joined: new Double(2024) });
+    const c = await tryInsert("joined: 2 ** 31", { name: "c", joined: 2 ** 31 });
+    const d = await tryInsert("joined: new Int32(2024)", { name: "d", joined: new Int32(2024) });
+    if (!(a && !b && !c && d)) throw new Error("unexpected type behaviour");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     db.create_collection(
         "members",
-        validator={
-            "$jsonSchema": {
-                "bsonType": "object",
-                "required": ["name", "joined"],
-                "properties": {
-                    "name": {"bsonType": "string"},
-                    "joined": {"bsonType": "int", "minimum": 1900},
-                    "fines": {"bsonType": "number", "minimum": 0},
-                },
-            }
-        },
+        validator={"$jsonSchema": {
+            "bsonType": "object",
+            "required": ["name", "joined"],
+            "properties": {
+                "name": {"bsonType": "string"},
+                "joined": {"bsonType": "int", "minimum": 1900},
+                "fines": {"bsonType": "number", "minimum": 0},
+            },
+        }},
         validationLevel="strict",
         validationAction="error",
     )
@@ -96,42 +89,36 @@ Attaching a validator is part of creating the collection. The call below builds 
   </TabItem>
   <TabItem label="Go">
     ```go
-    schema := bson.M{
-        "$jsonSchema": bson.M{
-            "bsonType": "object",
-            "required": bson.A{"name", "joined"},
-            "properties": bson.M{
-                "name":   bson.M{"bsonType": "string"},
-                "joined": bson.M{"bsonType": "int", "minimum": 1900},
-                "fines":  bson.M{"bsonType": "number", "minimum": 0},
-            },
+    validator := bson.M{"$jsonSchema": bson.M{
+        "bsonType": "object",
+        "required": bson.A{"name", "joined"},
+        "properties": bson.M{
+            "name":   bson.M{"bsonType": "string"},
+            "joined": bson.M{"bsonType": "int", "minimum": 1900},
+            "fines":  bson.M{"bsonType": "number", "minimum": 0},
         },
-    }
+    }}
     opts := options.CreateCollection().
-        SetValidator(schema).
+        SetValidator(validator).
         SetValidationLevel("strict").
         SetValidationAction("error")
-    err := db.CreateCollection(ctx, "members", opts)
-    if err != nil {
+    if err := db.CreateCollection(ctx, "members", opts); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let validator = doc! {
-        "$jsonSchema": {
+    db.create_collection("members")
+        .validator(doc! { "$jsonSchema": {
             "bsonType": "object",
             "required": ["name", "joined"],
             "properties": {
                 "name": { "bsonType": "string" },
                 "joined": { "bsonType": "int", "minimum": 1900 },
-                "fines": { "bsonType": "number", "minimum": 0 }
-            }
-        }
-    };
-    db.create_collection("members")
-        .validator(validator)
+                "fines": { "bsonType": "number", "minimum": 0 },
+            },
+        } })
         .validation_level(ValidationLevel::Strict)
         .validation_action(ValidationAction::Error)
         .await?;
@@ -139,92 +126,323 @@ Attaching a validator is part of creating the collection. The call below builds 
   </TabItem>
 </Tabs>
 
-A document that satisfies every rule is stored without comment:
-
-```json
-{ "name": "Ada", "joined": 2024, "fines": 0 }
+```text
+{
+  validator: {
+    '$jsonSchema': {
+      bsonType: 'object',
+      required: [ 'name', 'joined' ],
+      properties: {
+        name: { bsonType: 'string' },
+        joined: { bsonType: 'int', minimum: 1900 },
+        fines: { bsonType: 'number', minimum: 0 }
+      }
+    }
+  },
+  validationLevel: 'strict',
+  validationAction: 'error'
+}
+valid document stored: 1
 ```
 
-A document that breaks a rule is rejected. This one is missing the required `joined` field and gives `name` the wrong type, so the write fails with a validation error rather than being silently stored:
+## A rejected write, and how to read why
 
-```json
-{ "name": 42 }
+A document that breaks a rule is rejected with error code 121 and the bare message `Document failed validation`. The reason is in `error.errInfo.details`, which lists every rule that failed with the value and type the server considered:
+
+```js
+// mongosh/val-reject.js
+try { db.members.insertOne({ name: 42 }); }
+catch (e) { console.log(e.code, e.codeName || "", "-", e.message); console.log(JSON.stringify(e.errInfo.details.schemaRulesNotSatisfied, null, 1)); }
+try { db.members.insertOne({ name: "Zed", joined: 1800, fines: -1 }); }
+catch (e) { console.log("second try:", JSON.stringify(e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied.map((p) => p.propertyName + ": " + p.details[0].operatorName + " " + p.details[0].reason))); }
+try { db.members.insertOne({ name: "Zed", joined: 2024.5 }); }
+catch (e) { console.log("third try :", e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied[0].details[0].reason, "- considered type:", e.errInfo.details.schemaRulesNotSatisfied[0].propertiesNotSatisfied[0].details[0].consideredType); }
+assert.strictEqual(db.members.countDocuments(), 1);
+```
+
+```text
+121  - Document failed validation
+[
+ {
+  "operatorName": "properties",
+  "propertiesNotSatisfied": [
+   {
+    "propertyName": "name",
+    "details": [
+     {
+      "operatorName": "bsonType",
+      "specifiedAs": {
+       "bsonType": "string"
+      },
+      "reason": "type did not match",
+      "consideredValue": 42,
+      "consideredType": "int"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "operatorName": "required",
+  "specifiedAs": {
+   "required": [
+    "name",
+    "joined"
+   ]
+  },
+  "missingProperties": [
+   "joined"
+  ]
+ }
+]
+second try: ["joined: minimum comparison failed","fines: minimum comparison failed"]
+third try : type did not match - considered type: double
+```
+
+### The number-type trap
+
+`bsonType` is stricter than JSON: `"int"`, `"long"`, `"double"` and `"decimal"` are distinct, and `"number"` accepts any of them. Which one the server sees depends on the driver. mongosh stores `2024` as an int; the Node.js driver stores JavaScript numbers inside the 32-bit range as int32 and everything else (a decimal, or `2 ** 31`) as a double:
+
+```text
+joined: 2024             stored
+joined: new Double(2024) REJECTED 121 double
+joined: 2 ** 31          REJECTED 121 double
+joined: new Int32(2024)  stored
 ```
 
 ## validationLevel and validationAction
 
-Two knobs control how the rules bite. **`validationLevel`** decides *which* writes are checked: `"strict"` (the default) validates every insert and update, while `"moderate"` validates inserts and updates to documents that already satisfy the schema but leaves existing invalid documents alone — useful when you add validation to a collection that already holds messy data. **`validationAction`** decides what happens on failure: `"error"` (the default) rejects the write, while `"warn"` allows it but records a warning in the server log — a gentle way to discover violations without breaking writes during a migration.
+Two knobs control how the rules bite. **`validationLevel`** decides *which* writes are checked: `"strict"` (default) checks every insert and update; `"moderate"` checks inserts and updates to documents that already satisfy the rules, and leaves existing invalid documents alone. **`validationAction`** decides what happens on failure: `"error"` (default) rejects; `"warn"` allows the write and logs it. Three documents written *before* any rules existed (one valid, two invalid), under each level:
 
-A common rollout is to begin with `validationAction: "warn"` and `validationLevel: "moderate"`, watch the logs to learn how much existing data violates the new rules, fix the offenders, then tighten to `"error"` and `"strict"`.
+```js
+// mongosh/val-levels.js
+db.legacy.insertMany([{ _id: 1, name: "ok", joined: 2020 }, { _id: 2, name: 7 }, { _id: 3, joined: 1500 }]);      // written before any rules existed
+const rules = { $jsonSchema: { bsonType: "object", required: ["name", "joined"], properties: { name: { bsonType: "string" }, joined: { bsonType: "int", minimum: 1900 } } } };
+const attempt = (label, f) => { try { const r = f(); console.log(label.padEnd(46), "allowed, modified:", r.modifiedCount ?? r.insertedId ?? "yes"); } catch (e) { console.log(label.padEnd(46), "REJECTED", e.code); } };
+for (const level of ["strict", "moderate"]) {
+  db.runCommand({ collMod: "legacy", validator: rules, validationLevel: level, validationAction: "error" });
+  console.log("--- validationLevel:", level);
+  attempt("update the VALID doc so it breaks the rules", () => db.legacy.updateOne({ _id: 1 }, { $set: { joined: 1500 } }));
+  db.legacy.updateOne({ _id: 1 }, { $set: { name: "ok", joined: 2020 } }, { bypassDocumentValidation: true });
+  attempt("update an already INVALID doc (still invalid)", () => db.legacy.updateOne({ _id: 2 }, { $set: { note: "x" } }));
+  attempt("insert a new invalid doc", () => db.legacy.insertOne({ name: 1 }));
+  db.legacy.deleteMany({ name: 1 });
+}
+```
 
-**In Compass:** open a collection and go to the **Validation** tab. You can paste or edit a `$jsonSchema` document there, pick the validation level and action from dropdowns, and Compass will preview which existing documents would pass or fail before you save the rules — a safe way to test a validator against real data.
+```text
+--- validationLevel: strict
+update the VALID doc so it breaks the rules    REJECTED 121
+update an already INVALID doc (still invalid)  REJECTED 121
+insert a new invalid doc                       REJECTED 121
+--- validationLevel: moderate
+update the VALID doc so it breaks the rules    REJECTED 121
+update an already INVALID doc (still invalid)  allowed, modified: 1
+insert a new invalid doc                       REJECTED 121
+```
+
+A common rollout is `"moderate"` plus `"warn"` first, watch the logs to learn how much existing data violates the rules, fix the offenders, then tighten to `"strict"` and `"error"`. The real warn log line:
+
+```js
+// mongosh/val-warn.js
+db.runCommand({ collMod: "members", validationAction: "warn" });
+db.members.insertOne({ name: "warned", joined: "not a number" });                 // stored anyway
+console.log("stored despite the rules:", db.members.countDocuments({ name: "warned" }));
+const line = db.adminCommand({ getLog: "global" }).log.filter((l) => l.includes("Document would fail validation")).pop();
+const j = JSON.parse(line);
+console.log({ severity: j.s, component: j.c, id: j.id, msg: j.msg, namespace: j.attr.namespace.split(".").pop(), firstBrokenRule: j.attr.errInfo.details.schemaRulesNotSatisfied[0].operatorName });
+db.runCommand({ collMod: "members", validationAction: "error" });
+assert.strictEqual(j.id, 20294);
+```
+
+```text
+stored despite the rules: 1
+{
+  severity: 'W',
+  component: 'STORAGE',
+  id: 20294,
+  msg: 'Document would fail validation',
+  namespace: 'members',
+  firstBrokenRule: 'properties'
+}
+```
+
+The same line is written to the `mongod` log (`docker logs <container>` shows it), and `getLog` reads it through the shell.
+
+## Changing rules later: collMod and bypass
+
+```js
+// mongosh/val-collmod.js
+const opts = () => db.getCollectionInfos({ name: "members" })[0].options;
+console.log("now     :", opts().validationLevel, opts().validationAction);
+db.runCommand({ collMod: "members", validationLevel: "moderate", validationAction: "warn" });
+console.log("relaxed :", opts().validationLevel, opts().validationAction);
+db.runCommand({ collMod: "members", validator: {} });
+console.log("removed :", "validator =", JSON.stringify(opts().validator ?? null));
+db.members.insertOne({ anything: "goes" });
+console.log("free-form insert stored:", db.members.countDocuments({ anything: "goes" }));
+db.members.deleteOne({ anything: "goes" });
+```
+
+```text
+now     : strict error
+relaxed : moderate warn
+removed : validator = null
+free-form insert stored: 1
+```
+
+Validation is not a one-way door. For trusted bulk loads or migrations, the `bypassDocumentValidation` option skips the rules for that write (it is a privilege when authentication is on):
+
+```js
+// mongosh/val-bypass.js
+db.runCommand({ collMod: "members", validator: { $jsonSchema: { bsonType: "object", required: ["name", "joined"], properties: { name: { bsonType: "string" }, joined: { bsonType: "int", minimum: 1900 } } } }, validationLevel: "strict", validationAction: "error" });
+const doc = { name: "migration", joined: 1000 };
+try { db.members.insertOne(doc); } catch (e) { console.log("normal insert :", "REJECTED", e.code); }
+const r = db.runCommand({ insert: "members", documents: [doc], bypassDocumentValidation: true });
+console.log("with bypassDocumentValidation: n =", r.n, "(needs the bypassDocumentValidation privilege when auth is on)");
+assert.strictEqual(r.n, 1);
+```
+
+```text
+normal insert : REJECTED 121
+with bypassDocumentValidation: n = 1 (needs the bypassDocumentValidation privilege when auth is on)
+```
+
+**In Compass:** open a collection and go to the **Validation** tab. You can paste or edit a `$jsonSchema` document, pick the level and action from dropdowns, and Compass previews which existing documents would pass or fail before you save.
 
 ## Tips and gotchas
 
-- Validation is opt-in and per-collection. A collection with no validator behaves exactly as before — nothing is enforced.
-- `bsonType` is stricter than JSON's loose number handling: `"int"`, `"long"`, `"double"`, and `"decimal"` are distinct. If a driver sends a value as a double where you required an int, the write fails — a frequent surprise.
-- `required` only checks that a field is *present*; the per-field rules in `properties` check its type and value. Use both together to fully pin a field down.
-- Use `"moderate"` plus `"warn"` when adding validation to an existing collection so you do not break writes to documents that predate the rules.
-- You can change or remove a validator later with the `collMod` command — validation is not a one-way door.
+- Validation is opt-in and per collection; without a validator nothing is enforced.
+- `bsonType` is strict: a double where you required an int fails (`2 ** 31` from Node, `2024.5`). Use `"number"` when any numeric type is fine.
+- `required` checks presence; `properties` checks type and value. Use both.
+- Add validation to an existing collection with `"moderate"` + `"warn"` so old documents do not break writes.
+- Only `bsonType` supports BSON types; the JSON-Schema-style `type: "integer"` is not supported.
 
 <Callout title="Flexible by default, strict on purpose">
-MongoDB lets you start without a schema and add one once the shape settles. A `$jsonSchema` validator with `required` and `properties` turns "anything goes" into "these fields, these types," and `validationLevel` plus `validationAction` let you roll it out gently — warn first, enforce once the data is clean.
+MongoDB lets you start without a schema and add one once the shape settles. A `$jsonSchema` validator turns "anything goes" into "these fields, these types", and `validationLevel` plus `validationAction` let you roll it out gently - warn first, enforce once the data is clean.
 </Callout>
+
+## Reading AI-generated code
+
+Asked for a validator for whole-number join years, an assistant reaches for JSON-Schema vocabulary:
+
+<SpotTheBug lang="js" code={`// AI comment: "integer is the JSON Schema type for whole numbers"
+await db.createCollection("strictMembers", {
+  validator: { $jsonSchema: { bsonType: "object", properties: { joined: { type: "integer", minimum: 1900 } } } },
+});`}>
+
+MongoDB implements a subset of JSON Schema with BSON extensions: the type keyword `integer` is rejected when the collection is created (`FailedToParse: $jsonSchema type 'integer' is not currently supported`). The BSON name is `bsonType: "int"` (or `"long"`, or `"number"` for any numeric type). Note the second-order trap from the Node.js tab: with `"int"`, a value your driver encodes as a double will be rejected at runtime, so validate what your driver actually sends:
+
+```js
+// mongosh/val-bug.js
+// AI: JSON-Schema habit - "integer" is the type for whole numbers
+try { db.createCollection("strictMembers", { validator: { $jsonSchema: { bsonType: "object", properties: { joined: { type: "integer", minimum: 1900 } } } } }); }
+catch (e) { console.log(e.codeName + ":", e.message); }
+db.createCollection("strictMembers", { validator: { $jsonSchema: { bsonType: "object", properties: { joined: { bsonType: "int", minimum: 1900 } } } } });
+console.log("with bsonType: 'int' it works:", db.getCollectionInfos({ name: "strictMembers" }).length === 1);
+```
+
+```text
+FailedToParse: $jsonSchema type 'integer' is not currently supported.
+with bsonType: 'int' it works: true
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A validator is a filter on the write path: every insert and update is tested against a query-shaped rule before it lands. `validationLevel` picks which writes face the test, `validationAction` picks the consequence, and `collMod` moves the dials. The rules see BSON types, not JavaScript types - so the driver you use is part of the schema.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Use `$jsonSchema` validation | Catches malformed writes at the database level, like a lightweight built-in safety rail | Adds a write-time step, and the rules must be kept in sync with application code |
-| No validator (rely on MongoDB's default schema flexibility) | Fully flexible, write anything with no friction | Malformed data can slip into production easily, often not discovered until too late |
+| `$jsonSchema` + `error` | Malformed writes never land | Rules must track application code; type mismatches from drivers surface as 121 |
+| `moderate` + `warn` | Safe rollout on legacy data; violations in the log | Bad data still gets in; someone must read the logs |
+| `strict` | Old invalid documents cannot be edited without fixing them | Breaks updates to legacy documents |
+| `bypassDocumentValidation` | Migrations and bulk loads | Skips the safety net; needs a privilege under auth |
+| No validator | Total flexibility | Malformed data reaches production unnoticed |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming a `$jsonSchema` validator fully replaces application-side validation** — the validator only checks basic shape on write into the database; it does not know deeper business rules such as "this email must be unique among users." That still needs a unique index or separate logic.
-- **Adding a strict validator immediately to a collection that already has old data** — without going through `"moderate"` plus `"warn"` first, switching straight to `"strict"` and `"error"` will make writes to old documents that do not match the schema fail unexpectedly.
-- **Forgetting to update the validator when the application's schema changes** — the validator does not sync with code automatically. If you add a new field in the app but forget to update `$jsonSchema`, writes can be unexpectedly rejected.
+- **"A validator replaces application validation."** - it checks shape and simple constraints, not rules like uniqueness (use a unique index).
+- **"`type: 'integer'` works like in JSON Schema."** - it fails to parse; use `bsonType`.
+- **"A JavaScript integer is always an int."** - `2 ** 31` and any decimal reached the server as a double and failed `bsonType: "int"`.
+- **"`moderate` skips validation."** - inserts of invalid documents and breaking updates to valid ones were still rejected.
+- **"The validator syncs with my code."** - it does not; changing the app without `collMod` leaves the old rules.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A typical connected-vehicle platform** — validates telemetry payloads from connected vehicles with `$jsonSchema` before storing them, to keep malformed sensor data out of the main collection.
->
-> **Banking and fintech systems** — use `$jsonSchema` as a safety rail on a transactions collection, requiring fields like amount and currency to always match the right type, before bad data can flow downstream into analytics.
+> The MongoDB manual defines the behaviour measured above: under "moderate", "updates to existing documents in the collection that don't match the validation rules aren't required to pass validation", while "strict" "applies the same validation rules to all document inserts and updates" ([validation level](https://www.mongodb.com/docs/manual/core/schema-validation/specify-validation-level/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the collection was created with the validator and a bad document was rejected) but they are not executed by the course's automated checker._
 
 export const quizValidation = [
   {
-    q: 'Which operator expresses a MongoDB schema validation rule?',
-    options: ['$schema', '$jsonSchema', '$validate', '$type'],
-    answer: 1,
-  },
-  {
-    q: 'What does the required keyword in a $jsonSchema validator do?',
+    q: 'Which bsonType keyword requires a whole number stored as a 32-bit integer?',
     options: [
-      'Sets default values for fields',
-      'Lists field names that must be present in the document',
-      'Forces every field to be a string',
-      'Makes the collection read-only',
+      '"integer" via type',
+      'bsonType: "int"',
+      'bsonType: "number" always means int',
+      'bsonType: "whole"',
     ],
     answer: 1,
+    explain: 'type: "integer" failed to parse ("$jsonSchema type \'integer\' is not currently supported"); bsonType: "int" created the collection.',
   },
   {
-    q: 'A validator uses validationAction set to "warn". What happens to a document that violates it?',
+    q: 'Node.js inserts { joined: 2 ** 31 } into a collection requiring bsonType "int". What happens?',
     options: [
-      'The write is rejected with an error',
-      'The write is stored, and the violation is logged as a warning',
-      'The collection is dropped',
-      'The document is silently corrected',
+      'It is stored as an int',
+      'It is rejected: the driver sends a double (code 121)',
+      'It is stored as a string',
+      'The driver throws before sending',
     ],
     answer: 1,
+    explain: '2024 (int32 range) was stored; new Double(2024) and 2 ** 31 were rejected with consideredType: double; new Int32(2024) passed.',
   },
   {
-    q: 'Why might you choose validationLevel "moderate" when adding rules to an existing collection?',
+    q: 'What is the difference between validationLevel "strict" and "moderate" on a collection with old invalid documents?',
     options: [
-      'It validates faster than strict',
-      'It leaves existing invalid documents alone while checking new writes',
-      'It disables the validator entirely',
-      'It is required for $jsonSchema',
+      'None',
+      'Moderate skips updates to documents that were already invalid; strict rejects them too',
+      'Moderate only validates deletes',
+      'Strict ignores inserts',
     ],
     answer: 1,
+    explain: 'Updating the already-invalid doc: REJECTED 121 under strict, allowed under moderate; inserting a new invalid doc was rejected under both.',
+  },
+  {
+    q: 'With validationAction: "warn", what happens to a document that breaks the rules?',
+    options: [
+      'It is rejected',
+      'It is stored and the server logs "Document would fail validation" (id 20294, severity W)',
+      'It is stored silently',
+      'It is queued for review',
+    ],
+    answer: 1,
+    explain: 'getLog returned the W / STORAGE / 20294 line naming the failing rule (properties).',
+  },
+  {
+    q: 'How do you read WHY a write was rejected?',
+    options: [
+      'The message always says exactly which field',
+      'error.errInfo.details.schemaRulesNotSatisfied lists each broken rule, the considered value and type',
+      'Check the oplog',
+      'It cannot be known',
+    ],
+    answer: 1,
+    explain: 'The bare message was only "Document failed validation" (121); errInfo named properties.name (type did not match, 42) and required.joined.',
+  },
+  {
+    q: 'Which command changes or removes a validator later?',
+    options: [
+      'collMod',
+      'You must drop the collection',
+      'renameCollection',
+      'createIndex',
+    ],
+    answer: 0,
+    explain: 'collMod moved members from strict/error to moderate/warn and { validator: {} } removed the rules without touching data.',
   },
 ]
 
