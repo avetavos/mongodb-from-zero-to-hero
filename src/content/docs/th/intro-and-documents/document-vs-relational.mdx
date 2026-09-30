@@ -8,6 +8,7 @@ sidebar:
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ถ้าคุณรู้จัก relational database อยู่แล้ว วิธีที่เร็วที่สุดในการคล่อง MongoDB คือการแปลคำที่คุณรู้ให้เป็นคำที่ MongoDB ใช้ แนวคิดส่วนใหญ่เรียงตรงกัน มีสองสามอันที่ต่างออกไปในแบบที่เป็นแก่นของโมเดล document บทเรียนนี้คือตารางแปลนั้น บวกกับการมองครั้งแรกไปที่คำถามที่โมดูล Data Modeling ตอบไว้อย่างครบถ้วน: เมื่อไรควร **embed** ข้อมูลที่เกี่ยวข้อง และเมื่อไรควรเก็บไว้ใน collection **แยกต่างหาก**
@@ -53,28 +54,93 @@ export const mappingDiagram = `flowchart LR
 
 ใน relational database คุณเกือบจะ **normalise** เสมอ: สมาชิกอยู่ในตาราง `members` และการยืมของพวกเขาอยู่ในตาราง `loans` ที่ join กันด้วย key คุณประกอบภาพเต็มด้วย `JOIN` ทุกครั้งที่ query
 
-MongoDB ให้ทางเลือกแก่คุณ คุณสามารถ **embed** ข้อมูลที่เกี่ยวข้องไว้ภายใน document พ่อแม่โดยตรง ดังนั้นการอ่านครั้งเดียวจึงคืนทุกอย่าง:
+MongoDB ให้ทางเลือกแก่คุณ คุณ **embed** ข้อมูลที่เกี่ยวข้องไว้ภายใน document พ่อแม่โดยตรง ดังนั้นการอ่านครั้งเดียวคืนทุกอย่าง หรือเก็บข้อมูลใน **collection แยก** แล้วลิงก์ด้วย id จากนั้นรวมกันตอน query ด้วย `$lookup` — join ตอนอ่านของ MongoDB fence นี้สร้างทั้งสองรูปแบบสำหรับสมาชิกคนเดียวกันและอ่านกลับ (output จาก mongo 8.3.11, mongosh 2.11.1, Mac เครื่องนี้):
 
-```json
+```js
+// mongosh/dvr-embed-vs-lookup.js
+const ada = ObjectId("65f0b3d4e4b0a1c2e4b0a1d1");
+
+// Shape 1: embedded - one document holds the loans
+db.embedded.insertOne({ _id: ada, name: "Ada", borrowed: [
+  { title: "Compilers", due: "2026-07-01" }, { title: "Algorithms", due: "2026-07-15" },
+] });
+
+// Shape 2: referenced - two collections linked by member_id
+db.members.insertOne({ _id: ada, name: "Ada" });
+db.loans.insertMany([
+  { member_id: ada, title: "Compilers", due: "2026-07-01" },
+  { member_id: ada, title: "Algorithms", due: "2026-07-15" },
+]);
+
+console.log(db.embedded.findOne({ name: "Ada" }));                       // one read
+const joined = db.members.aggregate([
+  { $lookup: { from: "loans", localField: "_id", foreignField: "member_id", as: "borrowed" } },
+  { $project: { "borrowed._id": 0, "borrowed.member_id": 0 } },
+]).toArray();                                                            // one aggregation, two collections
+console.log(joined);
+console.log("embedded doc bytes:", bsonsize(db.embedded.findOne()));
+assert.strictEqual(joined[0].borrowed.length, 2);
+```
+
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Ada",
-  "borrowed": [
-    { "title": "Compilers", "due": "2026-07-01" },
-    { "title": "Algorithms", "due": "2026-07-15" }
+  _id: ObjectId('65f0b3d4e4b0a1c2e4b0a1d1'),
+  name: 'Ada',
+  borrowed: [
+    { title: 'Compilers', due: '2026-07-01' },
+    { title: 'Algorithms', due: '2026-07-15' }
   ]
 }
+[
+  {
+    _id: ObjectId('65f0b3d4e4b0a1c2e4b0a1d1'),
+    name: 'Ada',
+    borrowed: [
+      { title: 'Compilers', due: '2026-07-01' },
+      { title: 'Algorithms', due: '2026-07-15' }
+    ]
+  }
+]
+embedded doc bytes: 150
 ```
 
-หรือคุณสามารถเก็บข้อมูลไว้ใน **collection แยกต่างหาก** แล้วลิงก์ด้วย id จากนั้นค่อยรวมตอน query ด้วย `$lookup` — การ join ตอนอ่านของ MongoDB:
+การอ่านทั้งสองคืน **ภาพเดียวกัน** — ต่างกันที่งานเกิดขึ้นที่ไหน: รูปแบบ embed ทำ `findOne` ครั้งเดียว ส่วนรูปแบบอ้างอิงรัน `$lookup` ข้ามสอง collection
 
-```json
-{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Ada" }
+### ไม่มี foreign key
+
+สัญชาตญาณของ relational คือ "database จะกันไม่ให้ฉันทิ้ง loan กำพร้า" MongoDB ไม่ทำ:
+
+```js
+// mongosh/dvr-no-foreign-key.js
+db.members.drop(); db.loans.drop();          // start clean: this fence reuses the names above
+const ada = ObjectId("65f0b3d4e4b0a1c2e4b0a1d1");
+db.members.insertOne({ _id: ada, name: "Ada" });
+db.loans.insertMany([{ member_id: ada, title: "Compilers" }, { member_id: ada, title: "Algorithms" }]);
+
+// 1. insert a loan for a member that never existed - accepted
+console.log(db.loans.insertOne({ member_id: ObjectId("000000000000000000000001"), title: "Orphan" }).acknowledged);
+// 2. delete the member while loans still point at them - accepted
+db.members.deleteOne({ _id: ada });
+// 3. $lookup does not error - it returns an empty array
+console.log(db.loans.aggregate([
+  { $lookup: { from: "members", localField: "member_id", foreignField: "_id", as: "member" } },
+  { $project: { _id: 0, title: 1, member: 1 } },
+]).toArray());
+console.log("loans still pointing at Ada:", db.loans.countDocuments({ member_id: ada }));
+assert.strictEqual(db.loans.countDocuments({ member_id: ada }), 2);
 ```
 
-```json
-{ "_id": "a1", "member_id": "65f0b3d4e4b0a1c2e4b0a1d1", "title": "Compilers", "due": "2026-07-01" }
+```text
+true
+[
+  { title: 'Compilers', member: [] },
+  { title: 'Algorithms', member: [] },
+  { title: 'Orphan', member: [] }
+]
+loans still pointing at Ada: 2
 ```
+
+"การละเมิด" ทั้งสามสำเร็จอย่างเงียบ ๆ ความสมบูรณ์ระหว่าง collection เป็นหน้าที่ของ **คุณ** (ในโค้ดแอปพลิเคชัน หรือด้วยการ embed เพื่อให้ลูกอยู่รอดเกินพ่อแม่ไม่ได้)
 
 ## เมื่อไรควร embed เทียบกับเก็บแยก
 
@@ -96,50 +162,112 @@ MongoDB ให้ทางเลือกแก่คุณ คุณสาม�
 คำศัพท์ relational ส่วนใหญ่ map ตรงเข้ากับ MongoDB — table เป็น collection, row เป็น document, column เป็น field นิสัยอย่างเดียวที่ต้องเลิกคือการ normalise โดยอัตโนมัติ: ใน document database ข้อมูลที่คุณอ่านพร้อมกันมักจะควรอยู่ด้วยกัน
 </Callout>
 
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่พอร์ต schema จาก SQL มักเขียน delete ราวกับมี `ON DELETE CASCADE`:
+
+<SpotTheBug lang="js" code={`// AI comment: "loans reference members; deleting the member removes their loans (like ON DELETE CASCADE)"
+await db.collection("members").deleteOne({ _id: memberId });
+// loans are cleaned up automatically by the foreign key`}>
+
+MongoDB ไม่มี foreign key และไม่มี cascade เรารันโค้ดนี้จริง: สมาชิกถูกลบ แต่ loan สองรายการยังอยู่ (`loans still pointing at Ada: 2` ด้านบน) และทุก `$lookup` จาก `loans` ไป `members` ตอนนี้คืน `member: []` วิธีแก้คือทำการล้างให้ชัดเจน — ลบลูกใน unit of work เดียวกัน (หรือ embed ให้ลูกไปพร้อมพ่อแม่):
+
+```js
+// mongosh/dvr-cascade-fix.js
+db.members.drop(); db.loans.drop();
+const ada = ObjectId("65f0b3d4e4b0a1c2e4b0a1d1");
+db.members.insertOne({ _id: ada, name: "Ada" });
+db.loans.insertMany([{ member_id: ada, title: "Compilers" }, { member_id: ada, title: "Algorithms" }]);
+const loansGone = db.loans.deleteMany({ member_id: ada }).deletedCount;   // children first
+const memberGone = db.members.deleteOne({ _id: ada }).deletedCount;
+console.log({ loansGone, memberGone, orphans: db.loans.countDocuments({ member_id: ada }) });
+assert.strictEqual(db.loans.countDocuments({ member_id: ada }), 0);
+```
+
+```text
+{ loansGone: 2, memberGone: 1, orphans: 0 }
+```
+
+การลบสองครั้งแยกกันไม่ atomic — ถ้า crash ระหว่างสองอันก็ยังมีกำพร้า บท transactions แสดงวิธีทำให้เป็นหน่วยเดียว
+
+</SpotTheBug>
+
+## Mental Model
+
+relational database **บังคับความสัมพันธ์ระหว่างตาราง**; MongoDB **เก็บความสัมพันธ์ไว้ข้างในหรือข้าง ๆ document และปล่อยให้คุณบังคับเอง** การ embed ทำให้ความสัมพันธ์เป็นกายภาพ (ไบต์ของลูกอยู่ในไบต์ของพ่อแม่ 150 ไบต์สำหรับ Ada และ loan สองรายการ) การอ้างอิงทำให้เป็นตรรกะ (ค่า `member_id` ที่ไม่มีอะไรตรวจ) เลือกตามวิธีอ่าน: อ่านด้วยกัน -> embed; อ่านอิสระ -> อ้างอิง
+
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Denormalized document model (embed) | อ่าน document เดียวได้ข้อมูลครบ ไม่ต้อง join เร็วสำหรับ workload ที่อ่านพ่อแม่กับลูกพร้อมกันเสมอ | ข้อมูลที่ซ้ำกันในหลาย document ต้องอัปเดตหลายจุดถ้าเปลี่ยน และ document อาจโตจนถึงขีดจำกัดถ้า array ไม่มีขอบเขต |
-| Normalized relational model (foreign key) | ไม่มีข้อมูลซ้ำ แก้ที่เดียวจบ และ foreign key รับประกัน referential integrity ให้โดย database | ต้อง join หลายตารางแทบทุก query ซึ่งมีต้นทุนเพิ่มขึ้นตามจำนวนตารางที่เกี่ยวข้อง |
+| Denormalized document model (embed) | อ่าน document เดียวได้ทุกอย่าง ไม่ต้อง join — เร็วสำหรับ workload ที่อ่านพ่อแม่และลูกพร้อมกันเสมอ | ข้อมูลที่ซ้ำข้าม document ต้องอัปเดตหลายที่เมื่อเปลี่ยน และ document อาจโตเข้าใกล้ขีดจำกัด 16 MiB ถ้า array ไม่จำกัด |
+| Referenced model + `$lookup` | ข้อเท็จจริงแต่ละอย่างมีสำเนาเดียว ลูกอ่านแยกได้ | ไม่มี referential integrity (กำพร้าพิสูจน์ด้านบน); join ตอนอ่านทุก query ที่ต้องการทั้งสอง |
+| Normalized relational model (foreign key) | ไม่มีข้อมูลซ้ำ แก้ที่เดียว และ foreign key ให้ referential integrity จาก database | เกือบทุก query ต้อง join หลายตาราง ซึ่งแพงขึ้นเมื่อจำนวนตารางที่เกี่ยวข้องเพิ่ม |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **สมมติว่า `$lookup` ให้การรับประกันเหมือน SQL JOIN ทุกอย่าง** — `$lookup` ไม่มี referential integrity แบบ foreign key constraint ถ้า document ที่ถูกอ้างอิงถูกลบไป `$lookup` จะแค่คืน array ว่างเปล่า ไม่มี error เตือน
-- **Embed ทุกอย่างเพราะเชื่อว่า embed เร็วกว่าเสมอ** — ถ้าข้อมูลลูกโตแบบไม่มีขอบเขต (เช่น log ของกิจกรรมที่เพิ่มไม่หยุด) การ embed ในที่สุดจะชน document size limit และทำให้ document แม่โตจนอ่าน/เขียนช้าลง ควรเก็บแยกตั้งแต่ต้น
-- **คิดว่าการเรียง collection ตาม `_id` เท่ากับการเรียงตาม field เวลาที่แน่นอน** — ObjectId เรียงตามเวลาสร้างแค่ระดับวินาที ไม่ใช่ timestamp ที่แม่นยำระดับมิลลิวินาทีหรือรับประกัน order เป๊ะข้ามหลาย process ถ้าต้องการลำดับที่แน่นอนต้องมี field เวลาของตัวเอง
+- **"`$lookup` คือ SQL JOIN ที่มีการรับประกันเหมือนกัน"** — ไม่มี foreign-key integrity: การรันจริงด้านบน insert loan กำพร้า ลบสมาชิกที่ถูกอ้างอิง และ `$lookup` คืน `member: []` โดยไม่มี error
+- **"embed เร็วกว่าเสมอ ดังนั้น embed ทุกอย่าง"** — array ลูกที่ไม่จำกัด (log กิจกรรมที่โตไม่หยุด) จะชนขีดจำกัด document 16 MiB ในที่สุดและทำให้พ่อแม่อ่าน/เขียนช้า เก็บแยกตั้งแต่แรก
+- **"การเรียงตาม `_id` เหมือนการเรียงตามเวลาสร้างที่แม่นยำ"** — ภายใน process เดียว id เพิ่มขึ้นตามลำดับการสร้าง (บท documents-and-bson) ข้าม process counter 3 ไบต์เริ่มจากค่าสุ่ม ดังนั้นสอง id ที่สร้างใน **วินาทีเดียวกัน** โดยต่าง process เรียงได้ทั้งสองทาง: ใน 40 คู่ของ id จากสอง process Node ที่แยกกัน 37 คู่ใช้ timestamp วินาทีเดียวกัน และใน **20 จาก 37 นั้น** id ที่ตามมาเรียงมาก่อน เก็บ field timestamp ของตัวเองเมื่อลำดับสำคัญ
+- **"collection คือ table"** — ไม่บังคับชุด column ตายตัว สอง document พก field ต่างกันได้
+- **"มาจาก SQL ต้อง normalise โดยอัตโนมัติ"** — ข้อมูลที่อ่านพร้อมกันมักควรอยู่ด้วยกันใน document เดียว
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ทีมที่รวมข้อมูลลูกค้าจากหลายระบบเดิม** — รวมข้อมูลลูกค้าจากระบบ relational เดิมหลายสิบระบบเข้าเป็น document เดียวต่อลูกค้าหนึ่งคน (single customer view) แทนที่จะพยายาม join ข้าม database ที่แยกกันอยู่คนละระบบ
->
-> **ระบบ e-commerce ทั่วไป** — มักจะ embed รายการสินค้าในออเดอร์ไว้ใน document ของออเดอร์เอง (denormalize) เพราะแทบทุกครั้งที่อ่านออเดอร์ต้องเห็นรายการสินค้าพร้อมกันเสมอ แต่เก็บแคตตาล็อกสินค้าไว้ใน collection แยกเพราะสินค้าหนึ่งตัวถูกอ้างอิงจากหลายออเดอร์
+> คู่มือ data modeling ของ MongoDB เองวางการตัดสินใจเดียวกัน: embed สำหรับความสัมพันธ์แบบ "contains" และ "one-to-few" อ้างอิงเมื่อข้อมูลถูกแชร์หรือไม่จำกัด ([Data modeling introduction](https://www.mongodb.com/docs/manual/data-modeling/), อ้างอิงเมื่อ 2026-09-30) โมดูล Data Modeling ของคอร์สนี้ผ่านแต่ละกรณีพร้อมการวัด
+
+_บทนี้ไม่ใช้ Python/Go/Rust; fence รันใน `mongosh`_
 
 export const quizMap = [
   {
-    q: 'อะไรคือสิ่งที่เทียบเท่ากับ table ของ relational ใน MongoDB?',
+    q: 'อะไรคือสิ่งที่ตรงกับ table ของ relational ใน MongoDB?',
     options: ['document', 'collection', 'field', 'index'],
     answer: 1,
+    explain: 'ตรงกันคือ table -> collection, row -> document, column -> field',
   },
   {
-    q: 'ใน MongoDB จัดการความสัมพันธ์ระหว่างระเบียนอย่างไร?',
+    q: 'ใน MongoDB ความสัมพันธ์ระหว่างระเบียนถูกจัดการอย่างไร?',
     options: [
       'ด้วย foreign-key constraint เท่านั้น',
       'ด้วย JOIN ที่บังคับเท่านั้น',
       'ด้วยการ embed ข้อมูลที่เกี่ยวข้อง หรือลิงก์ document แล้วรวมด้วย $lookup',
-      'ไม่สามารถแทนค่าได้เลย',
+      'แทนความสัมพันธ์ไม่ได้เลย',
     ],
     answer: 2,
+    explain: 'embed (หนึ่ง document อ่านครั้งเดียว) หรืออ้างอิงด้วย id แล้ว join ตอนอ่านด้วย $lookup',
   },
   {
-    q: 'เมื่อไรที่การ embed มักเป็นทางเลือกที่ดีกว่าการแยก collection?',
+    q: 'เมื่อไรที่การ embed มักเป็นทางเลือกที่ดีกว่า collection แยก?',
     options: [
-      'เมื่อข้อมูลถูกแชร์โดยพ่อแม่หลายตัวและเติบโตอย่างไร้ขีดจำกัด',
-      'เมื่อข้อมูลที่เกี่ยวข้องเป็นของ parent เดียวและถูกอ่านไปพร้อมกัน',
-      'เมื่อใดก็ตามที่คุณมาจากพื้นเพ relational',
+      'เมื่อข้อมูลถูกแชร์โดยพ่อแม่หลายตัวและโตไม่จำกัด',
+      'เมื่อข้อมูลที่เกี่ยวข้องเป็นของพ่อแม่หนึ่งเดียวและถูกอ่านพร้อมกับมัน',
+      'ทุกครั้งที่คุณมาจากพื้นฐาน relational',
       'เฉพาะเมื่อพ่อแม่ไม่มี _id',
     ],
     answer: 1,
+    explain: 'ข้อมูลที่เป็นของพ่อแม่เดียวและอ่านพร้อมกันอยู่ข้างในได้ (Ada + loan สองรายการ = 150 ไบต์); ข้อมูลที่แชร์หรือไม่จำกัดควรอ้างอิง',
+  },
+  {
+    q: 'คุณ deleteOne สมาชิกขณะที่ document loan สองรายการยังถือ member_id นั้นอยู่ แล้ว $lookup จาก loans ไป members ได้อะไรกลับมา?',
+    options: [
+      'error: ไม่พบ document ที่อ้างอิง',
+      'loans พร้อม member: [] (array ว่าง) และไม่มี error',
+      'MongoDB cascade และลบ loans ก่อน',
+      'การลบถูกปฏิเสธด้วย foreign-key violation',
+    ],
+    answer: 1,
+    explain: 'MongoDB ไม่มี foreign key; การรันจริงปล่อย loan 2 รายการไว้และ $lookup คืน member: []',
+  },
+  {
+    q: 'สอง process ต่างกันแต่ละอันสร้าง ObjectId ในวินาทีเดียวกัน ข้อใดจริง?',
+    options: [
+      'อันที่ตามมาเรียงสูงกว่าเสมอ',
+      'เรียงได้ทั้งสองทาง เพราะใช้ร่วมกันแค่ timestamp และ counter 3 ไบต์เริ่มจากค่าสุ่ม',
+      'เท่ากันเสมอ',
+      'สร้าง ObjectId ในวินาทีเดียวกันไม่ได้',
+    ],
+    answer: 1,
+    explain: 'วัดได้: ใน 37 คู่วินาทีเดียวกันจาก process Node แยกกัน id ที่ตามมาเรียงก่อน 20 ครั้ง',
   },
 ]
 
