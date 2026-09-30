@@ -1,6 +1,6 @@
 ---
 title: การ query array
-description: จับคู่ element เดียวของ array บังคับหลายเงื่อนไขบน element เดียวด้วย $elemMatch บังคับให้มีหลายค่าด้วย $all filter ตามความยาวด้วย $size และเข้าถึง element ตาม index ด้วย dot path
+description: จับคู่ element เดียวของ array บังคับหลายเงื่อนไขบน element เดียวด้วย $elemMatch บังคับหลายค่าด้วย $all กรองตามความยาวด้วย $size เข้าถึง element ด้วย index และ project เฉพาะ element ที่ตรง — พิสูจน์บน document ที่ต่างกัน
 sidebar:
   order: 3
 ---
@@ -8,27 +8,72 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-field ของ document เก็บ array ได้ และการ query array ก็มีเซอร์ไพรส์น่ารักติดมาด้วย: เมื่อคุณ filter field ที่เป็น array กับค่าธรรมดา MongoDB จะตรวจ **ทุก element** และจับคู่ถ้า *มีอันใด* ผ่านเงื่อนไข กฎข้อเดียวนี้ทำให้ query array แบบง่ายอ่านได้เหมือนกับ query แบบ scalar ทุกประการ ความซับซ้อนจะปรากฏก็ต่อเมื่อคุณต้องการให้หลายเงื่อนไขเป็นจริงบน element *เดียวกัน* และตรงนั้นเองคือจุดที่ `$elemMatch` ได้ออกโรง
+field ของ document เก็บ array ได้ และการ query มีเซอร์ไพรส์ที่เป็นมิตรฝังอยู่: เมื่อคุณกรอง field ที่เป็น array ด้วยค่าธรรมดา MongoDB ตรวจ **ทุก element** และตรงถ้า element *ใดก็ตาม* ผ่านเงื่อนไข กฎข้อเดียวนี้ทำให้ query array ง่าย ๆ อ่านเหมือน scalar ทุกประการ รายละเอียดปลีกย่อยปรากฏเมื่อต้องการให้หลายเงื่อนไขเป็นจริงบน element *เดียวกัน* ซึ่งเป็นจุดที่ `$elemMatch` มีค่า
 
-ในบทเรียนนี้สมาชิกแต่ละคนถือ array `borrowed` ของชื่อหนังสือ และบางคนถือ array `tags` ของป้ายความสนใจ
+ในบทนี้สมาชิกแต่ละคนมี array `borrowed` ของชื่อหนังสือ array `scores` ของตัวเลข และบางคนมี array `tags` ของป้ายความสนใจ ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน)
 
-## การจับคู่ element เดียว
+## ข้อมูลที่เรา query
 
-หากต้องการถามว่า "ใครยืม *Compilers* อยู่ตอนนี้?" ให้ filter field ที่เป็น array ด้วยค่านั้นเหมือนกับว่าเป็น scalar MongoDB จะมองเข้าไปใน array ให้คุณเอง:
+ข้อมูลถูกเลือกให้ filter ต่างกันให้คำตอบ *ต่างกัน* — นั่นคือวิธีพิสูจน์ว่า operator ทำตามที่คุณคิด:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ borrowed: "Compilers" })
+    // mongosh/arr-seed.js
+    db.members.insertMany([
+      { name: "Ada",      borrowed: ["Compilers"], scores: [70, 95], tags: ["js", "backend"] },
+      { name: "Grace",    borrowed: ["Compilers", "Algorithms", "Databases"], scores: [70, 85, 95], tags: ["backend"] },
+      { name: "Linus",    borrowed: [], scores: [], tags: [] },
+      { name: "Margaret", borrowed: ["Algorithms", "Compilers"], scores: [88], tags: ["js"] },
+      { name: "Edsger",   borrowed: ["Databases"], scores: [60, 75] },                   // no tags field
+      { name: "Barbara",  borrowed: "Compilers", scores: 85 },                            // scalars, not arrays
+    ]);
+    globalThis.names = (f) => db.members.find(f, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 6);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      borrowed: ["Compilers"], scores: [70, 95], tags: ["js", "backend"] },
+      { name: "Grace",    borrowed: ["Compilers", "Algorithms", "Databases"], scores: [70, 85, 95], tags: ["backend"] },
+      { name: "Linus",    borrowed: [], scores: [], tags: [] },
+      { name: "Margaret", borrowed: ["Algorithms", "Compilers"], scores: [88], tags: ["js"] },
+      { name: "Edsger",   borrowed: ["Databases"], scores: [60, 75] },
+      { name: "Barbara",  borrowed: "Compilers", scores: 85 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 6) throw new Error("expected 6");
+    ```
+  </TabItem>
+</Tabs>
+
+## การจับคู่ element เดียว
+
+เพื่อถามว่า "ใครกำลังยืม *Compilers* อยู่?" ให้กรอง field array ด้วยค่าเหมือนเป็น scalar MongoDB มองเข้าไปใน array ให้:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/arr-element.js
+    console.log("borrowed 'Compilers'                :", names({ borrowed: "Compilers" }));
+    console.log("borrowed ['Compilers'] (whole array):", names({ borrowed: ["Compilers"] }));
+    console.log("borrowed ['Algorithms','Compilers']  :", names({ borrowed: ["Algorithms", "Compilers"] }));
+    console.log("borrowed ['Compilers','Algorithms']  :", names({ borrowed: ["Compilers", "Algorithms"] }));
+    assert.strictEqual(names({ borrowed: "Compilers" }), "Ada, Barbara, Grace, Margaret");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/arr-element.mjs
     const docs = await db.collection("members")
       .find({ borrowed: "Compilers" })
       .toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 4) throw new Error("expected 4");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,35 +102,39 @@ field ของ document เก็บ array ได้ และการ query a
   </TabItem>
 </Tabs>
 
-สมาชิกคนใดก็ตามที่ array มีชื่อหนังสือนั้นจะ match หมด ไม่ว่าชื่อนั้นจะอยู่ตำแหน่งไหนในรายการ:
+สมาชิกที่ array มีชื่อนั้นตรงกัน ไม่ว่าอยู่ตำแหน่งใดในลิสต์ — และสังเกต **Barbara ด้วย ที่ `borrowed` เป็น string `"Compilers"` ธรรมดา** (scalar ที่เท่ากับค่าก็ตรงเช่นกัน) การส่ง array ทั้งก้อนให้ filter แทนหมายถึง *array เท่ากันทุกประการ* รวมลำดับ:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "borrowed": ["Algorithms", "Compilers"]
-  }
-]
+```text
+borrowed 'Compilers'                : Ada, Barbara, Grace, Margaret
+borrowed ['Compilers'] (whole array): Ada
+borrowed ['Algorithms','Compilers']  : Margaret
+borrowed ['Compilers','Algorithms']  : 
 ```
+
+`["Compilers"]` ตรงกับ Ada เท่านั้น ซึ่ง array *เป็นแบบนั้นพอดี*; `["Compilers","Algorithms"]` ไม่ตรงใครเพราะ array ของ Margaret เก็บในลำดับตรงข้าม
 
 ## หลายเงื่อนไขบน element เดียวกัน: $elemMatch
 
-นี่คือกับดัก สมมติว่า `scores` เก็บ array ของตัวเลข และคุณต้องการ document ที่มี element มากกว่า 80 **และ** น้อยกว่า 90 การเขียน `{ scores: { $gt: 80, $lt: 90 } }` *ไม่ได้* แปลอย่างนั้น แต่จะ match เมื่อ *บาง* element เกิน 80 และ *บาง* element (อาจคนละตัวกัน) ต่ำกว่า 90 หากต้องการตรึงทั้งสองเงื่อนไขไว้บน **หนึ่ง** element ให้ใช้ `$elemMatch`:
+นี่คือกับดัก สมมติ `scores` เก็บ array ของตัวเลขและคุณต้องการ document ที่มี element มากกว่า 80 **และ** น้อยกว่า 90 การเขียน `{ scores: { $gt: 80, $lt: 90 } }` *ไม่ได้* หมายถึงอย่างนั้น — มันตรงถ้า *element บางตัว* เกิน 80 และ *element บางตัว* (ที่อาจเป็นคนละตัว) ต่ำกว่า 90 เพื่อตรึงทั้งสองเงื่อนไขกับ element **เดียว** ใช้ `$elemMatch` seed มีสมาชิกสองคนที่ array แค่ *ดูคล้าย* กัน Ada `[70, 95]` และ Grace `[70, 85, 95]`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      scores: { $elemMatch: { $gt: 80, $lt: 90 } }
-    })
+    // mongosh/arr-elemmatch.js
+    console.log("plain     {$gt: 80, $lt: 90}      :", names({ scores: { $gt: 80, $lt: 90 } }));
+    console.log("$elemMatch {$gt: 80, $lt: 90}      :", names({ scores: { $elemMatch: { $gt: 80, $lt: 90 } } }));
+    assert.strictEqual(names({ scores: { $gt: 80, $lt: 90 } }).includes("Ada"), true);    // 95 is >80 and 70 is <90: two DIFFERENT elements
+    assert.strictEqual(names({ scores: { $elemMatch: { $gt: 80, $lt: 90 } } }), "Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-elemmatch.mjs
     const docs = await db.collection("members").find({
       scores: { $elemMatch: { $gt: 80, $lt: 90 } }
     }).toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 2) throw new Error("expected Grace and Margaret");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -120,31 +169,61 @@ field ของ document เก็บ array ได้ และการ query a
   </TabItem>
 </Tabs>
 
-เฉพาะ document ที่มี element เดียวอยู่ในช่วง 81–89 เท่านั้นที่ตรง — ตรงนี้ `85` ผ่านเกณฑ์ แม้ว่า array จะมีค่าที่อยู่นอกช่วงด้วย:
+สองรูปแบบคืนคนละคน:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "scores": [70, 85, 95] }
-]
+```text
+plain     {$gt: 80, $lt: 90}      : Ada, Barbara, Grace, Margaret
+$elemMatch {$gt: 80, $lt: 90}      : Grace, Margaret
 ```
+
+มีเพียง Grace (`85`) และ Margaret (`88`) ที่มี element **หนึ่งตัว** อยู่ในช่วง 81 ถึง 89 รูปแบบธรรมดายังคืน Ada ซึ่ง array `[70, 95]` ไม่มี element ในช่วง — `95` ผ่าน `> 80` และแยกกัน `70` ผ่าน `< 90` — และ Barbara ซึ่ง `scores` เป็น scalar `85` (scalar ถูกทดสอบกับทั้งสองเงื่อนไขโดยตรง)
+
+กฎเดียวกันใช้กับ array ของ sub-document กับ order ที่ `items` เก็บ `{ price, qty }` "สินค้าที่ราคาเกิน 1000 และจำนวนอย่างน้อย 2":
+
+```js
+// mongosh/arr-elemmatch-subdocs.js
+db.orders.insertMany([
+  { _id: 1, items: [{ sku: "a", price: 1500, qty: 1 }, { sku: "b", price: 20, qty: 5 }] },
+  { _id: 2, items: [{ sku: "c", price: 1500, qty: 3 }] },
+]);
+const ids = (f) => db.orders.find(f, { _id: 1 }).toArray().map((d) => d._id);
+console.log("plain dotted paths :", ids({ "items.price": { $gt: 1000 }, "items.qty": { $gte: 2 } }));
+console.log("$elemMatch         :", ids({ items: { $elemMatch: { price: { $gt: 1000 }, qty: { $gte: 2 } } } }));
+console.log("$all of 2 $elemMatch:", ids({ items: { $all: [{ $elemMatch: { price: { $gt: 1000 } } }, { $elemMatch: { qty: { $gte: 2 } } }] } }));
+assert.strictEqual(ids({ items: { $elemMatch: { price: { $gt: 1000 }, qty: { $gte: 2 } } } }).join(), "2");
+```
+
+```text
+plain dotted paths : [ 1, 2 ]
+$elemMatch         : [ 2 ]
+$all of 2 $elemMatch: [ 1, 2 ]
+```
+
+order 1 มีสินค้าแพง (qty 1) และสินค้า *อีกชิ้น* ที่ถูกแต่ qty 5: รูปแบบธรรมดาตรงผิด; `$elemMatch` คืนเฉพาะ order 2 อย่างถูกต้อง และ `$all` ที่ห่อสอง `$elemMatch` แยกกัน **ไม่ใช่** ทางแก้ — มันคือ "element บางตัวสำหรับแต่ละเงื่อนไข" อีกครั้ง order 1 จึงตรง
 
 ## การบังคับให้มีหลายค่า: $all
 
-`$all` จับคู่เมื่อ array มี **ทุกค่า** ที่ระบุไว้ ไม่สนลำดับ พูดง่าย ๆ คือ AND ของการเป็นสมาชิก "ใครยืมทั้ง *Algorithms* และ *Compilers* พร้อมกัน?" ก็คือสิ่งนี้พอดี:
+`$all` ตรงเมื่อ array มี **ทุก** ค่าที่ระบุ ในลำดับใดก็ได้ มันคือ AND ของการเป็นสมาชิก "ใครยืมทั้ง *Algorithms* และ *Compilers* พร้อมกัน?" คือสิ่งนี้:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      borrowed: { $all: ["Algorithms", "Compilers"] }
-    })
+    // mongosh/arr-all.js
+    console.log("borrowed $all [Algorithms, Compilers]:", names({ borrowed: { $all: ["Algorithms", "Compilers"] } }));
+    console.log("tags $all [js, backend]              :", names({ tags: { $all: ["js", "backend"] } }));
+    console.log("tags $in  [js, backend]              :", names({ tags: { $in: ["js", "backend"] } }));
+    console.log("borrowed $all []                     :", names({ borrowed: { $all: [] } }));
+    assert.strictEqual(names({ borrowed: { $all: ["Algorithms", "Compilers"] } }), "Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-all.mjs
     const docs = await db.collection("members").find({
       borrowed: { $all: ["Algorithms", "Compilers"] }
     }).toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 2) throw new Error("expected 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -179,33 +258,43 @@ field ของ document เก็บ array ได้ และการ query a
   </TabItem>
 </Tabs>
 
-เฉพาะสมาชิกที่ถือทั้งสองชื่อหนังสือเท่านั้นที่ส่งกลับมา การมีเพียงอันเดียวยังไม่พอ:
+เฉพาะสมาชิกที่ถือทั้งสองชื่อถูกคืน; มีเพียงอันเดียวไม่พอ Grace ตรงด้วย — `$all` เมิน element เกินและลำดับ — และ `$all` คือ AND ที่ `$in` คือ OR:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "borrowed": ["Algorithms", "Compilers"]
-  }
-]
+```text
+borrowed $all [Algorithms, Compilers]: Grace, Margaret
+tags $all [js, backend]              : Ada
+tags $in  [js, backend]              : Ada, Grace, Margaret
+borrowed $all []                     : 
 ```
 
-## การ filter ตามความยาว: $size
+`$all: []` ว่างตรง **ไม่มีอะไรเลย** (ไม่ใช่ "ทุกอย่าง") กับดักเล็ก ๆ เมื่อสร้างลิสต์แบบ dynamic
 
-`$size` จับคู่ array ที่มีความยาวตรงเป๊ะ "ใครยืมหนังสืออยู่สองเล่มพอดีตอนนี้?" คือ query operator เดียว:
+## การกรองตามความยาว: $size
+
+`$size` ตรงกับ array ที่มีความยาวพอดี "ใครมีหนังสือยืมอยู่สองเล่มพอดี?" เป็น query ที่ใช้ operator เดียว:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ borrowed: { $size: 2 } })
+    // mongosh/arr-size.js
+    console.log("borrowed $size 2   :", names({ borrowed: { $size: 2 } }));
+    console.log("borrowed $size 0   :", names({ borrowed: { $size: 0 } }));
+    console.log("tags $size 0       :", names({ tags: { $size: 0 } }), "| tags missing:", names({ tags: { $exists: false } }));
+    console.log("more than one book :", names({ "borrowed.1": { $exists: true } }));
+    let err;
+    try { db.members.find({ borrowed: { $size: { $gt: 1 } } }).toArray(); } catch (e) { err = e; }
+    console.log(err.name, err.code, err.message);
+    assert.strictEqual(err.code, 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-size.mjs
     const docs = await db.collection("members")
       .find({ borrowed: { $size: 2 } })
       .toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1) throw new Error("expected Margaret only");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -234,96 +323,215 @@ field ของ document เก็บ array ได้ และการ query a
   </TabItem>
 </Tabs>
 
-สมาชิกที่ array `borrowed` มี element สองตัวพอดีจะตรง:
+สมาชิกที่ array `borrowed` มี element สองตัวพอดีตรงกัน `$size` รับ **ตัวเลขตรง ๆ เท่านั้น** — ช่วงคือ error จริง — และทางอ้อมสำหรับ "มากกว่าหนึ่ง" คือทดสอบว่า element ที่ index 1 มีอยู่:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "borrowed": ["Algorithms", "Compilers"]
-  }
-]
+```text
+borrowed $size 2   : Margaret
+borrowed $size 0   : Linus
+tags $size 0       : Linus | tags missing: Barbara, Edsger
+more than one book : Grace, Margaret
+MongoServerError 2 Failed to parse $size. Expected a number in: $size: { $gt: 1 }
 ```
 
-## การเข้าถึง element ตาม index
+สังเกตความต่างระหว่างว่างกับขาด: `$size: 0` พบ Linus (array ว่าง) ไม่ใช่สมาชิกที่ไม่มี field `tags`
 
-ตำแหน่งใน array สามารถระบุที่อยู่ได้ด้วย dotted numeric path: `borrowed.0` คือ element แรก, `borrowed.1` คือตัวที่สอง และต่อ ๆ ไป ใช้สิ่งนี้เพื่อ query element ที่ตำแหน่งที่รู้แน่ — "หนังสือเล่ม *แรก* ที่ใครยืมคือ *Algorithms*?":
+## การเข้าถึง element ด้วย index
+
+ตำแหน่งใน array เข้าถึงได้ด้วย path ตัวเลขคั่นจุด: `borrowed.0` คือ element แรก `borrowed.1` ตัวที่สอง เป็นต้น ใช้สิ่งนี้ query element ที่ตำแหน่งที่รู้ — "ใครที่หนังสือ *เล่มแรก* ที่ยืมคือ *Algorithms*?":
 
 ```js
-db.members.find({ "borrowed.0": "Algorithms" })
+// mongosh/arr-index-path.js
+console.log("borrowed.0 = Algorithms:", names({ "borrowed.0": "Algorithms" }));
+assert.strictEqual(names({ "borrowed.0": "Algorithms" }), "Margaret");
 ```
 
-dot path เดียวกันใช้ได้เมื่อ array เก็บ sub-document — `reviews.0.rating` เข้าถึง field `rating` ของรีวิวแรก ที่เป็นรูปแบบที่บทเรียนถัดไปจะเจาะลึก
+```text
+borrowed.0 = Algorithms: Margaret
+```
 
-**ใน Compass:** filter สำหรับ array ใส่ในแถบ filter เหมือนกับ scalar เลย เช่น `{ borrowed: { $size: 2 } }` Compass แสดง array ที่ตรงแบบ inline และให้คุณกางออกเพื่อดูแต่ละ element ได้
+dot path เดียวกันใช้ได้เมื่อ array เก็บ sub-document — `reviews.0.rating` เข้าไปถึง field `rating` ของรีวิวแรก รูปแบบที่บทถัดไปสำรวจอย่างลึก
 
-## เคล็ดลับและจุดที่พลาดง่าย
+## ดึงเฉพาะ element ที่ตรงกลับมา
 
-- **ทำไม `$elemMatch` ถึงสำคัญ:** ถ้าไม่มี `$elemMatch` หลายเงื่อนไขบน field ที่เป็น array จะถูกไล่ตรวจ *กระจายข้าม element* ดังนั้น `{ scores: { $gt: 80, $lt: 90 } }` อาจตรงกับ array อย่าง `[70, 95]` ได้ — แต่ละ element ผ่านเกณฑ์คนละอัน `$elemMatch` บังคับให้ทุกเงื่อนไขอยู่บน element เดียว ซึ่งแทบจะตรงกับสิ่งที่คุณตั้งใจจริง ๆ เสมอ
-- **`$all` ไม่สนลำดับ** แค่ตรวจว่าแต่ละค่ามีอยู่ที่ไหนสักที่ ไม่ได้บอกอะไรเรื่องตำแหน่งหรือ element ส่วนเกิน ส่วน `$size` ตรึงความยาวเป๊ะ ๆ
-- **`$size` รับเฉพาะตัวเลขตรง ๆ เท่านั้น** คุณเขียน `{ $size: { $gt: 1 } }` ไม่ได้ หากต้องการ query "มากกว่าหนึ่ง element" ให้สร้าง field ความยาวหรือใช้ aggregation framework
-- **filter ค่าเดียวบน array จับคู่แบบการบรรจุ (containment)** `{ borrowed: "Compilers" }` match ทุก array ที่ *มี* ชื่อหนังสือนั้นอยู่ ไม่ได้บังคับว่า array ต้องเท่ากับ `["Compilers"]`
+filter ตัดสิน *document* ที่กลับมา ไม่ใช่ element ของ array การตัด array ใช้ projection: positional `$` (element แรกที่ filter ตรง), `$elemMatch` ใน projection หรือ `$slice` seed มี Grace ที่มีสามคะแนน:
 
-<Callout title="ข้ามทุก element กับ ภายใน element เดียว">
-คำถามที่กำหนดทุก query สำหรับ array คือ: เงื่อนไขต้องเป็นจริงบน element เดียวกัน หรือเพียงที่ใดที่หนึ่งใน array? filter หลายเงื่อนไขแบบธรรมดากระจายไปทั่ว element ส่วน $elemMatch ล็อกทุกเงื่อนไขไว้บน element เดียว การเลือกผิดคือบั๊กของ query array ที่พบบ่อยที่สุด
+```js
+// mongosh/arr-project.js
+const sorted = (c) => c.sort({ name: 1 }).toArray();
+console.log("scores.$        :", sorted(db.members.find({ scores: { $gt: 80 } }, { _id: 0, name: 1, "scores.$": 1 })));
+console.log("$elemMatch proj  :", db.members.find({ name: "Grace" }, { _id: 0, name: 1, scores: { $elemMatch: { $gt: 80 } } }).toArray());
+console.log("$slice 2         :", db.members.find({ name: "Grace" }, { _id: 0, name: 1, borrowed: { $slice: 2 } }).toArray());
+assert.deepStrictEqual(Array.from(db.members.findOne({ name: "Grace", scores: { $gt: 80 } }, { "scores.$": 1 }).scores), [85]);
+```
+
+```text
+scores.$        : [
+  { name: 'Ada', scores: [ 95 ] },
+  { name: 'Barbara', scores: 85 },
+  { name: 'Grace', scores: [ 85 ] },
+  { name: 'Margaret', scores: [ 88 ] }
+]
+$elemMatch proj  : [ { name: 'Grace', scores: [ 85 ] } ]
+$slice 2         : [ { name: 'Grace', borrowed: [ 'Compilers', 'Algorithms' ] } ]
+```
+
+positional `$` คืน element **แรก** ที่ผ่าน filter (`95` สำหรับ Ada คะแนนแรกที่เกิน 80; `85` สำหรับ Grace แม้ `95` ก็ผ่านเช่นกัน); `$elemMatch` และ `$slice` ใน projection อิสระจาก filter positional `$` ต้องการให้ array ปรากฏใน query
+
+**ใน Compass:** filter ของ array ใส่ในช่อง **Filter** เหมือน scalar เช่น `{ borrowed: { $size: 2 } }` (เอกสาร Compass, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/), มีตัวอย่าง `$elemMatch` ด้วย); ขยาย array ที่ตรงในมุมมอง document เพื่อดูแต่ละ element
+
+## array ใช้ index ได้ไหม?
+
+ได้ — index บน field array กลายเป็น **multikey** index มีหนึ่งรายการต่อ element สร้าง `{ borrowed: 1 }` แล้ว explain query แบบ element บนหกเอกสารของเรา:
+
+```js
+// mongosh/arr-multikey.js
+db.members.createIndex({ borrowed: 1 });
+const e = db.members.find({ borrowed: "Compilers" }).explain("executionStats");
+const ix = e.queryPlanner.winningPlan.inputStage;
+console.log("stage:", ix.stage, "| isMultiKey:", ix.isMultiKey, "| keys", e.executionStats.totalKeysExamined, "| docs", e.executionStats.totalDocsExamined);
+assert.strictEqual(ix.isMultiKey, true);
+```
+
+```text
+stage: IXSCAN | isMultiKey: true | keys 4 | docs 4
+```
+
+โมดูล indexes ครอบคลุมกฎ multikey (รวม "cannot index parallel arrays")
+
+## เคล็ดลับและข้อควรระวัง
+
+- **ทำไม `$elemMatch` สำคัญ:** ถ้าไม่มี หลายเงื่อนไขบน field array ถูกตรวจ *ข้ามทุก element* `{ scores: { $gt: 80, $lt: 90 } }` จึงตรงกับ `[70, 95]` (Ada) `$elemMatch` บังคับทุกเงื่อนไขกับ element เดียว ซึ่งเกือบทุกครั้งคือสิ่งที่คุณตั้งใจ
+- **ค่า array ทั้งก้อนหมายถึงความเท่ากัน ไม่ใช่การบรรจุ** `{ borrowed: ["Compilers"] }` ตรงเฉพาะ array ที่เป็นแบบนั้นพอดีในลำดับนั้น
+- **`$all` ไม่สนลำดับ** และเมิน element เกิน; `$all: []` ไม่ตรงอะไร `$size` ในทางตรงข้าม กำหนดความยาวพอดี
+- **`$size` รับตัวเลขตรง ๆ เท่านั้น** (`Failed to parse $size. Expected a number`) สำหรับ "มากกว่าหนึ่ง element" ทดสอบ `"field.1": { $exists: true }`
+- **filter ค่าเดียวบน array ตรงแบบบรรจุ** — และตรง *scalar* ที่เท่ากับค่านั้นด้วย (Barbara)
+- **filter ไม่ตัด array** ใช้ positional `$`, `$elemMatch` ใน projection หรือ `$slice`
+
+<Callout title="ข้าม element หรือภายใน element เดียว">
+คำถามที่นิยามทุก query array คือ: เงื่อนไขต้องเป็นจริงบน element เดียวกัน หรือแค่ที่ไหนสักแห่งใน array? filter หลายเงื่อนไขธรรมดากระจายข้าม element; $elemMatch ล็อกให้เหลือ element เดียว การเลือกผิดคือ bug ของ query array ที่พบบ่อยที่สุดข้อเดียว
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอ "สมาชิกที่มีคะแนนแบนด์ B ระหว่าง 80 ถึง 90" จะเขียน filter scalar ที่เป็นธรรมชาติ:
+
+<SpotTheBug lang="js" code={`// AI comment: "students with a score between 80 and 90"
+const bBand = await db.collection("members")
+  .find({ scores: { $gt: 80, $lt: 90 } })
+  .toArray();
+await sendCongratulations(bBand);`}>
+
+บน field array สองเงื่อนไขถูกทำให้เป็นจริงแยกกันโดยคนละ element บนข้อมูลของเรามันคืน **สี่** สมาชิก — Ada `[70, 95]`, Barbara `85`, Grace `[70, 85, 95]` และ Margaret `[88]` — ทั้งที่มีเพียง Grace และ Margaret ที่มีคะแนนในช่วง Ada จะได้รับคำแสดงความยินดีสำหรับคะแนน 95 *และ* 70 แต่ไม่มี B ทางแก้คือตรึงทั้งสองขอบกับ element เดียว:
+
+```js
+// mongosh/arr-bband-fix.js
+const bug = names({ scores: { $gt: 80, $lt: 90 } });
+const fixed = names({ scores: { $elemMatch: { $gt: 80, $lt: 90 } } });
+console.log("plain      :", bug);
+console.log("$elemMatch :", fixed);
+assert.strictEqual(bug, "Ada, Barbara, Grace, Margaret");
+assert.strictEqual(fixed, "Grace, Margaret");
+```
+
+```text
+plain      : Ada, Barbara, Grace, Margaret
+$elemMatch : Grace, Margaret
+```
+
+(scalar `85` ของ Barbara หลุดจาก `$elemMatch` เพียงเพราะไม่ใช่ element ของ array; ถ้ามี scalar ปนกับ array ใน field เดียว ให้ทำ field ให้เป็นปกติก่อน — schema validation ในโมดูลถัดไปป้องกันได้)
+
+</SpotTheBug>
+
+## Mental Model
+
+field array คือ **เซ็ตของค่าอิสระที่ filter เห็นพร้อมกันหมด** แต่ละเงื่อนไขถาม "*element ใด* ผ่านฉันไหม?" และเงื่อนไขต่างกันถูกทำให้เป็นจริงโดยคนละ element ได้ `$elemMatch` รวมเงื่อนไขเป็นคำถามเดียวเกี่ยวกับ *element เดียว*; `$all` AND คำถามการเป็นสมาชิก; `$size` และ index path ถามเรื่องรูปร่าง query เลือก document; projection (`$`, `$elemMatch`, `$slice`) เลือก element
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `$elemMatch` สำหรับหลายเงื่อนไข | บังคับให้ทุกเงื่อนไขเป็นจริงบน element เดียวกัน ผลลัพธ์ตรงกับเจตนาที่แท้จริงเกือบทุกครั้ง | เขียนยาวกว่าเล็กน้อย ต้องคิดเรื่อง "element เดียวกัน" ให้ชัดตั้งแต่ต้น |
-| operator หลายตัวแยกกันบน field เดียวกัน (ไม่ใช้ `$elemMatch`) | เขียนสั้น อ่านเหมือน scalar query ทั่วไป | แต่ละเงื่อนไขอาจผ่านคนละ element ทำให้ได้ผลลัพธ์ที่ไม่ตรงเจตนา — บั๊กเงียบที่พบบ่อย |
-| positional/length query (`$size`, `"field.0"`) | เจาะจงตำแหน่งหรือความยาวได้ตรง ๆ ในคำสั่งเดียว | เปราะบางต่อการเปลี่ยนลำดับ array และ `$size` รับเฉพาะค่าตรง ๆ ใช้กับช่วงไม่ได้ |
+| `$elemMatch` สำหรับหลายเงื่อนไข | บังคับทุกเงื่อนไขเป็นจริงบน element เดียว ตรงเจตนาจริงเกือบทุกครั้ง | เขียนมากขึ้นเล็กน้อย; ต้องคิดเรื่อง "element เดียวกัน" ตั้งแต่แรก |
+| operator แยกบน field เดียวกัน (ไม่มี `$elemMatch`) | เขียนสั้นกว่า อ่านเหมือน query scalar ธรรมดา | แต่ละเงื่อนไขผ่านด้วยคนละ element ได้ ทำให้ตรงโดยไม่ตั้งใจ (Ada ด้านบน) — bug เงียบที่พบบ่อย |
+| `$all` | แสดง "มีครบทุกค่าเหล่านี้" | เมิน element เกินและลำดับ; ลิสต์ว่างไม่ตรงอะไร |
+| query ตำแหน่ง/ความยาว (`$size`, `"field.0"`) | เจาะตำแหน่งหรือความยาวโดยตรงในการเรียกเดียว | เปราะเมื่อ array เรียงลำดับใหม่ และ `$size` รับแค่ค่าตรง ๆ ไม่ใช่ช่วง |
+| multikey index บน array | query แบบ element ใช้ `IXSCAN` (4 key สำหรับ 4 ผลลัพธ์) | ขนาด index และต้นทุนการเขียนโตตามความยาว array; ข้อจำกัดของ compound multikey index |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า filter บน array field จะทำให้ผลลัพธ์มีเฉพาะ element ที่ตรงเงื่อนไข** — query แค่ตัดสินว่าจะส่ง document ทั้งก้อนกลับมาหรือไม่ ตัว array field ที่ส่งกลับมายังคงมีครบทุก element เหมือนเดิม หากต้องการเฉพาะ element ที่ตรง ต้องใช้ positional projection operator `$` หรือ `$elemMatch` ใน projection แยกต่างหาก
-- **ใช้ positional dot path อย่าง `borrowed.0` เหมือนว่าตำแหน่งนั้นมีความหมายทางธุรกิจที่แน่นอน** — ลำดับใน array เปลี่ยนได้ทุกครั้งที่แอปทำ `$push`, `$pull` หรือเขียนทับ array ทั้งก้อน การอิงตำแหน่งจึงเปราะบางกว่าการ query ด้วยเงื่อนไขค่า
-- **สับสนระหว่าง `$all` ปกติกับ `$all` ที่ครอบด้วย `$elemMatch` หลายตัว** — `$all: [{ $elemMatch: {...} }, { $elemMatch: {...} }]` ตรวจว่ามี element (อาจคนละตัว) ที่ผ่านแต่ละเงื่อนไขแยกกัน ไม่ใช่การรวมเงื่อนไขทั้งหมดไว้บน element เดียว
+- **"filter ตัด array ที่คืนให้เหลือ element ที่ตรง"** — มันแค่ตัดสินว่าคืนทั้ง document หรือไม่ ใช้ `scores.$`, `$elemMatch` ใน projection หรือ `$slice`
+- **"`borrowed.0` มีความหมายทางธุรกิจคงที่"** — ลำดับ array เปลี่ยนทุก `$push`/`$pull`; query ตามค่าทนทานกว่า
+- **"`$all` กับหลาย `$elemMatch` ตรึง element เดียว"** — แต่ละ clause ถูกทำให้เป็นจริงโดยคนละ element ได้ (order 1 ในการรันด้านบนตรง)
+- **"`{ field: ['a'] }` แปลว่ามี 'a'"** — แปลว่า array เท่ากับ `['a']`
+- **"`$size` รับการเปรียบเทียบได้"** — ไม่ได้: `Failed to parse $size. Expected a number`
+- **"`$size: 0` พบ document ที่ไม่มี field"** — พบเฉพาะ array ว่าง; `$exists: false` พบอันที่ไม่มี
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบตะกร้าสินค้าที่มีโปรโมชั่นตามเงื่อนไข** — เช่น "มีสินค้าชิ้นเดียวที่ทั้งราคาเกิน 1000 และจำนวนอย่างน้อย 2 ชิ้น" ต้องใช้ `$elemMatch` เพราะถ้าใช้เงื่อนไขแยกกัน ระบบอาจให้ส่วนลดผิดกับตะกร้าที่มีสินค้าราคาแพงชิ้นหนึ่งกับสินค้าจำนวนเยอะอีกชิ้นหนึ่งซึ่งไม่ใช่ชิ้นเดียวกัน
->
-> **ระบบ tag ของบทความหรือสินค้า** — ค้นหาบทความที่ติด tag ครบทุกอันที่ผู้ใช้เลือก (เช่น "javascript" และ "backend" พร้อมกัน) ใช้ `$all` ตรงตัว ส่วน recommendation engine ที่แค่เช็คว่า tag ไหนบ้าง "มีอยู่" ใช้ query ค่าเดียวแบบ containment ก็พอ
+> บทช่วยสอน array ของคู่มือ MongoDB อธิบายทั้งสองพฤติกรรมที่เราวัด: compound filter ตรงกับ array ที่ "elements ... in some combination satisfy the query conditions. One element can satisfy the greater than `15` condition and another element can satisfy the less than `20` condition, or a single element can satisfy both"; ส่วน `$elemMatch` คือ "so that at least one array element satisfies all the specified criteria" ([Query an Array](https://www.mongodb.com/docs/manual/tutorial/query-arrays/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกันและคืนสมาชิกชุดเดียวกัน (`borrowed: "Compilers"`, `$elemMatch`, `$all`, `$size`) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizArrays = [
   {
-    q: 'คุณ filter field ที่เป็น array ชื่อ borrowed กับค่าธรรมดา "Compilers" อะไรจะตรง?',
+    q: 'คุณกรอง field array borrowed ด้วยค่าธรรมดา "Compilers" อะไรตรง?',
     options: [
-      'เฉพาะ array ที่เท่ากับ ["Compilers"] เป๊ะ ๆ',
+      'เฉพาะ array ที่เท่ากับ ["Compilers"] เป๊ะ',
       'document ใดก็ตามที่ array borrowed มี "Compilers"',
-      'ไม่มีอะไรเลย array ต้องใช้ $in',
+      'ไม่มีอะไร; array ต้องใช้ $in',
       'เฉพาะ element แรกของ array',
     ],
     answer: 1,
+    explain: 'ตรง Ada, Grace และ Margaret แบบบรรจุ (และ Barbara ที่ field เป็น scalar "Compilers") เฉพาะรูป array ทั้งก้อน ["Compilers"] ที่หมายถึงความเท่ากัน',
   },
   {
-    q: 'ทำไมจึงใช้ $elemMatch แทนที่จะใส่สองเงื่อนไขบน field ที่เป็น array โดยตรง?',
+    q: 'ทำไมใช้ $elemMatch แทนสองเงื่อนไขโดยตรงบน field array?',
     options: [
-      'เร็วกว่า แต่อย่างอื่นเหมือนกันหมด',
-      'บังคับให้ทุกเงื่อนไขเป็นจริงบน element ตัวเดียวกัน',
-      'จำเป็นต้องใช้กับทุก query ที่แตะ array',
-      'sort array ให้ก่อน',
+      'เร็วกว่าแต่เหมือนกันทุกประการ',
+      'บังคับให้ทุกเงื่อนไขเป็นจริงบน element เดียวกัน',
+      'จำเป็นสำหรับ query array ทุกแบบ',
+      'เรียง array ก่อน',
     ],
     answer: 1,
+    explain: 'แบบธรรมดา { $gt: 80, $lt: 90 } ตรง Ada [70, 95] (95 > 80, 70 < 90 บนคนละ element); $elemMatch คืนเฉพาะ Grace และ Margaret',
   },
   {
-    q: '{ borrowed: { $all: ["Algorithms", "Compilers"] } } จับคู่อะไร?',
+    q: '{ borrowed: { $all: ["Algorithms", "Compilers"] } } ตรงกับอะไร?',
     options: [
-      'array ที่มีชื่อหนังสือใดชื่อหนึ่ง',
-      'array ที่มีทั้งสองชื่อหนังสือ ไม่ว่าจะเรียงลำดับใด',
-      'array ที่เท่ากับสอง element นั้นตามลำดับเป๊ะ ๆ',
-      'array ที่มีความยาว 2 เท่านั้น',
+      'array ที่มีชื่อใดชื่อหนึ่ง',
+      'array ที่มีทั้งสองชื่อ ในลำดับใดก็ได้',
+      'array ที่เท่ากับสอง element นั้นตามลำดับ',
+      'เฉพาะ array ความยาว 2',
     ],
     answer: 1,
+    explain: 'Grace (สามเล่ม) และ Margaret (สองเล่ม) ตรงทั้งคู่: $all ไม่สนลำดับและ element เกิน',
   },
   {
-    q: 'คุณจะจับคู่ document ที่ array มี element สามตัวพอดีได้อย่างไร?',
+    q: 'จะตรงกับ document ที่ array มีสาม element พอดีอย่างไร?',
     options: ['{ field: { $len: 3 } }', '{ field: { $size: 3 } }', '{ field: { $count: 3 } }', '{ field: { $all: 3 } }'],
     answer: 1,
+    explain: '$size รับตัวเลขตรง ๆ; $size: { $gt: 1 } ล้มเหลวด้วย "Failed to parse $size. Expected a number"',
+  },
+  {
+    q: 'order 1 มี items [{price 1500, qty 1}, {price 20, qty 5}] { "items.price": {$gt: 1000}, "items.qty": {$gte: 2} } ตรงกับมันไหม?',
+    options: [
+      'ไม่ — ไม่มี item เดียวที่ผ่านทั้งสอง',
+      'ตรง — item หนึ่งผ่านแต่ละเงื่อนไขแยกกัน รูปแบบ dotted-path ธรรมดาจึงตรง',
+      'เฉพาะเมื่อใช้ $all',
+      'เกิด error บน array ของ sub-document',
+    ],
+    answer: 1,
+    explain: 'แบบธรรมดาคืน order 1 และ 2; $elemMatch คืนเฉพาะ order 2 การห่อสอง $elemMatch ใน $all ก็ยังคืน order 1',
+  },
+  {
+    q: 'ต้องการให้ array ถูกตัดเหลือ element แรกที่ตรง scores > 80 ใช้อะไร?',
+    options: [
+      'ไม่ต้องทำอะไร — filter ตัดให้แล้ว',
+      'positional projection: { "scores.$": 1 }',
+      '$size',
+      '$all',
+    ],
+    answer: 1,
+    explain: 'filter เลือกแค่ document การรันจริงของ { "scores.$": 1 } คืน [95] สำหรับ Ada และ [85] สำหรับ Grace',
   },
 ]
 

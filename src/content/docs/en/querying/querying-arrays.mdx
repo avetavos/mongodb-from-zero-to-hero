@@ -1,6 +1,6 @@
 ---
 title: Querying arrays
-description: Match a single array element, require multiple conditions on one element with $elemMatch, require several values with $all, filter by length with $size, and reach elements by index with dot paths.
+description: Match a single array element, require multiple conditions on one element with $elemMatch, require several values with $all, filter by length with $size, reach elements by index, and project only the matching elements - proven on documents that differ.
 sidebar:
   order: 3
 ---
@@ -8,11 +8,48 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 A document field can hold an array, and querying one has a friendly surprise built in: when you filter an array field against a plain value, MongoDB checks **every element** and matches if *any* of them satisfies the condition. That single rule makes simple array queries read exactly like scalar ones. The subtleties show up only when you need several conditions to hold on the *same* element, which is where `$elemMatch` earns its keep.
 
-For this lesson each member carries a `borrowed` array of book titles, and some carry a `tags` array of interest labels.
+For this lesson each member carries a `borrowed` array of book titles, a `scores` array of numbers, and some carry a `tags` array of interest labels. Every output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 (Python, Go and Rust tabs were each run once in a scratch program on the same server).
+
+## The data we query
+
+The data is chosen so that different filters give *different* answers - that is how you prove an operator does what you think:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/arr-seed.js
+    db.members.insertMany([
+      { name: "Ada",      borrowed: ["Compilers"], scores: [70, 95], tags: ["js", "backend"] },
+      { name: "Grace",    borrowed: ["Compilers", "Algorithms", "Databases"], scores: [70, 85, 95], tags: ["backend"] },
+      { name: "Linus",    borrowed: [], scores: [], tags: [] },
+      { name: "Margaret", borrowed: ["Algorithms", "Compilers"], scores: [88], tags: ["js"] },
+      { name: "Edsger",   borrowed: ["Databases"], scores: [60, 75] },                   // no tags field
+      { name: "Barbara",  borrowed: "Compilers", scores: 85 },                            // scalars, not arrays
+    ]);
+    globalThis.names = (f) => db.members.find(f, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 6);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/arr-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      borrowed: ["Compilers"], scores: [70, 95], tags: ["js", "backend"] },
+      { name: "Grace",    borrowed: ["Compilers", "Algorithms", "Databases"], scores: [70, 85, 95], tags: ["backend"] },
+      { name: "Linus",    borrowed: [], scores: [], tags: [] },
+      { name: "Margaret", borrowed: ["Algorithms", "Compilers"], scores: [88], tags: ["js"] },
+      { name: "Edsger",   borrowed: ["Databases"], scores: [60, 75] },
+      { name: "Barbara",  borrowed: "Compilers", scores: 85 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 6) throw new Error("expected 6");
+    ```
+  </TabItem>
+</Tabs>
 
 ## Matching a single element
 
@@ -21,14 +58,22 @@ To ask "who currently has *Compilers* checked out?", filter the array field by t
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ borrowed: "Compilers" })
+    // mongosh/arr-element.js
+    console.log("borrowed 'Compilers'                :", names({ borrowed: "Compilers" }));
+    console.log("borrowed ['Compilers'] (whole array):", names({ borrowed: ["Compilers"] }));
+    console.log("borrowed ['Algorithms','Compilers']  :", names({ borrowed: ["Algorithms", "Compilers"] }));
+    console.log("borrowed ['Compilers','Algorithms']  :", names({ borrowed: ["Compilers", "Algorithms"] }));
+    assert.strictEqual(names({ borrowed: "Compilers" }), "Ada, Barbara, Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-element.mjs
     const docs = await db.collection("members")
       .find({ borrowed: "Compilers" })
       .toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 4) throw new Error("expected 4");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,35 +102,39 @@ To ask "who currently has *Compilers* checked out?", filter the array field by t
   </TabItem>
 </Tabs>
 
-Any member whose array contains that title matches, no matter where it sits in the list:
+Any member whose array contains that title matches, no matter where it sits in the list - and, note, **Barbara too, whose `borrowed` is the plain string `"Compilers"`** (a scalar equal to the value matches as well). Handing the filter a whole array instead means *exact array equality*, order included:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "borrowed": ["Algorithms", "Compilers"]
-  }
-]
+```text
+borrowed 'Compilers'                : Ada, Barbara, Grace, Margaret
+borrowed ['Compilers'] (whole array): Ada
+borrowed ['Algorithms','Compilers']  : Margaret
+borrowed ['Compilers','Algorithms']  : 
 ```
+
+`["Compilers"]` matched only Ada, whose array is *exactly* that; `["Compilers","Algorithms"]` matched nobody because Margaret's array is stored in the opposite order.
 
 ## Several conditions on the same element: $elemMatch
 
-Here is the trap. Suppose `scores` holds an array of numbers and you want documents with an element greater than 80 **and** less than 90. Writing `{ scores: { $gt: 80, $lt: 90 } }` does *not* mean that — it matches if *some* element is over 80 and *some* (possibly different) element is under 90. To pin both conditions to **one** element, use `$elemMatch`:
+Here is the trap. Suppose `scores` holds an array of numbers and you want documents with an element greater than 80 **and** less than 90. Writing `{ scores: { $gt: 80, $lt: 90 } }` does *not* mean that - it matches if *some* element is over 80 and *some* (possibly different) element is under 90. To pin both conditions to **one** element, use `$elemMatch`. The seed has two members whose arrays only *look* alike, Ada `[70, 95]` and Grace `[70, 85, 95]`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      scores: { $elemMatch: { $gt: 80, $lt: 90 } }
-    })
+    // mongosh/arr-elemmatch.js
+    console.log("plain     {$gt: 80, $lt: 90}      :", names({ scores: { $gt: 80, $lt: 90 } }));
+    console.log("$elemMatch {$gt: 80, $lt: 90}      :", names({ scores: { $elemMatch: { $gt: 80, $lt: 90 } } }));
+    assert.strictEqual(names({ scores: { $gt: 80, $lt: 90 } }).includes("Ada"), true);    // 95 is >80 and 70 is <90: two DIFFERENT elements
+    assert.strictEqual(names({ scores: { $elemMatch: { $gt: 80, $lt: 90 } } }), "Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-elemmatch.mjs
     const docs = await db.collection("members").find({
       scores: { $elemMatch: { $gt: 80, $lt: 90 } }
     }).toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 2) throw new Error("expected Grace and Margaret");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -120,13 +169,37 @@ Here is the trap. Suppose `scores` holds an array of numbers and you want docume
   </TabItem>
 </Tabs>
 
-Only documents with a single element in the 81–89 range match — here `85` qualifies, even though the array also holds values outside the band:
+The two forms return different people:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "scores": [70, 85, 95] }
-]
+```text
+plain     {$gt: 80, $lt: 90}      : Ada, Barbara, Grace, Margaret
+$elemMatch {$gt: 80, $lt: 90}      : Grace, Margaret
 ```
+
+Only Grace (`85`) and Margaret (`88`) have **one** element in the 81 to 89 band. The plain form also returned Ada, whose array `[70, 95]` has no element in the band - `95` satisfied `> 80` and, separately, `70` satisfied `< 90` - and Barbara, whose `scores` is the scalar `85` (a scalar is tested against both conditions directly).
+
+The same rule applies to arrays of sub-documents. With orders whose `items` hold `{ price, qty }`, "an item over 1000 with quantity of at least 2":
+
+```js
+// mongosh/arr-elemmatch-subdocs.js
+db.orders.insertMany([
+  { _id: 1, items: [{ sku: "a", price: 1500, qty: 1 }, { sku: "b", price: 20, qty: 5 }] },
+  { _id: 2, items: [{ sku: "c", price: 1500, qty: 3 }] },
+]);
+const ids = (f) => db.orders.find(f, { _id: 1 }).toArray().map((d) => d._id);
+console.log("plain dotted paths :", ids({ "items.price": { $gt: 1000 }, "items.qty": { $gte: 2 } }));
+console.log("$elemMatch         :", ids({ items: { $elemMatch: { price: { $gt: 1000 }, qty: { $gte: 2 } } } }));
+console.log("$all of 2 $elemMatch:", ids({ items: { $all: [{ $elemMatch: { price: { $gt: 1000 } } }, { $elemMatch: { qty: { $gte: 2 } } }] } }));
+assert.strictEqual(ids({ items: { $elemMatch: { price: { $gt: 1000 }, qty: { $gte: 2 } } } }).join(), "2");
+```
+
+```text
+plain dotted paths : [ 1, 2 ]
+$elemMatch         : [ 2 ]
+$all of 2 $elemMatch: [ 1, 2 ]
+```
+
+Order 1 has an expensive item (qty 1) and a *different*, cheap item with qty 5: the plain form wrongly matches it; `$elemMatch` correctly returns only order 2. And `$all` wrapping two separate `$elemMatch` clauses is **not** a fix - it is again "some element for each condition", so order 1 matched.
 
 ## Requiring several values: $all
 
@@ -135,16 +208,22 @@ Only documents with a single element in the 81–89 range match — here `85` qu
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      borrowed: { $all: ["Algorithms", "Compilers"] }
-    })
+    // mongosh/arr-all.js
+    console.log("borrowed $all [Algorithms, Compilers]:", names({ borrowed: { $all: ["Algorithms", "Compilers"] } }));
+    console.log("tags $all [js, backend]              :", names({ tags: { $all: ["js", "backend"] } }));
+    console.log("tags $in  [js, backend]              :", names({ tags: { $in: ["js", "backend"] } }));
+    console.log("borrowed $all []                     :", names({ borrowed: { $all: [] } }));
+    assert.strictEqual(names({ borrowed: { $all: ["Algorithms", "Compilers"] } }), "Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-all.mjs
     const docs = await db.collection("members").find({
       borrowed: { $all: ["Algorithms", "Compilers"] }
     }).toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 2) throw new Error("expected 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -179,17 +258,16 @@ Only documents with a single element in the 81–89 range match — here `85` qu
   </TabItem>
 </Tabs>
 
-Only members holding both titles are returned; having one is not enough:
+Only members holding both titles are returned; having one is not enough. Grace matches too - `$all` ignores extra elements and order - and `$all` is AND where `$in` is OR:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "borrowed": ["Algorithms", "Compilers"]
-  }
-]
+```text
+borrowed $all [Algorithms, Compilers]: Grace, Margaret
+tags $all [js, backend]              : Ada
+tags $in  [js, backend]              : Ada, Grace, Margaret
+borrowed $all []                     : 
 ```
+
+An empty `$all: []` matches **nothing** (not "everything"), a small trap when the list is built dynamically.
 
 ## Filtering by length: $size
 
@@ -198,14 +276,25 @@ Only members holding both titles are returned; having one is not enough:
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ borrowed: { $size: 2 } })
+    // mongosh/arr-size.js
+    console.log("borrowed $size 2   :", names({ borrowed: { $size: 2 } }));
+    console.log("borrowed $size 0   :", names({ borrowed: { $size: 0 } }));
+    console.log("tags $size 0       :", names({ tags: { $size: 0 } }), "| tags missing:", names({ tags: { $exists: false } }));
+    console.log("more than one book :", names({ "borrowed.1": { $exists: true } }));
+    let err;
+    try { db.members.find({ borrowed: { $size: { $gt: 1 } } }).toArray(); } catch (e) { err = e; }
+    console.log(err.name, err.code, err.message);
+    assert.strictEqual(err.code, 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/arr-size.mjs
     const docs = await db.collection("members")
       .find({ borrowed: { $size: 2 } })
       .toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1) throw new Error("expected Margaret only");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -234,60 +323,153 @@ Only members holding both titles are returned; having one is not enough:
   </TabItem>
 </Tabs>
 
-Members whose `borrowed` array has precisely two elements match:
+Members whose `borrowed` array has precisely two elements match. `$size` accepts **only a literal number** - a range is a real error - and the workaround for "more than one" is to test that the element at index 1 exists:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "borrowed": ["Algorithms", "Compilers"]
-  }
-]
+```text
+borrowed $size 2   : Margaret
+borrowed $size 0   : Linus
+tags $size 0       : Linus | tags missing: Barbara, Edsger
+more than one book : Grace, Margaret
+MongoServerError 2 Failed to parse $size. Expected a number in: $size: { $gt: 1 }
 ```
+
+Note the empty-vs-missing distinction: `$size: 0` finds Linus (empty array), not the members whose `tags` field is absent.
 
 ## Reaching an element by index
 
-Array positions are addressable with a dotted numeric path: `borrowed.0` is the first element, `borrowed.1` the second, and so on. Use this to query the element at a known position — "whose *first* borrowed book is *Algorithms*?":
+Array positions are addressable with a dotted numeric path: `borrowed.0` is the first element, `borrowed.1` the second, and so on. Use this to query the element at a known position - "whose *first* borrowed book is *Algorithms*?":
 
 ```js
-db.members.find({ "borrowed.0": "Algorithms" })
+// mongosh/arr-index-path.js
+console.log("borrowed.0 = Algorithms:", names({ "borrowed.0": "Algorithms" }));
+assert.strictEqual(names({ "borrowed.0": "Algorithms" }), "Margaret");
 ```
 
-The same dot path works when the array holds sub-documents — `reviews.0.rating` reaches into the first review's `rating` field, a pattern the next lesson explores in depth.
+```text
+borrowed.0 = Algorithms: Margaret
+```
 
-**In Compass:** array filters go in the filter bar just like scalar ones, for example `{ borrowed: { $size: 2 } }`. Compass renders matching arrays inline and lets you expand them to see each element.
+The same dot path works when the array holds sub-documents - `reviews.0.rating` reaches into the first review's `rating` field, a pattern the next lesson explores in depth.
+
+## Getting back only the matching elements
+
+A filter decides which *documents* come back, not which array elements. To trim the array, use a projection: the positional `$` (the first element matched by the filter), `$elemMatch` in the projection, or `$slice`. The seed has Grace with three scores:
+
+```js
+// mongosh/arr-project.js
+const sorted = (c) => c.sort({ name: 1 }).toArray();
+console.log("scores.$        :", sorted(db.members.find({ scores: { $gt: 80 } }, { _id: 0, name: 1, "scores.$": 1 })));
+console.log("$elemMatch proj  :", db.members.find({ name: "Grace" }, { _id: 0, name: 1, scores: { $elemMatch: { $gt: 80 } } }).toArray());
+console.log("$slice 2         :", db.members.find({ name: "Grace" }, { _id: 0, name: 1, borrowed: { $slice: 2 } }).toArray());
+assert.deepStrictEqual(Array.from(db.members.findOne({ name: "Grace", scores: { $gt: 80 } }, { "scores.$": 1 }).scores), [85]);
+```
+
+```text
+scores.$        : [
+  { name: 'Ada', scores: [ 95 ] },
+  { name: 'Barbara', scores: 85 },
+  { name: 'Grace', scores: [ 85 ] },
+  { name: 'Margaret', scores: [ 88 ] }
+]
+$elemMatch proj  : [ { name: 'Grace', scores: [ 85 ] } ]
+$slice 2         : [ { name: 'Grace', borrowed: [ 'Compilers', 'Algorithms' ] } ]
+```
+
+The positional `$` returns the **first** element that satisfied the filter (`95` for Ada, the first score over 80; `85` for Grace, though `95` also qualified); `$elemMatch` and `$slice` in a projection are independent of the filter. Positional `$` requires the array to appear in the query.
+
+**In Compass:** array filters go in the **Filter** field just like scalar ones, for example `{ borrowed: { $size: 2 } }` (Compass documentation, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/), lists `$elemMatch` examples too); expand a matching array in the document view to see each element.
+
+## Do arrays use indexes?
+
+Yes - an index on an array field becomes a **multikey** index, with one entry per element. Creating `{ borrowed: 1 }` and explaining the element query on our six documents:
+
+```js
+// mongosh/arr-multikey.js
+db.members.createIndex({ borrowed: 1 });
+const e = db.members.find({ borrowed: "Compilers" }).explain("executionStats");
+const ix = e.queryPlanner.winningPlan.inputStage;
+console.log("stage:", ix.stage, "| isMultiKey:", ix.isMultiKey, "| keys", e.executionStats.totalKeysExamined, "| docs", e.executionStats.totalDocsExamined);
+assert.strictEqual(ix.isMultiKey, true);
+```
+
+```text
+stage: IXSCAN | isMultiKey: true | keys 4 | docs 4
+```
+
+The indexes module covers multikey rules (including "cannot index parallel arrays").
 
 ## Tips and gotchas
 
-- **Why `$elemMatch` matters:** without it, multiple conditions on an array field are checked *across all elements*, so `{ scores: { $gt: 80, $lt: 90 } }` can match an array like `[70, 95]` — one element clears each bar separately. `$elemMatch` forces all conditions onto a single element, which is almost always what you actually meant.
-- **`$all` is order-independent.** It only checks that each value is present somewhere; it says nothing about position or about extra elements. `$size`, by contrast, fixes the exact length.
-- **`$size` takes a literal number only.** You cannot write `{ $size: { $gt: 1 } }`. To query "more than one element", model a length field or use the aggregation framework.
-- **A single-value filter on an array matches by containment.** `{ borrowed: "Compilers" }` matches any array that *contains* that title — it does not require the array to equal `["Compilers"]`.
+- **Why `$elemMatch` matters:** without it, multiple conditions on an array field are checked *across all elements*, so `{ scores: { $gt: 80, $lt: 90 } }` matched `[70, 95]` (Ada). `$elemMatch` forces all conditions onto a single element, which is almost always what you meant.
+- **A whole-array value means equality, not containment.** `{ borrowed: ["Compilers"] }` matched only the array that is exactly that, in that order.
+- **`$all` is order-independent** and ignores extra elements; `$all: []` matches nothing. `$size`, by contrast, fixes the exact length.
+- **`$size` takes a literal number only** (`Failed to parse $size. Expected a number`). For "more than one element" test `"field.1": { $exists: true }`.
+- **A single-value filter on an array matches by containment** - and also matches a *scalar* equal to that value (Barbara).
+- **Filters do not trim arrays.** Use the positional `$`, a projection `$elemMatch`, or `$slice`.
 
 <Callout title="Across elements vs within one element">
 The defining question for every array query is: must the conditions hold on the same element, or merely somewhere in the array? Plain multi-condition filters spread across elements; $elemMatch locks them to one. Choosing wrong is the single most common array-query bug.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant asked for "members with a B-band score, between 80 and 90" will write the natural scalar filter:
+
+<SpotTheBug lang="js" code={`// AI comment: "students with a score between 80 and 90"
+const bBand = await db.collection("members")
+  .find({ scores: { $gt: 80, $lt: 90 } })
+  .toArray();
+await sendCongratulations(bBand);`}>
+
+On an array field the two conditions are satisfied independently, by different elements. On our data this returned **four** members - Ada `[70, 95]`, Barbara `85`, Grace `[70, 85, 95]` and Margaret `[88]` - although only Grace and Margaret have a score in the band. Ada would be congratulated for a score of 95 *and* 70 but no B. The fix pins both bounds to one element:
+
+```js
+// mongosh/arr-bband-fix.js
+const bug = names({ scores: { $gt: 80, $lt: 90 } });
+const fixed = names({ scores: { $elemMatch: { $gt: 80, $lt: 90 } } });
+console.log("plain      :", bug);
+console.log("$elemMatch :", fixed);
+assert.strictEqual(bug, "Ada, Barbara, Grace, Margaret");
+assert.strictEqual(fixed, "Grace, Margaret");
+```
+
+```text
+plain      : Ada, Barbara, Grace, Margaret
+$elemMatch : Grace, Margaret
+```
+
+(Barbara's scalar `85` is only dropped by `$elemMatch` because it is not an array element; if scalars and arrays are mixed in one field, normalise the field first - schema validation, later module, prevents it.)
+
+</SpotTheBug>
+
+## Mental Model
+
+An array field is a **set of independent values that the filter sees all at once**. Each condition asks "does *any* element satisfy me?" and different conditions can be satisfied by different elements. `$elemMatch` groups conditions into a single question about *one* element; `$all` ANDs membership questions; `$size` and index paths ask about shape. The query selects documents; the projection (`$`, `$elemMatch`, `$slice`) selects elements.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
 | `$elemMatch` for multiple conditions | Forces every condition true on the same element, matching real intent almost always | Slightly more to write; you must think about "same element" up front |
-| Separate operators on the same field (no `$elemMatch`) | Shorter to write, reads like an ordinary scalar query | Each condition can pass on a different element, producing unintended matches — a common silent bug |
+| Separate operators on the same field (no `$elemMatch`) | Shorter to write, reads like an ordinary scalar query | Each condition can pass on a different element, producing unintended matches (Ada above) - a common silent bug |
+| `$all` | Expresses "has every one of these values" | Ignores extra elements and order; empty list matches nothing |
 | Positional/length queries (`$size`, `"field.0"`) | Targets a specific position or length directly in one call | Fragile to array reordering, and `$size` only accepts a literal value, not a range |
+| Multikey index on the array | Element queries use `IXSCAN` (4 keys for 4 hits) | Index size and write cost grow with array length; restrictions on compound multikey indexes |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming a filter on an array field trims the result to only the matching elements** — a query only decides whether to return the whole document or not; the returned array field still holds every element as before. To get only matching elements, use the positional projection operator `$` or a separate `$elemMatch` in the projection.
-- **Using a positional dot path like `borrowed.0` as if that position had fixed business meaning** — array order can change any time the app does `$push`, `$pull`, or overwrites the whole array. Relying on position is more fragile than querying by value condition.
-- **Confusing a plain `$all` with `$all` wrapping multiple `$elemMatch`** — `$all: [{ $elemMatch: {...} }, { $elemMatch: {...} }]` checks that some element (possibly a different one for each) satisfies each condition separately, not that all conditions hold on one element.
+- **"A filter trims the returned array to the matching elements."** - it only decides whether the whole document is returned. Use `scores.$`, a projection `$elemMatch`, or `$slice`.
+- **"`borrowed.0` has a fixed business meaning."** - array order changes on every `$push`/`$pull`; querying by value is sturdier.
+- **"`$all` with several `$elemMatch` clauses pins one element."** - each clause can be satisfied by a different element (order 1 in the run above matched).
+- **"`{ field: ['a'] }` means contains 'a'."** - it means the array equals `['a']`.
+- **"`$size` can take a comparison."** - it cannot: `Failed to parse $size. Expected a number`.
+- **"`$size: 0` finds documents without the field."** - it finds empty arrays only; `$exists: false` finds the absent ones.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A shopping cart with conditional promotions** — a rule like "one item priced over 1000 with quantity at least 2" needs `$elemMatch`, because separate conditions could wrongly apply a discount to a cart with one expensive item and a different item with a high quantity.
->
-> **An article or product tagging system** — finding articles carrying every tag a user selected (say, "javascript" and "backend" together) uses `$all` directly, while a recommendation engine that only checks which tags are "present at all" can use a plain single-value containment query.
+> The MongoDB manual's array tutorial describes both behaviours we measured: a compound filter matches arrays whose "elements ... in some combination satisfy the query conditions. One element can satisfy the greater than `15` condition and another element can satisfy the less than `20` condition, or a single element can satisfy both"; `$elemMatch` is "so that at least one array element satisfies all the specified criteria" ([Query an Array](https://www.mongodb.com/docs/manual/tutorial/query-arrays/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server and returned the same members (`borrowed: "Compilers"`, `$elemMatch`, `$all`, `$size`) but they are not executed by the course's automated checker._
 
 export const quizArrays = [
   {
@@ -299,6 +481,7 @@ export const quizArrays = [
       'Only the first element of the array',
     ],
     answer: 1,
+    explain: 'It matched Ada, Grace and Margaret by containment (and Barbara, whose field was the scalar "Compilers"). Only the whole-array form ["Compilers"] means equality.',
   },
   {
     q: 'Why use $elemMatch instead of two conditions directly on an array field?',
@@ -309,6 +492,7 @@ export const quizArrays = [
       'It sorts the array first',
     ],
     answer: 1,
+    explain: 'The plain { $gt: 80, $lt: 90 } matched Ada [70, 95] (95 > 80, 70 < 90 on different elements); $elemMatch returned only Grace and Margaret.',
   },
   {
     q: 'What does { borrowed: { $all: ["Algorithms", "Compilers"] } } match?',
@@ -319,11 +503,35 @@ export const quizArrays = [
       'Arrays of length 2 only',
     ],
     answer: 1,
+    explain: 'Grace (three books) and Margaret (two) both matched: $all ignores order and extra elements.',
   },
   {
     q: 'How do you match documents whose array has exactly three elements?',
     options: ['{ field: { $len: 3 } }', '{ field: { $size: 3 } }', '{ field: { $count: 3 } }', '{ field: { $all: 3 } }'],
     answer: 1,
+    explain: '$size takes a literal number; $size: { $gt: 1 } fails with "Failed to parse $size. Expected a number".',
+  },
+  {
+    q: 'Order 1 has items [{price 1500, qty 1}, {price 20, qty 5}]. Does { "items.price": {$gt: 1000}, "items.qty": {$gte: 2} } match it?',
+    options: [
+      'No - no single item has both',
+      'Yes - one item satisfies each condition separately, so the plain dotted-path form matches',
+      'Only with $all',
+      'It raises an error on arrays of sub-documents',
+    ],
+    answer: 1,
+    explain: 'The plain form returned orders 1 and 2; $elemMatch returned only order 2. Wrapping two $elemMatch in $all still returned order 1.',
+  },
+  {
+    q: 'You want the array trimmed to the first element that matched scores > 80. What do you use?',
+    options: [
+      'Nothing - the filter already trims it',
+      'A positional projection: { "scores.$": 1 }',
+      '$size',
+      '$all',
+    ],
+    answer: 1,
+    explain: 'The filter only chooses documents. The real run of { "scores.$": 1 } returned [95] for Ada and [85] for Grace.',
   },
 ]
 
