@@ -1,6 +1,6 @@
 ---
-title: single และ compound indexes
-description: สร้าง index บนฟิลด์เดียวหรือหลายฟิลด์ เลือกลำดับจากน้อยไปมากหรือจากมากไปน้อย และเรียนรู้ prefix rule ที่ตัดสินว่า compound index ให้บริการ query ใดบ้าง
+title: Single และ compound index
+description: สร้าง index บนหนึ่ง field หรือหลาย field เลือกลำดับ ascending หรือ descending และเรียนรู้ prefix rule ที่ตัดสินว่า compound index รับ query ไหน พร้อมตัวเลข explain บน 200 000 document
 sidebar:
   order: 2
 ---
@@ -8,62 +8,56 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-index ที่ง่ายที่สุดครอบคลุมฟิลด์เดียว เมื่อใดที่ query ของคุณกรองหรือเรียงบนสองฟิลด์พร้อมกัน คุณก็จะเอื้อมไปหา **compound index** — index อันเดียวที่เรียง document ตามหลายฟิลด์พร้อมกัน compound index คือที่ที่พลังจริงส่วนใหญ่อยู่ และเป็นที่ที่ความสับสนส่วนใหญ่อยู่ด้วย เพราะ compound index ไม่ได้ช่วยทุก query ที่เอ่ยถึงฟิลด์ในนั้น กฎที่ตัดสินว่า index ตัวหนึ่งรับใช้ query แบบไหนได้คือ **prefix rule** และนี่คือแนวคิดสำคัญที่สุดของบทเรียนนี้
+index ที่ง่ายที่สุดครอบคลุมหนึ่ง field เมื่อ query ของคุณ filter หรือ sort สอง field พร้อมกัน คุณจะใช้ **compound index** - index เดียวที่เรียง document ตามหลาย field พร้อมกัน compound index คือแหล่งพลังและแหล่งความสับสนหลัก เพราะมันไม่ได้ช่วยทุก query ที่พูดถึง field ของมัน กฎที่ตัดสินว่ามันรับ query ไหนคือ **prefix rule**
 
-ตลอดทั้งบทเรานี้เรายังคงใช้ collection `members` ของห้องสมุด แต่ละ document ถือ `name`, ปี `joined`, `city` และจำนวน `fines`
+ทุก output จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว collection มี member 200 000 คน 10 เมือง 26 ปีที่เข้าร่วม `city: "Berlin"` จึง match 20 000 document และ `city + joined` match 769 บทนี้เตรียมข้อมูลเอง และนิยาม helper `plan()` บรรทัดเดียวเหมือนบทก่อน (ลำดับ stage แล้วผลลัพธ์ key ของ index และ document ที่อ่าน) แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
 
-## single-field index
-
-คุณได้พบ `createIndex` ในบทเรียนก่อนแล้ว ทิศทาง — `1` สำหรับจากน้อยไปมาก, `-1` สำหรับจากมากไปน้อย — ควบคุมลำดับการเรียงที่เก็บไว้ใน index สำหรับ single-field index ทิศทางแทบไม่สำคัญสำหรับการกรอง เพราะ MongoDB เดิน index ได้ทั้งสองทาง แต่สำคัญมากตอน sort ตรงนี้เราทำ index `fines` จากน้อยไปมาก:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ fines: 1 })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex({ fines: 1 });
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("fines", 1)])
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{Keys: bson.D{{Key: "fines", Value: 1}}},
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    coll.create_index(
-        IndexModel::builder().keys(doc! { "fines": 1 }).build(),
-    )
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-server ยืนยัน index ด้วยชื่อ:
-
-```json
-"fines_1"
+```js
+// mongosh/idx2-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {                       // stage chain, then keys/docs actually read
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    return { name: "m" + i, joined: NumberInt(2000 + (Math.floor(i / 10) % 26)), fines: i % 7, city: cities[i % 10] };
+  }), { ordered: false });
+}
+console.log("members:", db.members.countDocuments());
 ```
 
-## compound index ครอบหลายฟิลด์
+```text
+members: 200000
+```
 
-compound index ระบุมากกว่าหนึ่งฟิลด์ แต่ละฟิลด์มีทิศทางของตัวเอง ลำดับของฟิลด์ใน index ไม่ใช่เรื่องตกแต่ง แต่เป็นตัวกำหนดลำดับการเรียง โดยเรียงตามฟิลด์แรกก่อน แล้วตามฟิลด์ที่สองภายในแต่ละกลุ่มที่ค่าฟิลด์แรกเท่ากัน เป็นต้น ตรงนี้เราทำ index `city` จากน้อยไปมาก แล้วตามด้วย `joined` จากมากไปน้อย เพื่อให้สมาชิกจัดกลุ่มตาม city และภายในแต่ละ city เรียงให้ใหม่สุดมาก่อน:
+## index บน field เดียว
+
+ทิศทาง - `1` ascending, `-1` descending - กำหนดลำดับที่เก็บ สำหรับ field เดียวแทบไม่สำคัญเพราะเดิน index ได้ทั้งสองทาง ที่นี่ `fines` แบบ ascending ทั้ง filter แบบ equality และ sort top-N อ่านแทบไม่มีอะไร:
+
+```js
+// mongosh/idx2-single.js
+console.log("createIndex ->", db.members.createIndex({ fines: 1 }));
+console.log("fines = 3 :", plan(db.members.find({ fines: 3 })));
+console.log("sort fines:", plan(db.members.find().sort({ fines: -1 }).limit(5)));
+```
+
+```text
+createIndex -> fines_1
+fines = 3 : FETCH > IXSCAN(fines_1)  returned=28571 keys=28571 docs=28571
+sort fines: LIMIT > FETCH > IXSCAN(fines_1)  returned=5 keys=5 docs=5
+```
+
+`createIndex` คืน string ชื่อ index `fines: 3` อ่าน key และ document ที่ตรง 28 571 รายการ; sort แบบ `limit(5)` อ่านแค่ 5
+
+## compound index บนหลาย field
+
+compound index ระบุมากกว่าหนึ่ง field แต่ละอันมีทิศทางของตัวเอง ลำดับ field กำหนดลำดับการเรียง: ตาม field แรกก่อน แล้วตาม field ที่สองภายในกลุ่มที่ค่าแรกเท่ากัน ที่นี่ `city` ascending แล้ว `joined` descending สมาชิกจึงรวมกลุ่มตามเมืองและในแต่ละเมืองใหม่สุดก่อน:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -83,12 +77,9 @@ compound index ระบุมากกว่าหนึ่งฟิลด์ �
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys: bson.D{{Key: "city", Value: 1}, {Key: "joined", Value: -1}},
-        },
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "city", Value: 1}, {Key: "joined", Value: -1}},
+    })
     if err != nil {
         return err
     }
@@ -97,124 +88,235 @@ compound index ระบุมากกว่าหนึ่งฟิลด์ �
   <TabItem label="Rust">
     ```rust
     coll.create_index(
-        IndexModel::builder()
-            .keys(doc! { "city": 1, "joined": -1 })
-            .build(),
+        IndexModel::builder().keys(doc! { "city": 1, "joined": -1 }).build(),
     )
     .await?;
     ```
   </TabItem>
 </Tabs>
 
-ชื่อที่ถูกสร้างขึ้นร้อยฟิลด์และทิศทางเข้าด้วยกัน:
+ชื่อ index ต่อ field และทิศทางเข้าด้วยกัน: `city_1_joined_-1`
 
-```json
-"city_1_joined_-1"
+## prefix rule แบบวัดผลจริง
+
+compound index รับ query ได้เฉพาะผ่าน **left-prefix** ของ field - field แรก หรือสองตัวแรก เริ่มจากซ้ายเสมอและห้ามข้าม `city_1_joined_-1` มี prefix ที่ใช้ได้สองแบบ: `city` และ `city` + `joined` ห้า query กับมัน:
+
+```js
+// mongosh/idx2-compound.js
+console.log("createIndex ->", db.members.createIndex({ city: 1, joined: -1 }));
+const rows = [
+  ["{ city }",                       db.members.find({ city: "Berlin" })],
+  ["{ city, joined }",               db.members.find({ city: "Berlin", joined: 2023 })],
+  ["{ city, joined >= 2020 }",       db.members.find({ city: "Berlin", joined: { $gte: 2020 } })],
+  ["{ joined } (skips city)",        db.members.find({ joined: 2023 })],
+  ["{ joined }, hint the index",     db.members.find({ joined: 2023 }).hint({ city: 1, joined: -1 })],
+];
+rows.forEach(([label, cur]) => console.log(label.padEnd(28), plan(cur)));
+assert.match(plan(db.members.find({ joined: 2023 })), /^COLLSCAN/);
 ```
 
-## prefix rule
+```text
+createIndex -> city_1_joined_-1
+{ city }                     FETCH > IXSCAN(city_1_joined_-1)  returned=20000 keys=20000 docs=20000
+{ city, joined }             FETCH > IXSCAN(city_1_joined_-1)  returned=769 keys=769 docs=769
+{ city, joined >= 2020 }     FETCH > IXSCAN(city_1_joined_-1)  returned=4614 keys=4614 docs=4614
+{ joined } (skips city)      COLLSCAN  returned=7690 keys=0 docs=200000
+{ joined }, hint the index   FETCH > IXSCAN(city_1_joined_-1)  returned=7690 keys=200000 docs=200000
+```
 
-compound index ให้บริการ query ได้ก็ต่อเมื่อ query นั้นใช้ **left-prefix** ของฟิลด์ใน index — ฟิลด์แรก, หรือสองฟิลด์แรก, หรือสามฟิลด์แรก เป็นต้น เริ่มจากซ้ายเสมอและไม่กระโดดข้าม index `city_1_joined_-1` ของเรามี prefix ที่ใช้ได้สองชุด: `city` อย่างเดียว และ `city` รวมกับ `joined`
+อ่านทีละแถว `{ city }` อ่าน 20 000 key สำหรับ 20 000 ผลลัพธ์ และ `{ city, joined }` อ่าน 769 พอดี ช่วงบน field ที่สองยังขี่ index ได้ (`joined >= 2020` อ่านเฉพาะ key ที่ตรงภายในบล็อกของเมือง) แต่ `{ joined }` อย่างเดียวเป็น **COLLSCAN ทั้ง 200 000 document**: index เรียงตาม city ก่อน ปีที่เข้าร่วมจึงกระจายทั่ว index การบังคับ index ด้วย `hint()` พิสูจน์ว่าไม่ใช่แค่ความชอบของ planner - server ต้องเดินทั้ง 200 000 key เพราะ MongoDB ไม่มี skip scan
 
-ดังนั้น index นี้ช่วย query ที่กรองบน `city` อย่างเดียว:
+แท็บ Node.js พิสูจน์กฎเดียวกันบน collection 2 000 document ของตัวเอง: query `city` อ่าน key เท่าผลลัพธ์ และ query เฉพาะ `joined` สแกนทั้ง 2 000 document
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.find({ city: "Berlin" })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").find({ city: "Berlin" }).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    list(db.members.find({"city": "Berlin"}))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    cur, err := coll.Find(ctx, bson.M{"city": "Berlin"})
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let cur = coll.find(doc! { "city": "Berlin" }).await?;
-    ```
-  </TabItem>
-</Tabs>
+```js
+// app/idx2-compound.mjs
+const c = db.collection("members");
+await c.insertMany(Array.from({ length: 2000 }, (_, i) => ({ city: ["Berlin", "Oslo"][i % 2], joined: 2000 + (i % 26) })));
+const name = await c.createIndex({ city: 1, joined: -1 });
+const ex = async (f) => (await c.find(f).explain("executionStats")).executionStats;
+const a = await ex({ city: "Berlin" }), b = await ex({ joined: 2023 });
+console.log(name, "| city:", a.totalKeysExamined, "keys | joined only:", b.totalDocsExamined, "docs (COLLSCAN)");
+if (a.totalKeysExamined !== a.nReturned || b.totalDocsExamined !== 2000) throw new Error("prefix rule not observed");
+```
 
-และช่วย query ที่ใช้ `city` กับ `joined` พร้อมกัน แต่**ไม่**ช่วย query ที่กรองด้วย `joined` อย่างเดียว เพราะ `joined` ไม่ใช่ left-prefix — index ถูกเรียงตาม `city` ก่อน ปีที่เข้าร่วมจึงกระจายอยู่ทั่วโครงสร้าง ไม่มีทาง seek ตรงเข้าไปหาได้ query บน `joined` อย่างเดียวจะต้องมี index ของตัวเอง หรือ compound index ที่เริ่มต้นด้วย `joined`
+```text
+city_1_joined_-1 | city: 1000 keys | joined only: 2000 docs (COLLSCAN)
+```
 
-คุณดูใน `explain` ได้ว่า query ตรงกับ prefix ใด ที่เป็นหัวข้อของบทเรียนถัดไป สำหรับตอนนี้ สิ่งที่ได้คือเรื่องโครงสร้าง: อ่าน compound index จากซ้ายไปขวา แล้ว query จะไต่ไปกับ index ได้ไกลเท่าที่ยังแตะฟิลด์นำหน้าติดต่อกันอยู่เท่านั้น
+**In Compass:** แท็บ **Indexes** แสดงแต่ละ index พร้อม field และทิศทางตามลำดับ คุณจึงอ่าน prefix ที่ใช้ได้ทันที และบอกขนาดบนดิสก์ของแต่ละ index
 
-**ใน Compass:** แท็บ **Indexes** ลิสต์แต่ละ index พร้อมฟิลด์และทิศทางตามลำดับ คุณจึงอ่าน prefix ที่ใช้ได้ออกในพริบตา และยังบอกขนาดบนดิสก์ของแต่ละ index ให้ตัดสินได้ว่าคุ้มกับพื้นที่ที่กินไปหรือเปล่า
+## ทิศทางสำคัญกับ sort ไม่ใช่ equality
 
-## เคล็ดลับและจุดพลาด
+index เดินได้ทั้งไปหน้าและถอยหลัง ลำดับที่ตรงข้ามกับที่ประกาศจึงฟรี สิ่งที่ไม่ฟรีคือทิศทาง *ผสม* ที่ลำดับที่เก็บสร้างไม่ได้:
 
-- compound index ที่เลือกมาดีอันเดียวแทน single-field index หลายอันได้ index บน `{ city: 1, joined: -1 }` ครอบ query บน `city` อย่างเดียวอยู่แล้ว ดังนั้น index `{ city: 1 }` แยกต่างหากจะซ้ำซ้อน
-- ลำดับฟิลด์ใน compound index เป็นการตัดสินใจเชิงออกแบบ ไม่ใช่รายละเอียด สลับลำดับเมื่อไร ชุด query ที่ index รับใช้ได้ก็เปลี่ยนทันที
-- ทิศทางสำคัญสำหรับการเรียง ไม่ใช่สำหรับการจับคู่แบบ equality ธรรมดา index อ่านได้ทั้งไปข้างหน้าและถอยหลัง ดังนั้น `{ joined: 1 }` และ `{ joined: -1 }` ต่างก็ให้บริการตัวกรอง equality ธรรมดาบน `joined` ได้ดีพอกัน ความต่างจะปรากฏเมื่อคุณเรียง
-- การข้ามฟิลด์นำหน้าทำให้ prefix แตก query บนฟิลด์ที่สองอย่างเดียวใช้ index ไม่ได้ ไม่ว่าฟิลด์นั้นจะเลือกได้เฉพาะเจาะจงแค่ไหน
+```js
+// mongosh/idx2-sort.js
+const q = { city: "Berlin" };
+console.log("sort { joined: -1 }              :", plan(db.members.find(q).sort({ joined: -1 })));
+console.log("sort { joined: 1 } (reverse walk):", plan(db.members.find(q).sort({ joined: 1 })));
+console.log("no filter, sort { city: -1, joined: 1 }:", plan(db.members.find().sort({ city: -1, joined: 1 }).limit(5)));
+console.log("no filter, sort { city: 1, joined: 1 }:", plan(db.members.find().sort({ city: 1, joined: 1 }).limit(5)));
+assert.ok(!plan(db.members.find(q).sort({ joined: 1 })).includes("SORT"));
+assert.ok(plan(db.members.find().sort({ city: 1, joined: 1 }).limit(5)).includes("SORT"));
+```
+
+```text
+sort { joined: -1 }              : FETCH > IXSCAN(city_1_joined_-1)  returned=20000 keys=20000 docs=20000
+sort { joined: 1 } (reverse walk): FETCH > IXSCAN(city_1_joined_-1)  returned=20000 keys=20000 docs=20000
+no filter, sort { city: -1, joined: 1 }: LIMIT > FETCH > IXSCAN(city_1_joined_-1)  returned=5 keys=5 docs=5
+no filter, sort { city: 1, joined: 1 }: SORT > COLLSCAN  returned=5 keys=0 docs=200000
+```
+
+`{ joined: -1 }` และ `{ joined: 1 }` (เดินถอยหลัง) ออกจาก index ตรง ๆ ทั้งคู่ เช่นเดียวกับการย้อนกลับแบบเต็ม `{ city: -1, joined: 1 }` ส่วน `{ city: 1, joined: 1 }` ขัดกับ `joined: -1` ที่เก็บไว้ index จึงส่งลำดับให้ไม่ได้: plan เป็น `SORT > COLLSCAN` และอ่านทั้ง 200 000 document
+
+## prefix ที่ซ้ำซ้อน
+
+`{ city: 1 }` แยกข้าง `{ city: 1, joined: -1 }` ซ้ำ prefix ลองสร้างแล้วดูผล:
+
+```js
+// mongosh/idx2-redundant.js
+db.members.createIndex({ city: 1 });                    // a "separate" city index
+console.log("city query now :", plan(db.members.find({ city: "Berlin" })));
+for (let i = 0; i < 3; i++) db.members.find({ city: "Berlin" }).toArray();          // real executions, so $indexStats has something to count
+db.members.find({ city: "Berlin", joined: 2023 }).toArray();
+const s = db.members.stats().indexSizes, kb = (n) => Math.round(n / 1024);
+console.log("index sizes KB  :", { city_1: kb(s.city_1), city_1_joined_minus1: kb(s["city_1_joined_-1"]) });
+console.log("$indexStats ops :", db.members.aggregate([{ $indexStats: {} }, { $project: { _id: 0, name: 1, ops: "$accesses.ops" } }, { $sort: { name: 1 } }]).toArray());
+assert.ok(s.city_1 > 0);
+```
+
+```text
+city query now : FETCH > IXSCAN(city_1)  returned=20000 keys=20000 docs=20000
+index sizes KB  : { city_1: 1080, city_1_joined_minus1: 1404 }
+$indexStats ops : [
+  { name: '_id_', ops: Long('0') },
+  { name: 'city_1', ops: Long('3') },
+  { name: 'city_1_joined_-1', ops: Long('1') },
+  { name: 'fines_1', ops: Long('0') }
+]
+```
+
+planner อาจเลือก index เดี่ยวที่เล็กกว่าสำหรับ query ที่ใช้แค่ city มันจึงไม่ไร้ประโยชน์กับ query นั้น - แต่เป็นงานเดียวกับที่ compound index ทำอยู่แล้ว และเสียดิสก์ หน่วยความจำ และการเขียนทุกครั้งที่ insert ใช้ `$indexStats` ดูว่า index ไหนคุ้มจริง แล้วลบตัวซ้ำถ้า compound เร็วพอ
+
+## เคล็ดลับและข้อควรระวัง
+
+- compound index หนึ่งอันแทน index เดี่ยวได้หลายอัน: `{ city: 1, joined: -1 }` รับ query เฉพาะ city อยู่แล้ว
+- ลำดับ field เป็นการตัดสินใจเชิงออกแบบ การสลับเปลี่ยน query ที่ index รับได้: `{ joined: 2023 }` เป็น COLLSCAN บน `(city, joined)`
+- ทิศทางสำคัญกับการ sort ไม่ใช่ equality ทิศตรงข้ามทั้งชุดฟรี ส่วนทิศทางผสมใช้ index ไม่ได้ (`SORT > COLLSCAN`)
+- การข้าม field นำหน้าทำให้ prefix ขาด ไม่ว่า field ถัดไปจะคัดได้ดีเพียงไร
 
 <Callout title="อ่าน compound index จากซ้ายไปขวา">
-compound index ให้บริการทุก query ที่ใช้ช่วงต่อเนื่องของฟิลด์นำหน้า เริ่มจากฟิลด์แรก ทันทีที่ query ข้ามฟิลด์ซ้ายสุด index ก็ seek ให้ไม่ได้อีกต่อไป
+compound index รับ query ที่ใช้ field นำหน้าต่อเนื่องกันโดยเริ่มจากตัวแรก ทันทีที่ query ข้าม field ซ้ายสุด index ก็ seek ให้ไม่ได้อีก
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกสั่งให้ "ทำ index ให้ query สมาชิกตามเมืองและปีที่เข้าร่วม" AI มักเขียนหนึ่ง index ต่อหนึ่ง field:
+
+<SpotTheBug lang="js" code={`// AI comment: "one index per field - MongoDB combines them for multi-field queries"
+await members.createIndex({ city: 1 });
+await members.createIndex({ joined: 1 });
+const rows = await members.find({ city: "Berlin", joined: 2023 }).toArray();`}>
+
+คอมเมนต์อธิบาย index intersection ราวกับรับประกัน ในการรันด้านล่าง planner เลือก index เดียวแล้วกรองที่เหลือจาก document ที่ fetch จึงอ่าน key และ document มากกว่า 769 ผลลัพธ์มาก compound index เดียวเปลี่ยนเป็น key = document = ผลลัพธ์:
+
+```js
+// mongosh/idx2-bug.js
+db.members.dropIndexes();                               // start from _id only
+db.members.createIndex({ city: 1 });
+db.members.createIndex({ joined: 1 });                 // AI: "one index per field, MongoDB combines them"
+console.log("two single indexes:", plan(db.members.find({ city: "Berlin", joined: 2023 })));
+db.members.createIndex({ city: 1, joined: 1 });        // the fix: one compound index
+console.log("one compound index:", plan(db.members.find({ city: "Berlin", joined: 2023 })));
+```
+
+```text
+two single indexes: FETCH > IXSCAN(joined_1)  returned=769 keys=7690 docs=7690
+one compound index: FETCH > IXSCAN(city_1_joined_1)  returned=769 keys=769 docs=769
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+compound index คือสมุดโทรศัพท์ที่เรียงตามนามสกุลแล้วตามชื่อ คุณหา Smith ทุกคนและ John Smith ทุกคนได้เร็ว แต่หา John ทุกคนโดยไม่อ่านทั้งเล่มไม่ได้ ลำดับที่เก็บคือสัญญา - prefix rule และกฎการ sort เป็นผลของมันทั้งคู่
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| single-field index | เรียบง่าย ครอบ query shape เดียวได้พอดี ดูแลง่าย | ครอบได้แค่ query ที่กรอง/เรียงบนฟิลด์นั้นฟิลด์เดียว |
-| compound index | ครอบได้หลาย query shape พร้อมกันถ้าลำดับฟิลด์ตรงกับ left-prefix | ใหญ่กว่า เขียนช้ากว่า และออกแบบผิดลำดับแล้วช่วยอะไรไม่ได้เลย |
+| index เดี่ยว | ง่าย; รับ query รูปแบบเดียว | index เดี่ยวสองอันไม่รวมเป็น seek สำหรับ query สอง field |
+| compound index | index เดียวรับหลายรูปแบบผ่าน prefix และลำดับการ sort | ใหญ่กว่า เขียนช้ากว่า และไร้ประโยชน์กับ query ที่ข้าม field แรก |
+| index prefix เพิ่ม (`{ city: 1 }`) | เล็กกว่า อาจถูกเลือกกับ query ที่ใช้แค่ city | ซ้ำงานที่ compound ทำอยู่ และจ่ายต้นทุนเขียน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า compound index ช่วย query ที่กรองบนฟิลด์ใดก็ได้ในนั้น** — compound index ให้บริการเฉพาะ left-prefix เท่านั้น query ที่กรองเฉพาะฟิลด์ที่สองโดยข้ามฟิลด์แรกไปจะไม่ seek เลย
-- **สร้าง single-field index ซ้ำซ้อนกับ prefix ของ compound index ที่มีอยู่แล้ว** — ถ้ามี `{ city: 1, joined: -1 }` อยู่แล้ว index `{ city: 1 }` แยกต่างหากซ้ำซ้อนโดยสิ้นเชิง เสียพื้นที่และ write cost ฟรีๆ
-- **สลับลำดับฟิลด์ใน compound index โดยไม่เช็คผลกับ query อื่นที่ใช้ index เดิม** — ลำดับฟิลด์เป็นการตัดสินใจเชิงออกแบบ เปลี่ยนแล้ว query shape ที่เคย seek ได้อาจกลายเป็น COLLSCAN ทันที
+- **"compound index ช่วย query บน field ใดก็ได้ของมัน"** - `{ joined: 2023 }` สแกนทั้ง 200 000 document; แม้ hint ก็อ่านทั้ง 200 000 key
+- **"index แยกแต่ละ field รวมกันอัตโนมัติ"** - planner ใช้อันเดียวแล้วกรองที่เหลือ
+- **"ทิศทางของทุก field ต้องตรงกับ sort"** - ตรงข้ามทั้งชุดฟรี มีแค่ทิศทางผสมที่ทำให้ใช้ index ไม่ได้
+- **"ต้องมี index เดี่ยวแยกสำหรับ field แรก"** - compound index มี prefix นั้นอยู่แล้ว
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบ booking อย่าง Airbnb-style** — ใช้ compound index บน `{ city: 1, checkIn: 1, price: 1 }` เพื่อรองรับทั้ง query กรองตามเมือง เรียงตามวันที่เข้าพัก และกรองช่วงราคา ด้วย index อันเดียว แทนที่จะสร้าง single-field index แยกสามอัน
->
-> **ทีม analytics ที่ query หลาย shape บน collection เดียวกัน** — เจอปัญหาว่า compound index ที่ออกแบบไว้สำหรับ dashboard หนึ่งใช้กับ query ของอีกทีมไม่ได้เพราะลำดับฟิลด์ไม่ตรง left-prefix จึงต้องเพิ่ม index อีกตัวแทนที่จะพึ่ง index เดิม
+> หน้า compound index ในคู่มือ MongoDB ระบุกฎที่บทนี้วัดไว้: "Compound indexes support queries on all fields included in the index prefix" และแนะนำให้สร้างเมื่อ "your application repeatedly runs a query that contains multiple fields" ([Compound Indexes](https://www.mongodb.com/docs/manual/core/indexes/index-types/index-compound/), ตรวจ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (`createIndex` แบบ compound คืน `city_1_joined_-1`) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizCompound = [
   {
-    q: 'มี compound index บน { city: 1, joined: -1 } query แบบไหนที่ index นี้ seek ให้ได้?',
+    q: 'คุณมี compound index บน { city: 1, joined: -1 } query ไหนใช้ seek ได้',
     options: [
-      'query ที่กรองบน joined อย่างเดียว',
-      'query ที่กรองบน city อย่างเดียว',
-      'query ที่กรองบน fines อย่างเดียว',
-      'ไม่มี query ใด เพราะ compound index ต้องการทุกฟิลด์',
+      'query ที่ filter เฉพาะ joined',
+      'query ที่ filter เฉพาะ city',
+      'query ที่ filter เฉพาะ fines',
+      'ไม่มี เพราะ compound index ต้องใช้ทุก field',
     ],
     answer: 1,
+    explain: '{ city } อ่าน 20 000 key สำหรับ 20 000 ผลลัพธ์พอดี ส่วน { joined } อย่างเดียวเป็น COLLSCAN บน 200 000 document',
   },
   {
-    q: 'prefix rule พูดถึงอะไรเกี่ยวกับ compound index?',
+    q: 'prefix rule ของ compound index ว่าอย่างไร',
     options: [
-      'รับใช้ query ที่ใช้ฟิลด์ชุดย่อยแบบไหนก็ได้',
-      'รับใช้ query ที่ใช้ left-prefix ของฟิลด์ โดยเริ่มจากฟิลด์แรก',
-      'รับใช้เฉพาะ query ที่ใช้ครบทุกฟิลด์พร้อมกัน',
-      'รับใช้ query ที่ใช้ฟิลด์สุดท้ายขึ้นก่อน',
+      'รับ query ที่ใช้ field ย่อยส่วนไหนก็ได้',
+      'รับ query ที่ใช้ left-prefix ของ field เริ่มจากตัวแรก',
+      'รับเฉพาะ query ที่ใช้ทุก field พร้อมกัน',
+      'รับ query ที่ใช้ field สุดท้ายก่อน',
     ],
     answer: 1,
+    explain: 'city และ (city, joined) seek ตรง ๆ; joined อย่างเดียวไม่ได้ และการบังคับ index ด้วย hint() อ่านครบ 200 000 key',
   },
   {
-    q: 'ทำไมลำดับฟิลด์จึงสำคัญใน compound index?',
+    q: 'index คือ { city: 1, joined: -1 } sort แบบไหนบน query เฉพาะ Berlin ไม่ต้องมี stage SORT',
     options: [
-      'เปลี่ยนแค่ชื่อ index เท่านั้น',
-      'กำหนดลำดับการเรียง จึงตัดสินว่า index รับใช้ prefix ของ query แบบไหนได้',
-      'ไม่มีผล เพราะ MongoDB จัดลำดับฟิลด์ใหม่ให้เอง',
-      'มีผลแค่กับวิธีที่ Compass แสดง index',
+      'เฉพาะ { joined: -1 }',
+      'ทั้ง { joined: -1 } และ { joined: 1 } เพราะเดิน index ย้อนหลังได้',
+      'ไม่มีเลย',
+      'เฉพาะ { joined: 1 }',
     ],
     answer: 1,
+    explain: 'ทั้งสอง plan เป็น FETCH > IXSCAN ไม่มี SORT; sort ทิศทางผสมอย่าง { city: 1, joined: 1 } ใช้ index ไม่ได้และกลายเป็น SORT > COLLSCAN บน 200 000 document',
+  },
+  {
+    q: 'คุณสร้าง index เดี่ยวบน city และ joined แยกกันสำหรับ query ที่ใช้ทั้งสอง ผลรันแสดงอะไร',
+    options: [
+      'ทั้งสอง index ถูกรวมกันเพื่อ seek สมบูรณ์แบบ',
+      'planner ใช้ index เดียวและกรองที่เหลือจาก document ที่ fetch (key และ doc มากกว่าผลลัพธ์)',
+      'query ถูกปฏิเสธ',
+      'เป็น COLLSCAN',
+    ],
+    answer: 1,
+    explain: 'index เดี่ยวสองอัน: key และ doc สูงกว่า 769 ผลลัพธ์มาก; compound index อ่าน key = doc = ผลลัพธ์',
+  },
+  {
+    q: 'ทำไม index { city: 1 } แยกจึงซ้ำซ้อนเมื่อมี { city: 1, joined: -1 }',
+    options: [
+      'compound index รับ query ที่ใช้แค่ city ได้อยู่แล้ว',
+      'MongoDB ห้าม',
+      'ไม่ซ้ำ มันเร็วกว่าเสมอ',
+      'compound index รับ query ของ city ไม่ได้',
+    ],
+    answer: 0,
+    explain: 'มันเป็น index ที่เล็กกว่า planner จึงอาจเลือก แต่ซ้ำ prefix: $indexStats บอกว่าอันไหนรับ query และอีกอันเป็นแค่ต้นทุนการเขียนและหน่วยความจำ',
   },
 ]
 

@@ -1,6 +1,6 @@
 ---
 title: Single and compound indexes
-description: Create indexes on one field or several, choose ascending or descending order, and learn the prefix rule that decides which queries a compound index serves.
+description: Create indexes on one field or several, choose ascending or descending order, and learn - with explain counts on 200 000 documents - the prefix rule that decides which queries a compound index serves.
 sidebar:
   order: 2
 ---
@@ -8,62 +8,56 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-The simplest index covers one field. The moment your queries filter or sort on two fields together, you reach for a **compound index** — a single index that orders documents by several fields at once. Compound indexes are where most of the real power lives, and where most of the confusion lives too, because a compound index does not help every query that mentions its fields. The rule that governs which queries it serves is the **prefix rule**, and it is the most important idea in this lesson.
+The simplest index covers one field. The moment your queries filter or sort on two fields together, you reach for a **compound index** - a single index that orders documents by several fields at once. Compound indexes are where most of the real power lives, and where most of the confusion lives too, because a compound index does not help every query that mentions its fields. The rule that governs which queries it serves is the **prefix rule**.
 
-Throughout we keep using the library `members` collection, each document carrying a `name`, a `joined` year, a `city`, and a `fines` count.
+Every output was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; the collection has 200 000 members over 10 cities and 26 join years, so `city: "Berlin"` matches 20 000 documents and `city + joined` matches 769. The lesson seeds its own data and defines the same one-line `plan()` helper as the previous lesson (stage chain, then results, index keys and documents read). Python, Go and Rust tabs were each run once in a scratch program.
+
+```js
+// mongosh/idx2-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {                       // stage chain, then keys/docs actually read
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    return { name: "m" + i, joined: NumberInt(2000 + (Math.floor(i / 10) % 26)), fines: i % 7, city: cities[i % 10] };
+  }), { ordered: false });
+}
+console.log("members:", db.members.countDocuments());
+```
+
+```text
+members: 200000
+```
 
 ## A single-field index
 
-You already met `createIndex` in the previous lesson. The direction — `1` for ascending, `-1` for descending — controls the sort order stored in the index. For a single-field index the direction rarely matters for filtering, because MongoDB can walk an index in either direction, but it matters for sorting. Here we index `fines` ascending:
+The direction - `1` ascending, `-1` descending - controls the stored order. For one field it rarely matters, since an index can be walked either way. Here `fines` ascending; both an equality filter and a top-N sort read almost nothing:
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ fines: 1 })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex({ fines: 1 });
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("fines", 1)])
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{Keys: bson.D{{Key: "fines", Value: 1}}},
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    coll.create_index(
-        IndexModel::builder().keys(doc! { "fines": 1 }).build(),
-    )
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-The server confirms the index by name:
-
-```json
-"fines_1"
+```js
+// mongosh/idx2-single.js
+console.log("createIndex ->", db.members.createIndex({ fines: 1 }));
+console.log("fines = 3 :", plan(db.members.find({ fines: 3 })));
+console.log("sort fines:", plan(db.members.find().sort({ fines: -1 }).limit(5)));
 ```
+
+```text
+createIndex -> fines_1
+fines = 3 : FETCH > IXSCAN(fines_1)  returned=28571 keys=28571 docs=28571
+sort fines: LIMIT > FETCH > IXSCAN(fines_1)  returned=5 keys=5 docs=5
+```
+
+`createIndex` returns the name string. `fines: 3` reads its 28 571 matching keys and documents; the `limit(5)` sort reads 5.
 
 ## A compound index over several fields
 
-A compound index lists more than one field, each with its own direction. The order of the fields in the index is not cosmetic — it defines the sort order, first by the first field, then by the second within each group of equal first values, and so on. Here we index `city` ascending and then `joined` descending, so members group by city and, inside each city, sort newest-first:
+A compound index lists more than one field, each with its own direction. The field order defines the sort order: first by the first field, then by the second within each group of equal first values. Here `city` ascending, then `joined` descending, so members group by city and, inside each city, newest first:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -83,12 +77,9 @@ A compound index lists more than one field, each with its own direction. The ord
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys: bson.D{{Key: "city", Value: 1}, {Key: "joined", Value: -1}},
-        },
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "city", Value: 1}, {Key: "joined", Value: -1}},
+    })
     if err != nil {
         return err
     }
@@ -97,93 +88,179 @@ A compound index lists more than one field, each with its own direction. The ord
   <TabItem label="Rust">
     ```rust
     coll.create_index(
-        IndexModel::builder()
-            .keys(doc! { "city": 1, "joined": -1 })
-            .build(),
+        IndexModel::builder().keys(doc! { "city": 1, "joined": -1 }).build(),
     )
     .await?;
     ```
   </TabItem>
 </Tabs>
 
-The generated name strings the fields and directions together:
+The name strings the fields and directions together: `city_1_joined_-1`.
 
-```json
-"city_1_joined_-1"
+## The prefix rule, measured
+
+A compound index can serve a query only through a **left-prefix** of its fields - the first field, or the first two, always starting from the left and never skipping. `city_1_joined_-1` has two usable prefixes: `city`, and `city` + `joined`. Five queries against it:
+
+```js
+// mongosh/idx2-compound.js
+console.log("createIndex ->", db.members.createIndex({ city: 1, joined: -1 }));
+const rows = [
+  ["{ city }",                       db.members.find({ city: "Berlin" })],
+  ["{ city, joined }",               db.members.find({ city: "Berlin", joined: 2023 })],
+  ["{ city, joined >= 2020 }",       db.members.find({ city: "Berlin", joined: { $gte: 2020 } })],
+  ["{ joined } (skips city)",        db.members.find({ joined: 2023 })],
+  ["{ joined }, hint the index",     db.members.find({ joined: 2023 }).hint({ city: 1, joined: -1 })],
+];
+rows.forEach(([label, cur]) => console.log(label.padEnd(28), plan(cur)));
+assert.match(plan(db.members.find({ joined: 2023 })), /^COLLSCAN/);
 ```
 
-## The prefix rule
+```text
+createIndex -> city_1_joined_-1
+{ city }                     FETCH > IXSCAN(city_1_joined_-1)  returned=20000 keys=20000 docs=20000
+{ city, joined }             FETCH > IXSCAN(city_1_joined_-1)  returned=769 keys=769 docs=769
+{ city, joined >= 2020 }     FETCH > IXSCAN(city_1_joined_-1)  returned=4614 keys=4614 docs=4614
+{ joined } (skips city)      COLLSCAN  returned=7690 keys=0 docs=200000
+{ joined }, hint the index   FETCH > IXSCAN(city_1_joined_-1)  returned=7690 keys=200000 docs=200000
+```
 
-A compound index can serve a query only when that query uses a **left-prefix** of the index fields — the first field, or the first two, or the first three, and so on, always starting from the left and never skipping. Our `city_1_joined_-1` index has two usable prefixes: `city` alone, and `city` together with `joined`.
+Read it row by row. `{ city }` reads 20 000 keys for 20 000 results and `{ city, joined }` reads exactly its 769. A range on the second field still rides the index (`joined >= 2020` reads only the matching keys inside the city block). But `{ joined }` alone is a **COLLSCAN of all 200 000 documents**: the index is sorted by city first, so the join years are scattered across it. Forcing the index with `hint()` proves it is not merely a planner preference - the server has to walk all 200 000 keys because MongoDB has no skip scan.
 
-So this index helps a query that filters on `city` only:
+The Node.js tab proves the same rule on its own 2 000-document collection: the `city` query reads keys equal to results, and the `joined`-only query scans all 2 000 documents.
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.find({ city: "Berlin" })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").find({ city: "Berlin" }).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    list(db.members.find({"city": "Berlin"}))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    cur, err := coll.Find(ctx, bson.M{"city": "Berlin"})
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let cur = coll.find(doc! { "city": "Berlin" }).await?;
-    ```
-  </TabItem>
-</Tabs>
+```js
+// app/idx2-compound.mjs
+const c = db.collection("members");
+await c.insertMany(Array.from({ length: 2000 }, (_, i) => ({ city: ["Berlin", "Oslo"][i % 2], joined: 2000 + (i % 26) })));
+const name = await c.createIndex({ city: 1, joined: -1 });
+const ex = async (f) => (await c.find(f).explain("executionStats")).executionStats;
+const a = await ex({ city: "Berlin" }), b = await ex({ joined: 2023 });
+console.log(name, "| city:", a.totalKeysExamined, "keys | joined only:", b.totalDocsExamined, "docs (COLLSCAN)");
+if (a.totalKeysExamined !== a.nReturned || b.totalDocsExamined !== 2000) throw new Error("prefix rule not observed");
+```
 
-And it helps a query on `city` and `joined` together. But it does **not** help a query that filters on `joined` alone, because `joined` is not a left-prefix — the index is sorted by `city` first, so the join years are scattered across the whole structure with no way to seek straight to them. A query on `joined` alone would need its own index, or a compound index that begins with `joined`.
+```text
+city_1_joined_-1 | city: 1000 keys | joined only: 2000 docs (COLLSCAN)
+```
 
-You can see in `explain` which prefix a query matched, which is the subject of a later lesson. For now, the takeaway is structural: read a compound index left to right, and a query can ride it only as far as the unbroken run of leading fields it touches.
+**In Compass:** the **Indexes** tab lists each index with its fields and directions in order, so you can read off the available prefixes at a glance, and it reports each index's size on disk.
 
-**In Compass:** the **Indexes** tab lists each index with its fields and directions in order, so you can read off the available prefixes at a glance, and it reports each index's size on disk to help you judge whether it is earning its keep.
+## Direction matters for sort, not for equality
+
+An index can be walked forwards or backwards, so the exact opposite of its declared order is free. What is not free is a *mixed* direction that the stored order cannot produce:
+
+```js
+// mongosh/idx2-sort.js
+const q = { city: "Berlin" };
+console.log("sort { joined: -1 }              :", plan(db.members.find(q).sort({ joined: -1 })));
+console.log("sort { joined: 1 } (reverse walk):", plan(db.members.find(q).sort({ joined: 1 })));
+console.log("no filter, sort { city: -1, joined: 1 }:", plan(db.members.find().sort({ city: -1, joined: 1 }).limit(5)));
+console.log("no filter, sort { city: 1, joined: 1 }:", plan(db.members.find().sort({ city: 1, joined: 1 }).limit(5)));
+assert.ok(!plan(db.members.find(q).sort({ joined: 1 })).includes("SORT"));
+assert.ok(plan(db.members.find().sort({ city: 1, joined: 1 }).limit(5)).includes("SORT"));
+```
+
+```text
+sort { joined: -1 }              : FETCH > IXSCAN(city_1_joined_-1)  returned=20000 keys=20000 docs=20000
+sort { joined: 1 } (reverse walk): FETCH > IXSCAN(city_1_joined_-1)  returned=20000 keys=20000 docs=20000
+no filter, sort { city: -1, joined: 1 }: LIMIT > FETCH > IXSCAN(city_1_joined_-1)  returned=5 keys=5 docs=5
+no filter, sort { city: 1, joined: 1 }: SORT > COLLSCAN  returned=5 keys=0 docs=200000
+```
+
+`{ joined: -1 }` and `{ joined: 1 }` (a reverse walk) both come straight off the index, as does the exact reverse `{ city: -1, joined: 1 }`. `{ city: 1, joined: 1 }` disagrees with the stored `joined: -1`, so the index cannot deliver the order: the plan is `SORT > COLLSCAN` and all 200 000 documents are read.
+
+## Redundant prefixes
+
+A separate `{ city: 1 }` next to `{ city: 1, joined: -1 }` duplicates the prefix. Create it and see what happens:
+
+```js
+// mongosh/idx2-redundant.js
+db.members.createIndex({ city: 1 });                    // a "separate" city index
+console.log("city query now :", plan(db.members.find({ city: "Berlin" })));
+for (let i = 0; i < 3; i++) db.members.find({ city: "Berlin" }).toArray();          // real executions, so $indexStats has something to count
+db.members.find({ city: "Berlin", joined: 2023 }).toArray();
+const s = db.members.stats().indexSizes, kb = (n) => Math.round(n / 1024);
+console.log("index sizes KB  :", { city_1: kb(s.city_1), city_1_joined_minus1: kb(s["city_1_joined_-1"]) });
+console.log("$indexStats ops :", db.members.aggregate([{ $indexStats: {} }, { $project: { _id: 0, name: 1, ops: "$accesses.ops" } }, { $sort: { name: 1 } }]).toArray());
+assert.ok(s.city_1 > 0);
+```
+
+```text
+city query now : FETCH > IXSCAN(city_1)  returned=20000 keys=20000 docs=20000
+index sizes KB  : { city_1: 1080, city_1_joined_minus1: 1404 }
+$indexStats ops : [
+  { name: '_id_', ops: Long('0') },
+  { name: 'city_1', ops: Long('3') },
+  { name: 'city_1_joined_-1', ops: Long('1') },
+  { name: 'fines_1', ops: Long('0') }
+]
+```
+
+The planner may pick the smaller single-field index for a city-only query, so it is not useless to that query - but it is the same work the compound index already does, and it costs disk, memory and a write on every insert. Use `$indexStats` to see which index actually earns its keep, and drop the duplicate if the compound one is fast enough.
 
 ## Tips and gotchas
 
-- One well-chosen compound index can replace several single-field ones. An index on `{ city: 1, joined: -1 }` already covers queries on `city` alone, so a separate `{ city: 1 }` index would be redundant.
-- Field order in a compound index is a design decision, not a detail. Reversing it changes which queries the index can serve.
-- Direction matters for sorting, not for simple equality matches. An index can be read forwards or backwards, so `{ joined: 1 }` and `{ joined: -1 }` both serve a plain equality filter on `joined` equally well; the difference shows up when you sort.
-- Skipping a leading field breaks the prefix. A query on the second field alone cannot use the index, no matter how selective that field is.
+- One compound index can replace several single-field ones: `{ city: 1, joined: -1 }` already covers city-only queries.
+- Field order is a design decision. Reversing it changes which queries the index serves: `{ joined: 2023 }` was a COLLSCAN on `(city, joined)`.
+- Direction matters for sorting, not equality. The exact reverse of the stored order is free; a mixed direction cannot use the index (`SORT > COLLSCAN`).
+- Skipping a leading field breaks the prefix, however selective the later field is.
 
 <Callout title="Read a compound index left to right">
 A compound index serves any query that uses an unbroken run of its leading fields, starting from the first. The moment a query skips the leftmost field, the index can no longer seek for it.
 </Callout>
 
+## Reading AI-generated code
+
+Asked to "index the members query on city and join year", an assistant often writes one index per field:
+
+<SpotTheBug lang="js" code={`// AI comment: "one index per field - MongoDB combines them for multi-field queries"
+await members.createIndex({ city: 1 });
+await members.createIndex({ joined: 1 });
+const rows = await members.find({ city: "Berlin", joined: 2023 }).toArray();`}>
+
+The comment describes index intersection as if it were guaranteed. In the run below the planner picked a single index and filtered the rest from fetched documents, so it read far more keys and documents than the 769 results. One compound index turns that into keys = documents = results:
+
+```js
+// mongosh/idx2-bug.js
+db.members.dropIndexes();                               // start from _id only
+db.members.createIndex({ city: 1 });
+db.members.createIndex({ joined: 1 });                 // AI: "one index per field, MongoDB combines them"
+console.log("two single indexes:", plan(db.members.find({ city: "Berlin", joined: 2023 })));
+db.members.createIndex({ city: 1, joined: 1 });        // the fix: one compound index
+console.log("one compound index:", plan(db.members.find({ city: "Berlin", joined: 2023 })));
+```
+
+```text
+two single indexes: FETCH > IXSCAN(joined_1)  returned=769 keys=7690 docs=7690
+one compound index: FETCH > IXSCAN(city_1_joined_1)  returned=769 keys=769 docs=769
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A compound index is a phone book sorted by last name, then first name. You can find every Smith, and every John Smith, quickly; you cannot find every John without reading the whole book. The stored order is the contract - the prefix rule and the sort rules are both consequences of it.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Single-field index | Simple, exactly covers one query shape, easy to maintain | Only covers a query that filters/sorts on that one field |
-| Compound index | Can cover several query shapes at once if the field order matches the left-prefix | Bigger, slower to write, and useless if the field order is wrong |
+| Single-field index | Simple; covers one query shape | Two single indexes did not combine into a seek for a two-field query |
+| Compound index | One index serves several shapes through its prefixes and its sort order | Larger, slower to write; useless to a query that skips the first field |
+| Extra prefix index (`{ city: 1 }`) | Smaller, may be picked for city-only queries | Duplicates work the compound index already does; pays writes |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming a compound index helps a query filtering on any field within it** — a compound index only serves left-prefixes. A query that filters on the second field alone, skipping the first, cannot seek at all.
-- **Creating a single-field index that duplicates the prefix of an existing compound index** — if `{ city: 1, joined: -1 }` already exists, a separate `{ city: 1 }` index is completely redundant, wasting space and write cost for nothing.
-- **Reversing the field order in a compound index without checking the effect on other queries using it** — field order is a design decision. Change it, and a query shape that used to seek can suddenly become a COLLSCAN.
+- **"A compound index helps any query on any of its fields."** - `{ joined: 2023 }` scanned all 200 000 documents; even hinted, it read all 200 000 keys.
+- **"Separate indexes on each field combine automatically."** - the planner used one and filtered the rest.
+- **"The direction of every field must match the sort."** - the exact reverse is free; only mixed directions defeat the index.
+- **"A separate single-field index on the first field is needed."** - the compound index already has that prefix.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An Airbnb-style booking system** — uses a compound index on `{ city: 1, checkIn: 1, price: 1 }` to support filtering by city, sorting by check-in date, and filtering by price range with a single index, instead of three separate single-field indexes.
->
-> **An analytics team querying many shapes on the same collection** — ran into a compound index designed for one dashboard not helping another team's query, because the field order did not match the needed left-prefix, so they had to add another index instead of relying on the existing one.
+> The MongoDB manual's compound-index page states the rule this lesson measured: "Compound indexes support queries on all fields included in the index prefix", and suggests one when "your application repeatedly runs a query that contains multiple fields" ([Compound Indexes](https://www.mongodb.com/docs/manual/core/indexes/index-types/index-compound/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the compound `createIndex` returned `city_1_joined_-1`) but they are not executed by the course's automated checker._
 
 export const quizCompound = [
   {
@@ -195,6 +272,7 @@ export const quizCompound = [
       'No query, because compound indexes need all fields',
     ],
     answer: 1,
+    explain: '{ city } read exactly 20 000 keys for 20 000 results; { joined } alone was a COLLSCAN over 200 000 documents.',
   },
   {
     q: 'What does the prefix rule say about a compound index?',
@@ -205,16 +283,40 @@ export const quizCompound = [
       'It serves queries that use its last field first',
     ],
     answer: 1,
+    explain: 'city and (city, joined) sought directly; joined alone did not, and forcing the index with hint() read all 200 000 keys.',
   },
   {
-    q: 'Why does field order matter in a compound index?',
+    q: 'An index is { city: 1, joined: -1 }. Which sort on a Berlin-only query needs no SORT stage?',
     options: [
-      'It changes the index name only',
-      'It defines the sort order and therefore which query prefixes the index can serve',
-      'It has no effect; MongoDB reorders the fields automatically',
-      'It only affects how the index is displayed in Compass',
+      'Only { joined: -1 }',
+      'Both { joined: -1 } and { joined: 1 }, because the index can be walked backwards',
+      'Neither',
+      'Only { joined: 1 }',
     ],
     answer: 1,
+    explain: 'Both plans were FETCH > IXSCAN with no SORT; a mixed-direction sort such as { city: 1, joined: 1 } could not use the index and became SORT > COLLSCAN over 200 000 documents.',
+  },
+  {
+    q: 'You create separate single-field indexes on city and joined for a query on both. What did the run show?',
+    options: [
+      'Both indexes were combined for a perfect seek',
+      'The planner used one index and filtered the rest from fetched documents (more keys and docs than results)',
+      'The query was rejected',
+      'A COLLSCAN',
+    ],
+    answer: 1,
+    explain: 'Two single indexes: keys and docs well above the 769 results; the compound index read keys equal to docs equal to results.',
+  },
+  {
+    q: 'Why is a separate { city: 1 } index redundant next to { city: 1, joined: -1 }?',
+    options: [
+      'The compound index already serves every city-only query',
+      'MongoDB forbids it',
+      'It is not redundant, it is always faster',
+      'The compound index cannot serve city queries',
+    ],
+    answer: 0,
+    explain: 'It is a smaller index, so the planner may prefer it, but it duplicates the prefix: $indexStats showed which one served the query, and the other only costs writes and memory.',
   },
 ]
 
