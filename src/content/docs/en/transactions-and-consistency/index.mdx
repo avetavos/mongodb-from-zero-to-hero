@@ -30,6 +30,10 @@ export const overview = `flowchart TD
 
 <Mermaid code={overview} title="The decision path: single-document atomicity by default, transactions only when several documents must change as one unit, with concerns tuning durability and visibility" />
 
+<Callout title="Precondition: run this module on a replica set">
+Transactions and change streams do not work on a standalone `mongod`: the real errors are `MongoServerError: This MongoDB deployment does not support retryable writes` (transaction) and `MongoServerError 40573: The $changeStream stage is only supported on replica sets or mongos` (change stream). A one-node replica set is enough — `mongod --replSet rs0` plus one `rs.initiate()`, shown in the multi-document transactions lesson. The lessons' outputs were captured on mongo 8.3.11 (one-node set; concern/failover proofs on a throwaway three-node set), mongosh 2.11.1 and Node driver 7.7.0.
+</Callout>
+
 ## What this module covers
 
 - **Single-document atomicity** — why any change to one document, however deep, is all-or-nothing, and how to model data so this covers most of your needs.
@@ -41,26 +45,32 @@ export const overview = `flowchart TD
 The most common consistency mistake is reaching for a multi-document transaction when a better document design would have made one atomic write enough. Always ask whether the data that must change together could live together first.
 </Callout>
 
+## What the lessons proved
+
+- **Single-document atomicity** — a failing update changed nothing; 100 concurrent read-modify-writes lost most increments while `$inc` did not; `updateMany` was observed half-applied.
+- **Transactions** — rollback, `WriteConflict` with the retry label, the 60 s lifetime, and a forgotten `{ session }` that silently committed a debit.
+- **Concerns** — the default write concern is already `w: "majority"`; a `w: 1` write acknowledged by a partitioned primary was rolled back; a `w: 3` timeout still applied the write.
+- **Change streams** — the Node driver opens lazily and misses an insert made right after `watch()`; real resume tokens are 188 hex characters.
+
+## Mental Model
+
+One document is the unit of atomicity and costs nothing. Everything bigger is a sequence of atomic steps you must either fold into one document, guard in a filter, or wrap in a transaction. Concerns are two independent dials on top: write concern is what the *writer* is told, read concern is what the *reader* sees.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Design documents so single-document atomicity covers the need | Atomicity for free, no session or commit overhead, lowest latency | Requires upfront schema thought; does not fit data that truly must stay independent entities |
-| Multi-document transaction (full ACID) | Guarantees correctness across documents and collections | Higher latency, requires a replica set, and risks aborting under a write conflict |
-| Write concern `w: "majority"` | A write survives a failover because most members have confirmed it | Slower than `w: 1`, since it waits for replication to other members |
-| Read concern `majority` | No dirty reads, no chance of seeing data that later gets rolled back | Data can lag slightly compared with `local` |
+| Design documents so single-document atomicity covers the need | Atomicity for free, no session or commit overhead, lowest latency (about half a transaction's time in the measured run) | Requires upfront schema thought; does not fit data that truly must stay independent entities |
+| Multi-document transaction (full ACID) | Guarantees correctness across documents and collections | Needs a replica set, retries on `WriteConflict`, 60 s limit |
+| Write concern `w: "majority"` (the default) | An acknowledged write survives a failover | Waits for replication; times out if a majority is unreachable |
+| Read concern `majority` | No reads of data that can be rolled back | Lags `local` and your own `w: 1` writes |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Reaching for a transaction the moment an operation touches more than one document** — without first asking whether redesigning the documents so the data that changes together lives together would remove the need for a transaction entirely.
-- **Conflating durability with visibility** — treating write concern and read concern as the same knob, when write concern controls how well a write survives losing members, and read concern controls how fresh and committed the data you read is. They are different axes.
-- **Setting the strongest possible concern as the default for every operation** — without differentiating by use case, so an operation that could tolerate more uncertainty pays latency for nothing, when it should use the weakest guarantee that is still correct for that job.
-
-> 💡 Real-world example
->
-> **A typical bank or fintech system** — uses a multi-document transaction for transfers between accounts, so debiting the source account and crediting the destination account always commit together, with no way for money to disappear or appear out of nowhere in between.
->
-> **A typical digital asset exchange platform** — combines both a multi-document transaction and majority write concern when handling digital balances, because a consistency error in a financial system costs far more than the added latency.
+- **"Reach for a transaction whenever more than one document is touched."** — first ask whether the data that changes together can live together; the single-document write was the cheapest in every measurement.
+- **"Write concern and read concern are the same knob."** — durability for the writer versus visibility for the reader; they are independent.
+- **"Set the strongest concern everywhere."** — the default is already majority; the deliberate, risky choice is lowering it.
+- **"An acknowledged write is safe."** — only if the concern covers a majority; a `w: 1` acknowledgement was rolled back after a partition.
 
 export const quizIndex = [
   {
@@ -72,6 +82,7 @@ export const quizIndex = [
       'An entire database',
     ],
     answer: 1,
+    explain: 'A failing multi-field update left the document untouched, and a concurrent reader saw an updateMany half-applied: atomicity ends at the document.',
   },
   {
     q: 'When should you reach for a multi-document transaction?',
@@ -82,6 +93,7 @@ export const quizIndex = [
       'Never, because MongoDB does not support them',
     ],
     answer: 1,
+    explain: 'The single-document write was the cheapest in the measured run and needs no session or retry loop.',
   },
   {
     q: 'What does a write concern control?',
@@ -92,6 +104,24 @@ export const quizIndex = [
       'Whether an index is used',
     ],
     answer: 1,
+    explain: 'w and j decide what the writer is told; read concern decides what a reader sees.',
+  },
+  {
+    q: 'You call session.withTransaction on a standalone mongod started without --replSet. What happens?',
+    options: [
+      'It works normally',
+      'It fails with "This MongoDB deployment does not support retryable writes"',
+      'It runs without atomicity',
+      'It works only for reads',
+    ],
+    answer: 1,
+    explain: 'Real output from a standalone mongo:8.3.11 container; a one-node replica set fixes it.',
+  },
+  {
+    q: 'What is the implicit default write concern on MongoDB 8 for a normal three-node set?',
+    options: ['w: 0', 'w: 1', 'w: "majority"', 'w: 3'],
+    answer: 2,
+    explain: 'getDefaultRWConcern returned { w: "majority", wtimeout: 0 }.',
   },
 ]
 

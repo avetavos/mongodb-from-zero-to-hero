@@ -30,6 +30,10 @@ export const overview = `flowchart TD
 
 <Mermaid code={overview} title="เส้นทางการตัดสินใจ: single-document atomicity เป็นค่าเริ่มต้น ใช้ transaction เฉพาะเมื่อหลาย document ต้องเปลี่ยนเป็นหน่วยเดียว โดยมี concern ปรับ durability และ visibility" />
 
+<Callout title="เงื่อนไขก่อน: รันโมดูลนี้บน replica set">
+transaction และ change stream ใช้ไม่ได้บน `mongod` แบบ standalone: error จริงคือ `MongoServerError: This MongoDB deployment does not support retryable writes` (transaction) และ `MongoServerError 40573: The $changeStream stage is only supported on replica sets or mongos` (change stream) replica set โหนดเดียวก็เพียงพอ — `mongod --replSet rs0` บวก `rs.initiate()` หนึ่งครั้ง ซึ่งแสดงในบท multi-document transactions output ของบทเรียนจับจาก mongo 8.3.11 (เซตโหนดเดียว; หลักฐานเรื่อง concern/failover บนเซตสามโหนดชั่วคราว), mongosh 2.11.1 และ Node driver 7.7.0
+</Callout>
+
 ## โมดูลนี้ครอบคลุมอะไรบ้าง
 
 - **Single-document atomicity** — ทำไมการเปลี่ยนแปลงใด ๆ ในหนึ่ง document ลึกแค่ไหนก็ตาม จึงเป็นแบบ all-or-nothing และวิธีออกแบบโมเดลข้อมูลให้สิ่งนี้ครอบคลุมความต้องการส่วนใหญ่ของคุณ
@@ -41,57 +45,63 @@ export const overview = `flowchart TD
 ความผิดพลาดเรื่องความสอดคล้องที่พบบ่อยที่สุดคือการคว้า multi-document transaction ทั้งที่การออกแบบ document ที่ดีกว่าจะทำให้การเขียน atomic ครั้งเดียวก็เพียงพอแล้ว ให้ถามก่อนเสมอว่าข้อมูลที่ต้องเปลี่ยนแปลงไปด้วยกันสามารถอยู่ด้วยกันได้หรือไม่
 </Callout>
 
+## บทเรียนพิสูจน์อะไรไว้บ้าง
+
+- **Single-document atomicity** — update ที่ล้มเหลวไม่เปลี่ยนอะไรเลย; read-modify-write พร้อมกัน 100 ครั้งทำให้ increment ส่วนใหญ่หายขณะที่ `$inc` ไม่หาย; `updateMany` ถูกสังเกตเห็นในสภาพที่ทำไปครึ่งทาง
+- **Transaction** — rollback, `WriteConflict` พร้อม retry label, อายุ 60 วินาที และการลืม `{ session }` ที่ทำให้การหักเงิน commit ไปเงียบ ๆ
+- **Concern** — write concern เริ่มต้นคือ `w: "majority"` อยู่แล้ว; การเขียน `w: 1` ที่ primary ที่ถูก partition acknowledge ไปแล้วถูก rollback; timeout ของ `w: 3` ยังคงนำการเขียนไปใช้
+- **Change stream** — Node driver เปิดแบบ lazy และพลาด insert ที่ทำทันทีหลัง `watch()`; resume token จริงยาว 188 ตัวอักษร hex
+
+## Mental Model
+
+หนึ่ง document คือหน่วยของ atomicity และไม่มีค่าใช้จ่าย อะไรที่ใหญ่กว่านั้นคือลำดับของขั้นตอน atomic ที่คุณต้องรวมเป็น document เดียว, guard ใน filter หรือห่อด้วย transaction concern คือสองปุ่มอิสระซ้อนทับอยู่: write concern คือสิ่งที่ *ผู้เขียน* ถูกบอก, read concern คือสิ่งที่ *ผู้อ่าน* เห็น
+
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| ออกแบบ document ให้ single-document atomicity ครอบคลุม | atomic ฟรี ไม่มี session หรือ commit overhead, latency ต่ำสุด | ต้องคิดเรื่อง schema ล่วงหน้า ไม่เหมาะกับข้อมูลที่ต้องเป็น entity อิสระต่อกันจริง ๆ |
-| multi-document transaction (ACID เต็มรูปแบบ) | รับประกันความถูกต้องข้าม document และ collection | latency สูงขึ้น ต้องใช้ replica set และเสี่ยง abort ภายใต้ write conflict |
-| write concern `w: "majority"` | การเขียนรอดจาก failover เพราะสมาชิกส่วนใหญ่ยืนยันแล้ว | ช้ากว่า `w: 1` เพราะต้องรอ replication ไปยังสมาชิกตัวอื่น |
-| read concern `majority` | ไม่มี dirty read ไม่มีทางเห็นข้อมูลที่ถูก roll back ภายหลัง | ข้อมูลอาจตามหลังเล็กน้อยเมื่อเทียบกับ `local` |
+| ออกแบบ document ให้ single-document atomicity ครอบคลุมความต้องการ | atomicity ฟรี ไม่มี session หรือ commit latency ต่ำที่สุด (ราวครึ่งหนึ่งของเวลา transaction ในการรันที่วัด) | ต้องคิด schema ล่วงหน้า; ไม่เหมาะกับข้อมูลที่ต้องเป็น entity อิสระจริง ๆ |
+| Multi-document transaction (ACID เต็ม) | รับประกันความถูกต้องข้าม document และ collection | ต้องใช้ replica set, retry เมื่อ `WriteConflict`, ขีดจำกัด 60 วินาที |
+| Write concern `w: "majority"` (ค่าเริ่มต้น) | การเขียนที่ acknowledge แล้วรอด failover | รอ replication; timeout ถ้าเข้าถึง majority ไม่ได้ |
+| Read concern `majority` | ไม่อ่านข้อมูลที่อาจถูก rollback | ตามหลัง `local` และการเขียน `w: 1` ของคุณเอง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คว้า transaction ทันทีที่ operation แตะมากกว่าหนึ่ง document** — โดยไม่ถามก่อนว่าการออกแบบ document ใหม่ให้ข้อมูลที่เปลี่ยนแปลงไปด้วยกันอยู่ใน document เดียวจะตัดความจำเป็นของ transaction ทิ้งไปได้เลยหรือไม่
-- **ปนกันระหว่าง durability กับ visibility** — คิดว่า write concern กับ read concern คือปุ่มเดียวกัน ทั้งที่ write concern ควบคุมว่าการเขียนทนต่อการสูญเสียสมาชิกได้แค่ไหน ส่วน read concern ควบคุมว่าข้อมูลที่อ่านสดและ commit แล้วแค่ไหน คนละแกนกัน
-- **ตั้งค่า concern ที่แข็งแกร่งที่สุดไว้เป็นค่าเริ่มต้นทุก operation** — โดยไม่แยกตาม use case ทำให้ operation ที่ทนต่อความไม่แน่นอนได้เสีย latency ไปฟรี ๆ ทั้งที่ควรเลือกการรับประกันที่อ่อนที่สุดแต่ยังถูกต้องสำหรับงานนั้น
-
-> 💡 ตัวอย่างจากของจริง
->
-> **ธนาคาร/fintech ทั่วไป** — ใช้ multi-document transaction สำหรับการโอนเงินระหว่างบัญชี เพื่อให้การหักบัญชีต้นทางและการเพิ่มบัญชีปลายทาง commit พร้อมกันเสมอ ไม่มีทางที่เงินจะหายหรืองอกระหว่างทาง
->
-> **แพลตฟอร์มแลกเปลี่ยนสินทรัพย์ดิจิทัลทั่วไป** — ใช้ทั้ง multi-document transaction และ write concern majority ร่วมกันเมื่อจัดการยอดเงินดิจิทัล เพราะข้อผิดพลาดด้าน consistency ในระบบการเงินมีต้นทุนสูงกว่า latency ที่เพิ่มขึ้นมาก
+- **"คว้า transaction ทุกครั้งที่แตะมากกว่าหนึ่ง document"** — ถามก่อนว่าข้อมูลที่เปลี่ยนพร้อมกันอยู่ด้วยกันได้ไหม; การเขียน document เดียวถูกที่สุดในทุกการวัด
+- **"write concern กับ read concern คือปุ่มเดียวกัน"** — ความคงทนสำหรับผู้เขียนเทียบกับการมองเห็นสำหรับผู้อ่าน; อิสระต่อกัน
+- **"ตั้ง concern แรงสุดทุกที่"** — ค่าเริ่มต้นเป็น majority อยู่แล้ว; การตัดสินใจที่ตั้งใจและเสี่ยงคือการลดมัน
+- **"การเขียนที่ acknowledge แล้วปลอดภัย"** — เฉพาะเมื่อ concern ครอบคลุม majority; acknowledgement ของ `w: 1` ถูก rollback หลัง partition
 
 export const quizIndex = [
   {
     q: 'หน่วยของ atomicity ใน MongoDB โดยค่าเริ่มต้นคืออะไร?',
-    options: [
-      'collection ทั้งหมด',
-      'document หนึ่งฉบับ ไม่ว่าจะ nested ลึกแค่ไหน',
-      'ชุด document ไม่เกิน 100 ฉบับ',
-      'ฐานข้อมูลทั้งหมด',
-    ],
+    options: ['ทั้ง collection', 'document เดียว ลึกแค่ไหนก็ตาม', 'batch ที่มีสูงสุด 100 document', 'ทั้งฐานข้อมูล'],
     answer: 1,
+    explain: 'update หลายฟิลด์ที่ล้มเหลวทิ้ง document ไว้ไม่แตะต้อง และ reader ที่ทำพร้อมกันเห็น updateMany ที่ทำไปครึ่งทาง: atomicity จบที่ขอบเขตของ document',
   },
   {
-    q: 'คุณควรคว้า multi-document transaction เมื่อไหร่?',
-    options: [
-      'สำหรับทุกการเขียน เป็นนิสัยเพื่อความปลอดภัย',
-      'เฉพาะเมื่อหลาย document หรือหลาย collection ต้องเปลี่ยนแปลงเป็นหน่วยเดียว',
-      'ทุกครั้งที่คุณอัปเดต nested array',
-      'ไม่มีทาง เพราะ MongoDB ไม่รองรับ',
-    ],
+    q: 'เมื่อไหร่ควรใช้ multi-document transaction?',
+    options: ['ทุกการเขียน เป็นนิสัยเพื่อความปลอดภัย', 'เฉพาะเมื่อหลาย document หรือ collection ต้องเปลี่ยนเป็นหน่วยเดียว', 'ทุกครั้งที่อัปเดต array ซ้อน', 'ไม่เคย เพราะ MongoDB ไม่รองรับ'],
     answer: 1,
+    explain: 'การเขียน document เดียวถูกที่สุดในการรันที่วัด และไม่ต้องมี session หรือลูป retry',
   },
   {
     q: 'write concern ควบคุมอะไร?',
-    options: [
-      'จะส่ง field ไหนกลับไปให้ reader บ้าง',
-      'สมาชิกกี่ตัวต้องตอบรับการเขียน และ journal durability',
-      'ลำดับของ document ใน collection',
-      'ว่ามีการใช้ index หรือไม่',
-    ],
+    options: ['ฟิลด์ไหนถูกส่งกลับให้ผู้อ่าน', 'สมาชิกกี่ตัวต้อง acknowledge การเขียน และความคงทนของ journal', 'ลำดับของ document ใน collection', 'จะใช้ index หรือไม่'],
     answer: 1,
+    explain: 'w และ j ตัดสินว่าผู้เขียนถูกบอกอะไร; read concern ตัดสินว่าผู้อ่านเห็นอะไร',
+  },
+  {
+    q: 'คุณเรียก session.withTransaction บน mongod แบบ standalone ที่สตาร์ทโดยไม่มี --replSet เกิดอะไรขึ้น?',
+    options: ['ทำงานปกติ', 'ล้มด้วย "This MongoDB deployment does not support retryable writes"', 'รันโดยไม่มี atomicity', 'ใช้ได้เฉพาะการอ่าน'],
+    answer: 1,
+    explain: 'output จริงจาก container mongo:8.3.11 แบบ standalone; replica set โหนดเดียวแก้ได้',
+  },
+  {
+    q: 'write concern เริ่มต้นแบบแฝงบน MongoDB 8 สำหรับเซตสามโหนดปกติคืออะไร?',
+    options: ['w: 0', 'w: 1', 'w: "majority"', 'w: 3'],
+    answer: 2,
+    explain: 'getDefaultRWConcern คืน { w: "majority", wtimeout: 0 }',
   },
 ]
 
