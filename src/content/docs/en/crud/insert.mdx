@@ -1,6 +1,6 @@
 ---
 title: Inserting documents
-description: Add one or many documents with insertOne and insertMany, and meet the automatic _id field.
+description: Add one or many documents with insertOne and insertMany, meet the automatic _id field, and see the real acknowledgements, duplicate-key errors, and ordered versus unordered failure behaviour.
 sidebar:
   order: 2
 ---
@@ -8,30 +8,37 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Inserting is the gentlest operation in MongoDB: you hand the database a document, it stores it, and it tells you what it stored. There is no schema to define first and no table columns to line up against — if the document is valid JSON-like data, it goes in. That freedom is exactly why a tiny bit of discipline around the `_id` field pays off, which is the one piece of bookkeeping every insert involves.
+Inserting is the gentlest operation in MongoDB: you hand the database a document, it stores it, and it tells you what it stored. There is no schema to define first and no table columns to line up against - if the document is valid JSON-like data, it goes in. That freedom is exactly why a tiny bit of discipline around the `_id` field pays off, which is the one piece of bookkeeping every insert involves.
 
-We will keep building our imaginary library. Each member is a document, and in this lesson we add them to a collection called `members`.
+We keep building our imaginary library. Each member is a document, and in this lesson we add them to a collection called `members`. Every output below was captured on mongo 8.3.11 with mongosh 2.11.1 and Node driver 7.7.0 (Python, Go and Rust tabs were each run once in a scratch program on the same server); ids and timings will differ on your machine.
 
 ## Inserting a single document
 
-`insertOne` takes exactly one document and stores it. If you do not supply an `_id`, MongoDB generates one for you as an **ObjectId** — a 12-byte value that is unique across the collection and even encodes the creation time. That generated id is the primary key of the document.
+`insertOne` takes exactly one document and stores it. If you do not supply an `_id`, MongoDB generates one for you as an **ObjectId** - a 12-byte value that is unique across the collection and even encodes the creation time. That generated id is the primary key of the document.
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertOne({ name: "Grace", joined: 2024, fines: 0 })
+    // mongosh/insert-one.js
+    const res = db.members.insertOne({ name: "Grace", joined: 2024, fines: 0 });
+    console.log(res);
+    console.log(db.members.findOne({ _id: res.insertedId }));
+    assert.strictEqual(res.acknowledged, true);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/insert-one.mjs
     const res = await db.collection("members").insertOne({
       name: "Grace",
       joined: 2024,
       fines: 0,
     });
-    console.log(res.insertedId);
+    console.log(res);
+    if (!res.acknowledged) throw new Error("not acknowledged");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -59,24 +66,28 @@ We will keep building our imaginary library. Each member is a document, and in t
   </TabItem>
 </Tabs>
 
-The acknowledgement tells you the operation succeeded and hands back the id that was assigned. In the shell it looks like this:
+The acknowledgement tells you the operation succeeded and hands back the id that was assigned. What each tab really printed (ObjectIds are printed differently by every driver - the same 12 bytes):
 
-```json
-{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1d0" }
+```text
+mongosh  { acknowledged: true, insertedId: ObjectId('6abca7761ca8500949f70bb3') }
+Node     { acknowledged: true, insertedId: new ObjectId('6abca7762e488e625dd180ed') }
+Python   6abca733ec5eb1df4567945d
+Go       ObjectID("6abca735ba87132b4c842253")
+Rust     ObjectId("6abca7370cacf93463d138ad")
 ```
 
-And the document now sitting in the collection looks like this — the `_id` is the only thing you did not type yourself:
+And the document now sitting in the collection (`findOne` in the shell) - the `_id` is the only thing you did not type yourself:
 
-```json
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
-  "name": "Grace",
-  "joined": 2024,
-  "fines": 0
+  _id: ObjectId('6abca7761ca8500949f70bb3'),
+  name: 'Grace',
+  joined: 2024,
+  fines: 0
 }
 ```
 
-**In Compass:** open the `members` collection, click the green **ADD DATA** button, choose **Insert Document**, paste your JSON without an `_id`, and Compass fills the id in for you when you save.
+**In Compass:** open the `members` collection, use the **Add Data** drop-down and choose **Insert Document** (Compass documentation, fetched 2026-09-30, [mongodb.com/docs/compass/current/documents/insert](https://www.mongodb.com/docs/compass/current/documents/insert/)); pick Shell Syntax, Field-by-Field or JSON mode; if you do not specify `_id`, Compass generates an ObjectId.
 
 ## Inserting many at once
 
@@ -85,21 +96,26 @@ When you have a batch of documents, `insertMany` sends them in one round trip in
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertMany([
+    // mongosh/insert-many.js
+    const res = db.members.insertMany([
       { name: "Linus", joined: 2023, fines: 2 },
       { name: "Margaret", joined: 2025, fines: 0 },
       { name: "Edsger", joined: 2022, fines: 5 }
-    ])
+    ]);
+    console.log(res);
+    assert.strictEqual(Object.keys(res.insertedIds).length, 3);   // the shell result has no insertedCount
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/insert-many.mjs
     const res = await db.collection("members").insertMany([
       { name: "Linus", joined: 2023, fines: 2 },
       { name: "Margaret", joined: 2025, fines: 0 },
       { name: "Edsger", joined: 2022, fines: 5 },
     ]);
-    console.log(res.insertedCount);
+    console.log(res);
+    if (res.insertedCount !== 3) throw new Error("expected 3");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -139,48 +155,166 @@ When you have a batch of documents, `insertMany` sends them in one round trip in
   </TabItem>
 </Tabs>
 
-The acknowledgement maps each array index to the id that was generated for it:
+The acknowledgement maps each array index to the id that was generated for it. Two real differences worth knowing: the **shell result carries no `insertedCount`** (count the keys of `insertedIds`), while the **Node result does**:
 
-```json
+```text
+mongosh
 {
-  "acknowledged": true,
-  "insertedIds": {
-    "0": "65f0b3d4e4b0a1c2e4b0a1d1",
-    "1": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "2": "65f0b3d4e4b0a1c2e4b0a1d3"
+  acknowledged: true,
+  insertedIds: {
+    '0': ObjectId('6abca7761ca8500949f70bb4'),
+    '1': ObjectId('6abca7761ca8500949f70bb5'),
+    '2': ObjectId('6abca7761ca8500949f70bb6')
   }
 }
+
+Node
+{
+  acknowledged: true,
+  insertedCount: 3,
+  insertedIds: {
+    '0': new ObjectId('6abca77646b3ce4be9c0507f'),
+    '1': new ObjectId('6abca77646b3ce4be9c05080'),
+    '2': new ObjectId('6abca77646b3ce4be9c05081')
+  }
+}
+
+Python, Go, Rust: 3   (the length of the ids list, the number we sent)
 ```
+
+## When an insert fails: duplicate `_id`
+
+`_id` must be unique. Insert a second document with an id that exists and you get a **duplicate key** error, code `11000`, with the offending value in the message:
+
+```js
+// mongosh/insert-duplicate.js
+db.members.drop();
+const first = db.members.insertOne({ name: "Grace" });
+let err;
+try { db.members.insertOne({ _id: first.insertedId, name: "Impostor" }); } catch (e) { err = e; }
+console.log(err.name, err.code);
+console.log(err.message);
+assert.strictEqual(err.code, 11000);
+assert.strictEqual(db.members.countDocuments(), 1);   // the original is untouched
+```
+
+```text
+MongoServerError 11000
+E11000 duplicate key error collection: b1_run_insert.members index: _id_ dup key: { _id: ObjectId('6abca78db69a4386bb444676') }
+```
+
+The Node driver raises the same `MongoServerError` with `code: 11000` and also exposes the failing key as `err.keyValue` (`{ _id: new ObjectId('...') }`).
+
+## Ordered vs unordered `insertMany`
+
+`insertMany` is **ordered** by default: it stops at the first failing document. With `{ ordered: false }` it tries every document and reports the failures at the end. We proved both with the same batch - document `_id: 2` already exists, so the middle document of three collides:
+
+```js
+// mongosh/insert-ordered.js
+db.members.drop();
+db.members.insertOne({ _id: 2, name: "Existing" });
+const batch = () => [{ _id: 1, name: "A" }, { _id: 2, name: "B (duplicate)" }, { _id: 3, name: "C" }];
+
+let e1;
+try { db.members.insertMany(batch()); } catch (e) { e1 = e; }
+console.log("ordered  :", e1.name, e1.code, "inserted", e1.result.insertedCount, "failed at index", e1.writeErrors[0].index);
+console.log(db.members.find({}, { name: 1 }).sort({ _id: 1 }).toArray());
+
+db.members.deleteMany({ _id: { $ne: 2 } });
+let e2;
+try { db.members.insertMany(batch(), { ordered: false }); } catch (e) { e2 = e; }
+console.log("unordered:", e2.name, e2.code, "inserted", e2.result.insertedCount, "failed at index", e2.writeErrors.map((w) => w.index));
+console.log(db.members.find({}, { name: 1 }).sort({ _id: 1 }).toArray());
+assert.strictEqual(e1.result.insertedCount, 1);
+assert.strictEqual(e2.result.insertedCount, 2);
+```
+
+```text
+ordered  : MongoBulkWriteError 11000 inserted 1 failed at index 1
+[ { _id: 1, name: 'A' }, { _id: 2, name: 'Existing' } ]
+unordered: MongoBulkWriteError 11000 inserted 2 failed at index [ 1 ]
+[
+  { _id: 1, name: 'A' },
+  { _id: 2, name: 'Existing' },
+  { _id: 3, name: 'C' }
+]
+```
+
+Ordered inserted **1** document (`A`), then stopped: `C` never got in. Unordered inserted **2** (`A` and `C`) and reported the single failure at index 1. Either way the error is a `MongoBulkWriteError` (code `11000`), and the count of what did get in lives in `err.result.insertedCount` (in Node also `err.insertedCount`). **Neither mode rolls back what it already inserted** - there is no all-or-nothing here without a transaction.
 
 ## Tips and gotchas
 
-- You may supply your own `_id` (a string, number, or any value) instead of letting MongoDB generate an ObjectId — but it must be unique. Inserting a document whose `_id` already exists fails with a **duplicate key** error.
-- `insertMany` is **ordered** by default: it stops at the first failing document, so documents after a duplicate-id error never get inserted. Pass an unordered option to keep going past failures and insert every document that does not collide.
-- Because there is no schema, two documents in the same collection can have completely different fields. Inserting is forgiving; that is a feature, not a bug — just stay consistent on purpose.
+- You may supply your own `_id` (a string, number, or any value) instead of letting MongoDB generate an ObjectId - but it must be unique, or you get the `E11000` error above.
+- `insertMany` is **ordered** by default: it stops at the first failing document, so documents after a duplicate-id error never get inserted. Pass `{ ordered: false }` to keep going past failures and insert every document that does not collide.
+- Because there is no schema, two documents in the same collection can have completely different fields. Inserting is forgiving; that is a feature, not a bug - just stay consistent on purpose.
 
 <Callout title="Let MongoDB own the id">
 Unless you have a real-world identifier that is guaranteed unique (like an ISBN), let MongoDB generate the ObjectId. It is unique, sortable by creation time, and one less thing for you to get wrong.
 </Callout>
 
+## Reading AI-generated code
+
+An assistant asked to "import the members safely" will often describe `insertMany` as atomic:
+
+<SpotTheBug lang="js" code={`// AI comment: "insertMany is all-or-nothing - if any member fails, none are saved"
+async function importMembers(db, members) {
+  try {
+    await db.collection("members").insertMany(members);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: err.message };   // safe: nothing was written
+  }
+}`}>
+
+`insertMany` is not a transaction. In the real run above, with the middle document colliding, the **first document was already committed** (`inserted 1`; `A` stayed in the collection) when the error came back, so the "nothing was written" assumption leaves a half-imported batch and a caller who believes the import failed cleanly. The fix is to inspect the partial result - or, when you truly need all-or-nothing, wrap the insert in a transaction (module 7). This fence reports what actually landed:
+
+```js
+// app/insert-partial-result.mjs
+const c = db.collection("members");
+await c.deleteMany({});
+await c.insertOne({ _id: 2, name: "Existing" });
+let landed = null;
+try {
+  await c.insertMany([{ _id: 1, name: "A" }, { _id: 2, name: "B" }, { _id: 3, name: "C" }]);
+} catch (err) {
+  landed = err.result.insertedCount;           // honest report: how many made it in
+}
+console.log({ ok: false, landed });
+if (landed !== 1) throw new Error("expected exactly the first document to have landed");
+```
+
+```text
+{ ok: false, landed: 1 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+An insert is a **request to create a new primary key**. Everything else is bookkeeping around that: the driver mints an ObjectId if you did not, the server enforces uniqueness of `_id`, and the acknowledgement echoes the ids back. A batch is just a **sequence of independent inserts sent together** - `ordered` decides whether the sequence stops at the first failure, not whether the whole batch is atomic.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `insertOne` | Simple, straightforward per-document error handling | One round trip per document — slow at volume |
-| `insertMany` (ordered) | A single batch, fewer round trips | The first document that errors stops the whole batch; the rest never get inserted |
-| `insertMany` (unordered) | Keeps going past a failing document, inserting every document that does not collide | Insertion order is not guaranteed; you must inspect the result to know which ones failed |
+| `insertOne` | Simple, straightforward per-document error handling | One round trip per document - slow at volume |
+| `insertMany` (ordered) | A single batch, fewer round trips; deterministic stopping point | The first document that errors stops the batch; earlier documents stay inserted, later ones never are (`inserted 1`) |
+| `insertMany` (unordered) | Keeps going past a failing document, inserting every document that does not collide (`inserted 2`) | Insertion order is not guaranteed; you must inspect `writeErrors` to know which ones failed |
+| `insertMany` inside a transaction | All-or-nothing | Needs a replica set; more overhead and a 60 s default lifetime |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Inserting documents one at a time in a loop instead of using `insertMany`** — wastes round trips needlessly; the more documents, the more noticeable the slowdown. Batch them into an array and call `insertMany` once instead.
-- **Assuming `insertOne` returns the full inserted document back** — it actually only returns an acknowledgement plus the `insertedId`. To get the full document, `findOne` by that `_id` afterward.
-- **Not checking `insertedCount` on an unordered `insertMany`** — assuming "no error was thrown" means every document was inserted, when unordered mode can silently skip failing documents. Compare `insertedCount` against the number you sent.
+- **"`insertMany` is atomic."** - it is not; the ordered run above left the first document in place. Use a transaction when you need atomicity.
+- **"Inserting one at a time in a loop is fine."** - wastes round trips; batch them with `insertMany`.
+- **"`insertOne` returns the full inserted document."** - it returns `acknowledged` and `insertedId`. Use `findOne` by that `_id` to read the document.
+- **"No error thrown means every document was inserted."** - on an unordered `insertMany` a `MongoBulkWriteError` is thrown, but code that swallows it misses the failures; check `err.result.insertedCount` and `err.writeErrors`.
+- **"The shell and drivers return the same shape."** - the mongosh `insertMany` result has no `insertedCount`, the Node result has; ObjectIds print as `ObjectId('..')`, `new ObjectId('..')`, `ObjectID("..")` depending on the language.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **E-commerce inventory import** — when a merchant uploads a CSV of thousands of products, the system converts each row into a document and sends them into `insertMany` in batches of 500, instead of calling `insertOne` per row.
->
-> **Log / event ingestion** — a service receiving many events per second typically buffers them briefly, then calls an unordered `insertMany` as one batch, so one malformed event does not block every other event.
+> The `insertMany` reference states the rule we measured: "Excluding write concern errors, ordered operations stop after an error, while unordered operations continue to process any remaining write operations in the queue", and that `insertMany()` can be used inside distributed transactions ([insertMany](https://www.mongodb.com/docs/manual/reference/method/db.collection.insertMany/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (outputs above) but they are not executed by the course's automated checker._
 
 export const quizInsert = [
   {
@@ -192,16 +326,18 @@ export const quizInsert = [
       'The document is stored without any primary key',
     ],
     answer: 1,
+    explain: 'The driver generates an ObjectId; every stored document has an _id.',
   },
   {
-    q: 'By default, what does an ordered insertMany do when one document has a duplicate _id?',
+    q: 'By default, what does an ordered insertMany do when the second of three documents has a duplicate _id?',
     options: [
       'It skips that document and inserts the rest',
-      'It stops at the failure, leaving later documents uninserted',
+      'It stops at the failure: the first document stays inserted, the third is never inserted',
       'It rolls back every document in the batch',
       'It overwrites the existing document',
     ],
     answer: 1,
+    explain: 'Real run: inserted 1 (A), then MongoBulkWriteError E11000; C never went in and A was not rolled back.',
   },
   {
     q: 'What does the acknowledgement of insertMany contain?',
@@ -212,6 +348,24 @@ export const quizInsert = [
       'A cursor over the new documents',
     ],
     answer: 2,
+    explain: 'acknowledged plus insertedIds keyed "0", "1", ...; the Node driver adds insertedCount, the shell result does not.',
+  },
+  {
+    q: 'With { ordered: false } and the same batch (middle document duplicates), how many documents are inserted and where is the count?',
+    options: [
+      '0 - unordered rolls back',
+      '2, in err.result.insertedCount of the MongoBulkWriteError',
+      '1, in the return value of insertMany',
+      '3 - duplicates are ignored',
+    ],
+    answer: 1,
+    explain: 'A and C were inserted (2), the duplicate reported at index 1; insertMany throws, so read the count from the error.',
+  },
+  {
+    q: 'Which error code identifies a duplicate key on insert?',
+    options: ['121', '11000', '40573', '13'],
+    answer: 1,
+    explain: 'E11000 duplicate key error, code 11000 (121 is document validation failure, 13 is Unauthorized).',
   },
 ]
 

@@ -1,6 +1,6 @@
 ---
 title: การ insert document
-description: เพิ่ม document หนึ่งรายการหรือหลายรายการด้วย insertOne และ insertMany และทำความรู้จักกับ field _id อัตโนมัติ
+description: เพิ่ม document หนึ่งหรือหลายรายการด้วย insertOne และ insertMany รู้จัก field _id อัตโนมัติ และดู acknowledgement จริง, error duplicate-key และพฤติกรรมเมื่อล้มเหลวแบบ ordered เทียบ unordered
 sidebar:
   order: 2
 ---
@@ -8,32 +8,37 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การ insert คือ operation ที่ผ่อนคลายที่สุดใน MongoDB คุณยื่น document ให้ฐานข้อมูล ฐานข้อมูลเก็บไว้ แล้วตอบกลับมาว่าเก็บอะไรไป ไม่ต้องนิยาม schema ล่วงหน้า ไม่มีคอลัมน์ของตารางให้จัดให้ตรงกัน — ขอแค่ document เป็นข้อมูลคล้าย JSON ที่ถูกต้องก็เข้าได้เลย
+การ insert คือ operation ที่ผ่อนคลายที่สุดใน MongoDB คุณยื่น document ให้ฐานข้อมูล ฐานข้อมูลเก็บไว้ แล้วตอบกลับมาว่าเก็บอะไรไป ไม่ต้องนิยาม schema ล่วงหน้า ไม่มีคอลัมน์ของตารางให้จัดให้ตรงกัน — ขอแค่ document เป็นข้อมูลแบบ JSON ที่ถูกต้องก็เข้าไปได้ อิสระตรงนี้แหละคือเหตุผลว่าทำไมวินัยเล็ก ๆ รอบ field `_id` ถึงคุ้มค่า เพราะเป็นงานเก็บบันทึกชิ้นเดียวที่ทุกการ insert ต้องยุ่งด้วย
 
-อิสระตรงนี้แหละคือเหตุผลว่าทำไมวินัยเล็ก ๆ รอบ field `_id` ถึงคุ้มค่า เพราะเป็นงานเก็บบันทึกชิ้นเดียวที่ทุกการ insert ต้องยุ่งด้วย
-
-เราจะสร้างห้องสมุดสมมติกันต่อ สมาชิกแต่ละคนคือ document หนึ่งรายการ และบทเรียนนี้เราจะเพิ่มสมาชิกเข้าไปใน collection ชื่อ `members`
+เราจะสร้างห้องสมุดสมมติกันต่อ สมาชิกแต่ละคนคือ document หนึ่งรายการ และบทเรียนนี้เราจะเพิ่มสมาชิกเข้าไปใน collection ชื่อ `members` ทุก output ด้านล่างจับมาจาก mongo 8.3.11 กับ mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน); id และเวลาบนเครื่องของคุณจะต่างออกไป
 
 ## การ insert document เดียว
 
-`insertOne` รับ document มาหนึ่งรายการพอดีแล้วเก็บลง collection ถ้าคุณไม่ได้ระบุ `_id` มาเอง MongoDB จะสร้างให้ในรูปของ **ObjectId** — ค่าขนาด 12 ไบต์ที่ไม่ซ้ำกันทั่วทั้ง collection และเข้ารหัสเวลาที่สร้างเอาไว้ในตัว ตัว id ที่ได้นี้แหละคือ primary key ของ document
+`insertOne` รับ document เดียวพอดีแล้วเก็บไว้ ถ้าคุณไม่ใส่ `_id` MongoDB จะสร้างให้เป็น **ObjectId** — ค่าขนาด 12 ไบต์ที่ไม่ซ้ำกันทั้ง collection และเข้ารหัสเวลาที่สร้างไว้ด้วย id ที่สร้างนี้คือ primary key ของ document
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertOne({ name: "Grace", joined: 2024, fines: 0 })
+    // mongosh/insert-one.js
+    const res = db.members.insertOne({ name: "Grace", joined: 2024, fines: 0 });
+    console.log(res);
+    console.log(db.members.findOne({ _id: res.insertedId }));
+    assert.strictEqual(res.acknowledged, true);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/insert-one.mjs
     const res = await db.collection("members").insertOne({
       name: "Grace",
       joined: 2024,
       fines: 0,
     });
-    console.log(res.insertedId);
+    console.log(res);
+    if (!res.acknowledged) throw new Error("not acknowledged");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -61,47 +66,56 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-acknowledgement บอกว่า operation สำเร็จ พร้อมส่ง id ที่กำหนดให้กลับมาด้วย ในเชลล์จะหน้าตาแบบนี้:
+acknowledgement บอกว่า operation สำเร็จและส่ง id ที่ถูกกำหนดกลับมา สิ่งที่แต่ละแท็บพิมพ์จริง (ObjectId ถูกพิมพ์ต่างกันในแต่ละ driver — เป็น 12 ไบต์เดียวกัน):
 
-```json
-{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1d0" }
+```text
+mongosh  { acknowledged: true, insertedId: ObjectId('6abca7761ca8500949f70bb3') }
+Node     { acknowledged: true, insertedId: new ObjectId('6abca7762e488e625dd180ed') }
+Python   6abca733ec5eb1df4567945d
+Go       ObjectID("6abca735ba87132b4c842253")
+Rust     ObjectId("6abca7370cacf93463d138ad")
 ```
 
-ส่วน document ที่นอนอยู่ใน collection ตอนนี้หน้าตาแบบนี้ — `_id` คือสิ่งเดียวที่คุณไม่ได้พิมพ์เอง:
+และ document ที่ตอนนี้อยู่ใน collection (`findOne` ใน shell) — `_id` เป็นสิ่งเดียวที่คุณไม่ได้พิมพ์เอง:
 
-```json
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d0",
-  "name": "Grace",
-  "joined": 2024,
-  "fines": 0
+  _id: ObjectId('6abca7761ca8500949f70bb3'),
+  name: 'Grace',
+  joined: 2024,
+  fines: 0
 }
 ```
 
-**ใน Compass:** เปิด collection `members` คลิกปุ่มสีเขียว **ADD DATA** เลือก **Insert Document** วาง JSON ลงไปโดยไม่ต้องใส่ `_id` แล้ว Compass จะเติม id ให้เองตอนกดบันทึก
+**ใน Compass:** เปิด collection `members` ใช้เมนู **Add Data** แล้วเลือก **Insert Document** (เอกสาร Compass เรียกอ่านเมื่อ 2026-09-30, [mongodb.com/docs/compass/current/documents/insert](https://www.mongodb.com/docs/compass/current/documents/insert/)); เลือกโหมด Shell Syntax, Field-by-Field หรือ JSON ถ้าไม่ระบุ `_id` Compass จะสร้าง ObjectId ให้
 
-## การ insert หลายรายการในครั้งเดียว
+## insert หลายรายการพร้อมกัน
 
-เมื่อมี document เป็นชุด `insertMany` ส่งทั้งชุดไปใน round trip เดียว แทนที่จะเรียกทีละครั้งต่อหนึ่ง document คุณส่ง array เข้าไป แล้วได้ id ของทุกรายการที่ insert สำเร็จกลับมา โดยใช้ตำแหน่งใน array เป็น key
+เมื่อมี document เป็นชุด `insertMany` ส่งทั้งหมดในการเดินทางครั้งเดียวแทนที่จะเรียกทีละ document คุณส่ง array เข้าไป และได้ id ของทุกอย่างที่ถูก insert กลับมา โดยอ้างด้วยตำแหน่งใน array
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertMany([
+    // mongosh/insert-many.js
+    const res = db.members.insertMany([
       { name: "Linus", joined: 2023, fines: 2 },
       { name: "Margaret", joined: 2025, fines: 0 },
       { name: "Edsger", joined: 2022, fines: 5 }
-    ])
+    ]);
+    console.log(res);
+    assert.strictEqual(Object.keys(res.insertedIds).length, 3);   // the shell result has no insertedCount
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/insert-many.mjs
     const res = await db.collection("members").insertMany([
       { name: "Linus", joined: 2023, fines: 2 },
       { name: "Margaret", joined: 2025, fines: 0 },
       { name: "Edsger", joined: 2022, fines: 5 },
     ]);
-    console.log(res.insertedCount);
+    console.log(res);
+    if (res.insertedCount !== 3) throw new Error("expected 3");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -141,79 +155,217 @@ acknowledgement บอกว่า operation สำเร็จ พร้อม�
   </TabItem>
 </Tabs>
 
-acknowledgement จับคู่ index ของแต่ละรายการใน array เข้ากับ id ที่สร้างให้:
+acknowledgement map ดัชนี array แต่ละตัวไปยัง id ที่สร้างให้ มีความต่างจริงสองข้อที่ควรรู้: **ผลลัพธ์ใน shell ไม่มี `insertedCount`** (ให้นับ key ของ `insertedIds`) ขณะที่ **ผลลัพธ์ใน Node มี**:
 
-```json
+```text
+mongosh
 {
-  "acknowledged": true,
-  "insertedIds": {
-    "0": "65f0b3d4e4b0a1c2e4b0a1d1",
-    "1": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "2": "65f0b3d4e4b0a1c2e4b0a1d3"
+  acknowledged: true,
+  insertedIds: {
+    '0': ObjectId('6abca7761ca8500949f70bb4'),
+    '1': ObjectId('6abca7761ca8500949f70bb5'),
+    '2': ObjectId('6abca7761ca8500949f70bb6')
   }
 }
+
+Node
+{
+  acknowledged: true,
+  insertedCount: 3,
+  insertedIds: {
+    '0': new ObjectId('6abca77646b3ce4be9c0507f'),
+    '1': new ObjectId('6abca77646b3ce4be9c05080'),
+    '2': new ObjectId('6abca77646b3ce4be9c05081')
+  }
+}
+
+Python, Go, Rust: 3   (the length of the ids list, the number we sent)
 ```
 
-## เคล็ดลับและจุดที่ต้องระวัง
+## เมื่อ insert ล้มเหลว: `_id` ซ้ำ
 
-- คุณกำหนด `_id` เองได้ (เป็น string, number หรือค่าอะไรก็ได้) แทนการปล่อยให้ MongoDB สร้าง ObjectId — แต่ค่าต้องไม่ซ้ำ ถ้า insert document ที่ `_id` มีอยู่แล้ว จะล้มเหลวพร้อม error แบบ **duplicate key**
-- `insertMany` เป็นแบบ **ordered** โดยปริยาย คือหยุดทันทีที่ document ตัวแรกล้มเหลว ตัวที่อยู่ถัดจาก error เรื่อง id ซ้ำจึงไม่ได้เข้า collection เลย ถ้าอยากให้ไปต่อแม้เจอตัวที่ล้มเหลว แล้ว insert ทุกตัวที่ไม่ชนกัน ให้ส่ง option แบบ unordered เข้าไป
-- ไม่มี schema มาบังคับ ทำให้ document สองรายการใน collection เดียวกันมี field ต่างกันคนละเรื่องได้ การ insert ใจดีแบบนี้ถือเป็นฟีเจอร์ ไม่ใช่บั๊ก — แต่คุณต้องตั้งใจรักษาความสม่ำเสมอเอง
+`_id` ต้องไม่ซ้ำ insert document ที่สองด้วย id ที่มีอยู่แล้วจะได้ error **duplicate key** code `11000` พร้อมค่าที่ชนกันใน message:
 
-<Callout title="ปล่อยให้ MongoDB เป็นเจ้าของ id">
-ถ้าไม่ได้มีตัวระบุในโลกจริงที่การันตีว่าไม่ซ้ำ (อย่าง ISBN) ก็ปล่อยให้ MongoDB สร้าง ObjectId ไปเถอะ ค่าไม่ซ้ำกัน เรียงตามเวลาที่สร้างได้ และเป็นอีกหนึ่งเรื่องที่คุณไม่ต้องเสี่ยงทำพลาดเอง
+```js
+// mongosh/insert-duplicate.js
+db.members.drop();
+const first = db.members.insertOne({ name: "Grace" });
+let err;
+try { db.members.insertOne({ _id: first.insertedId, name: "Impostor" }); } catch (e) { err = e; }
+console.log(err.name, err.code);
+console.log(err.message);
+assert.strictEqual(err.code, 11000);
+assert.strictEqual(db.members.countDocuments(), 1);   // the original is untouched
+```
+
+```text
+MongoServerError 11000
+E11000 duplicate key error collection: b1_run_insert.members index: _id_ dup key: { _id: ObjectId('6abca78db69a4386bb444676') }
+```
+
+driver Node โยน `MongoServerError` เดียวกันพร้อม `code: 11000` และเปิดเผย key ที่ล้มเหลวเป็น `err.keyValue` (`{ _id: new ObjectId('...') }`)
+
+## `insertMany` แบบ ordered เทียบ unordered
+
+`insertMany` เป็น **ordered** โดยค่าเริ่มต้น: หยุดที่ document แรกที่ล้มเหลว ด้วย `{ ordered: false }` มันพยายามทุก document แล้วรายงานความล้มเหลวตอนท้าย เราพิสูจน์ทั้งสองแบบด้วย batch เดียวกัน — `_id: 2` มีอยู่แล้ว document กลางจากสามจึงชน:
+
+```js
+// mongosh/insert-ordered.js
+db.members.drop();
+db.members.insertOne({ _id: 2, name: "Existing" });
+const batch = () => [{ _id: 1, name: "A" }, { _id: 2, name: "B (duplicate)" }, { _id: 3, name: "C" }];
+
+let e1;
+try { db.members.insertMany(batch()); } catch (e) { e1 = e; }
+console.log("ordered  :", e1.name, e1.code, "inserted", e1.result.insertedCount, "failed at index", e1.writeErrors[0].index);
+console.log(db.members.find({}, { name: 1 }).sort({ _id: 1 }).toArray());
+
+db.members.deleteMany({ _id: { $ne: 2 } });
+let e2;
+try { db.members.insertMany(batch(), { ordered: false }); } catch (e) { e2 = e; }
+console.log("unordered:", e2.name, e2.code, "inserted", e2.result.insertedCount, "failed at index", e2.writeErrors.map((w) => w.index));
+console.log(db.members.find({}, { name: 1 }).sort({ _id: 1 }).toArray());
+assert.strictEqual(e1.result.insertedCount, 1);
+assert.strictEqual(e2.result.insertedCount, 2);
+```
+
+```text
+ordered  : MongoBulkWriteError 11000 inserted 1 failed at index 1
+[ { _id: 1, name: 'A' }, { _id: 2, name: 'Existing' } ]
+unordered: MongoBulkWriteError 11000 inserted 2 failed at index [ 1 ]
+[
+  { _id: 1, name: 'A' },
+  { _id: 2, name: 'Existing' },
+  { _id: 3, name: 'C' }
+]
+```
+
+ordered insert **1** document (`A`) แล้วหยุด: `C` ไม่ได้เข้าไป unordered insert **2** (`A` และ `C`) และรายงานความล้มเหลวเดียวที่ index 1 ทั้งสองแบบ error คือ `MongoBulkWriteError` (code `11000`) และจำนวนที่เข้าไปได้อยู่ใน `err.result.insertedCount` (ใน Node มี `err.insertedCount` ด้วย) **ทั้งสองโหมดไม่ rollback สิ่งที่ insert ไปแล้ว** — ไม่มี all-or-nothing ที่นี่หากไม่ใช้ transaction
+
+## เคล็ดลับและข้อควรระวัง
+
+- คุณใส่ `_id` เองได้ (string, ตัวเลข หรือค่าใดก็ได้) แทนที่จะให้ MongoDB สร้าง ObjectId — แต่ต้องไม่ซ้ำ ไม่เช่นนั้นจะได้ error `E11000` ด้านบน
+- `insertMany` เป็น **ordered** โดยค่าเริ่มต้น: หยุดที่ document แรกที่ล้มเหลว ดังนั้น document หลัง error id ซ้ำจะไม่ถูก insert ส่ง `{ ordered: false }` เพื่อไปต่อผ่านความล้มเหลวและ insert ทุก document ที่ไม่ชน
+- เพราะไม่มี schema สอง document ใน collection เดียวกันมี field ต่างกันสิ้นเชิงได้ การ insert ใจกว้าง นั่นคือฟีเจอร์ ไม่ใช่ bug — แค่ต้องคงความสม่ำเสมอโดยตั้งใจ
+
+<Callout title="ให้ MongoDB เป็นเจ้าของ id">
+เว้นแต่คุณมีตัวระบุจริงที่รับประกันว่าไม่ซ้ำ (เช่น ISBN) ให้ MongoDB สร้าง ObjectId ไม่ซ้ำ เรียงตามเวลาสร้างได้ และเป็นเรื่องที่ทำผิดได้น้อยลงหนึ่งอย่าง
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอให้ "import สมาชิกอย่างปลอดภัย" มักอธิบายว่า `insertMany` เป็น atomic:
+
+<SpotTheBug lang="js" code={`// AI comment: "insertMany is all-or-nothing - if any member fails, none are saved"
+async function importMembers(db, members) {
+  try {
+    await db.collection("members").insertMany(members);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: err.message };   // safe: nothing was written
+  }
+}`}>
+
+`insertMany` ไม่ใช่ transaction ในการรันจริงด้านบน เมื่อ document กลางชน **document แรกถูก commit ไปแล้ว** (`inserted 1`; `A` ยังอยู่ใน collection) ตอนที่ error ถูกส่งกลับ ข้อสมมติ "ไม่มีอะไรถูกเขียน" จึงทิ้ง batch ที่ import ครึ่งเดียวไว้ และผู้เรียกที่เชื่อว่า import ล้มเหลวอย่างสะอาด วิธีแก้คือตรวจผลบางส่วน — หรือเมื่อต้องการ all-or-nothing จริง ๆ ให้ห่อ insert ใน transaction (โมดูล 7) fence นี้รายงานสิ่งที่เข้าไปจริง:
+
+```js
+// app/insert-partial-result.mjs
+const c = db.collection("members");
+await c.deleteMany({});
+await c.insertOne({ _id: 2, name: "Existing" });
+let landed = null;
+try {
+  await c.insertMany([{ _id: 1, name: "A" }, { _id: 2, name: "B" }, { _id: 3, name: "C" }]);
+} catch (err) {
+  landed = err.result.insertedCount;           // honest report: how many made it in
+}
+console.log({ ok: false, landed });
+if (landed !== 1) throw new Error("expected exactly the first document to have landed");
+```
+
+```text
+{ ok: false, landed: 1 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+insert คือ **คำขอสร้าง primary key ใหม่** ที่เหลือคือบัญชีรอบ ๆ: driver สร้าง ObjectId ให้ถ้าคุณไม่ใส่ server บังคับความไม่ซ้ำของ `_id` และ acknowledgement สะท้อน id กลับมา batch คือ **ลำดับของ insert อิสระที่ส่งไปด้วยกัน** — `ordered` ตัดสินว่าลำดับจะหยุดที่ความล้มเหลวแรกหรือไม่ ไม่ใช่ว่าทั้ง batch เป็น atomic
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `insertOne` | เรียบง่าย จัดการ error ของแต่ละ document ตรงไปตรงมา | หนึ่ง round trip ต่อหนึ่ง document ช้าเมื่อมีจำนวนมาก |
-| `insertMany` (ordered) | batch เดียว ลด round trip | document ตัวแรกที่ error หยุดทั้งชุด ตัวที่เหลือไม่ได้เข้า |
-| `insertMany` (unordered) | ไปต่อแม้เจอ document ที่ error แล้ว insert ทุกตัวที่ไม่ชนกัน | ลำดับการ insert ไม่การันตี ต้องแกะผลลัพธ์เพื่อรู้ว่าตัวไหนล้มเหลว |
+| `insertOne` | เรียบง่าย จัดการ error ต่อ document ตรงไปตรงมา | หนึ่ง round trip ต่อ document — ช้าเมื่อปริมาณมาก |
+| `insertMany` (ordered) | batch เดียว round trip น้อยลง จุดหยุดกำหนดได้แน่นอน | document แรกที่ error หยุด batch; document ก่อนหน้าคงอยู่ ส่วนหลังไม่เคยถูก insert (`inserted 1`) |
+| `insertMany` (unordered) | ไปต่อผ่าน document ที่ล้มเหลว insert ทุกอันที่ไม่ชน (`inserted 2`) | ลำดับการ insert ไม่รับประกัน; ต้องตรวจ `writeErrors` เพื่อรู้ว่าอันไหนล้มเหลว |
+| `insertMany` ใน transaction | all-or-nothing | ต้องมี replica set; overhead เพิ่มและอายุเริ่มต้น 60 วินาที |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **insert document ทีละตัวในลูปแทนที่จะใช้ `insertMany`** — เสีย round trip โดยไม่จำเป็น ยิ่งจำนวน document เยอะยิ่งช้าเห็นได้ชัด ควรรวมเป็น array แล้วเรียก `insertMany` ครั้งเดียว
-- **คิดว่า `insertOne` คืน document ที่ insert ไปกลับมาเต็ม ๆ** — จริง ๆ คืนแค่ acknowledgement กับ `insertedId` เท่านั้น ถ้าอยากได้ document เต็ม ต้อง `findOne` ด้วย `_id` นั้นอีกที
-- **ไม่ตรวจ `insertedCount` ของ `insertMany` แบบ unordered** — เข้าใจว่า "ไม่มี error โยนขึ้นมา" แปลว่า document ทุกตัวถูก insert ครบ ทั้งที่ unordered อาจข้าม document ที่ล้มเหลวไปเงียบ ๆ ต้องเทียบ `insertedCount` กับจำนวนที่ส่งเข้าไป
+- **"`insertMany` เป็น atomic"** — ไม่ใช่; การรัน ordered ด้านบนทิ้ง document แรกไว้ ใช้ transaction เมื่อต้องการ atomicity
+- **"insert ทีละอันใน loop ก็ไม่เป็นไร"** — เปลืองรอบเดินทาง; รวมเป็นชุดด้วย `insertMany`
+- **"`insertOne` คืน document เต็มที่ insert"** — คืน `acknowledged` และ `insertedId` ใช้ `findOne` ด้วย `_id` นั้นเพื่ออ่าน document
+- **"ไม่มี error แปลว่าทุก document ถูก insert"** — บน `insertMany` แบบ unordered จะโยน `MongoBulkWriteError` แต่โค้ดที่กลืน error จะพลาดความล้มเหลว; ตรวจ `err.result.insertedCount` และ `err.writeErrors`
+- **"shell กับ driver คืนรูปร่างเดียวกัน"** — ผล `insertMany` ใน mongosh ไม่มี `insertedCount` แต่ Node มี; ObjectId พิมพ์เป็น `ObjectId('..')`, `new ObjectId('..')`, `ObjectID("..")` ตามภาษา
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบ import สินค้าเข้าคลัง (e-commerce)** — เมื่อ merchant อัปโหลดไฟล์ CSV สินค้าหลายพันรายการ ระบบแปลงแต่ละแถวเป็น document แล้วส่งเข้า `insertMany` เป็นชุด (batch) ละ 500 รายการ แทนที่จะ `insertOne` ทีละแถว
->
-> **ระบบ log/event ingestion** — service ที่รับ event จำนวนมากต่อวินาที มักสะสม event ไว้ใน buffer สั้น ๆ แล้ว `insertMany` แบบ unordered เป็นก้อนเดียว เพื่อไม่ให้ event หนึ่งตัวที่ผิดรูปแบบไปบล็อก event อื่นทั้งหมด
+> reference ของ `insertMany` ระบุกฎที่เราวัด: "Excluding write concern errors, ordered operations stop after an error, while unordered operations continue to process any remaining write operations in the queue" และ `insertMany()` ใช้ภายใน distributed transaction ได้ ([insertMany](https://www.mongodb.com/docs/manual/reference/method/db.collection.insertMany/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (output ด้านบน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizInsert = [
   {
-    q: 'ถ้าคุณ insert document โดยไม่มี field _id จะเกิดอะไรขึ้น?',
+    q: 'ถ้า insert document โดยไม่มี field _id จะเกิดอะไรขึ้น?',
     options: [
-      'ระบบปฏิเสธการ insert',
-      'MongoDB สร้าง ObjectId ที่ไม่ซ้ำให้เอง',
-      'field นั้นว่างเปล่าจนกว่าคุณจะกำหนดค่าให้',
-      'MongoDB เก็บ document โดยไม่มี primary key เลย',
+      'insert ถูกปฏิเสธ',
+      'MongoDB สร้าง ObjectId ที่ไม่ซ้ำให้',
+      'field ว่างอยู่จนกว่าคุณจะตั้งค่า',
+      'document ถูกเก็บโดยไม่มี primary key',
     ],
     answer: 1,
+    explain: 'driver สร้าง ObjectId ให้ ทุก document ที่เก็บมี _id',
   },
   {
-    q: 'โดยปริยาย insertMany แบบ ordered ทำอย่างไรเมื่อ document หนึ่งมี _id ซ้ำ?',
+    q: 'โดยค่าเริ่มต้น insertMany แบบ ordered ทำอะไรเมื่อ document ที่สองจากสามมี _id ซ้ำ?',
     options: [
-      'ข้าม document นั้นไปแล้ว insert ที่เหลือต่อ',
-      'หยุดตรงจุดที่ล้มเหลว document ที่ตามมาจึงไม่ได้ insert',
-      'roll back ทุก document ในชุด',
-      'เขียนทับ document ที่มีอยู่เดิม',
+      'ข้าม document นั้นและ insert ที่เหลือ',
+      'หยุดที่ความล้มเหลว: document แรกยังคง insert อยู่ ส่วนที่สามไม่เคยถูก insert',
+      'rollback ทุก document ใน batch',
+      'เขียนทับ document ที่มีอยู่',
     ],
     answer: 1,
+    explain: 'การรันจริง: inserted 1 (A) แล้ว MongoBulkWriteError E11000; C ไม่เข้า และ A ไม่ถูก rollback',
   },
   {
-    q: 'acknowledgement ของ insertMany มีอะไรอยู่ในนั้น?',
+    q: 'acknowledgement ของ insertMany มีอะไรบ้าง?',
     options: [
-      'เพียงแค่แฟล็กสำเร็จ true/false เท่านั้น',
-      'ข้อความเต็มของทุก document ที่ถูก insert',
-      'id ที่สร้างขึ้น โดยใช้ตำแหน่งใน array ที่ส่งเข้าไปเป็น key',
-      'cursor ครอบ document ใหม่',
+      'แค่ flag true/false ว่าสำเร็จ',
+      'ข้อความเต็มของทุก document ที่ insert',
+      'id ที่สร้างขึ้น อ้างด้วยตำแหน่งใน array ที่ส่งเข้าไป',
+      'cursor ที่ชี้ไปยัง document ใหม่',
     ],
     answer: 2,
+    explain: 'acknowledged กับ insertedIds ที่อ้างด้วย "0", "1", ...; driver Node เพิ่ม insertedCount ส่วนผลใน shell ไม่มี',
+  },
+  {
+    q: 'ด้วย { ordered: false } และ batch เดียวกัน (document กลางซ้ำ) insert ไปกี่ document และจำนวนอยู่ที่ไหน?',
+    options: [
+      '0 — unordered rollback',
+      '2 อยู่ใน err.result.insertedCount ของ MongoBulkWriteError',
+      '1 อยู่ในค่าที่ insertMany คืน',
+      '3 — ไม่สนใจตัวซ้ำ',
+    ],
+    answer: 1,
+    explain: 'A และ C ถูก insert (2) ตัวซ้ำรายงานที่ index 1; insertMany โยน error ดังนั้นให้อ่านจำนวนจาก error',
+  },
+  {
+    q: 'code ใดระบุ duplicate key ตอน insert?',
+    options: ['121', '11000', '40573', '13'],
+    answer: 1,
+    explain: 'E11000 duplicate key error, code 11000 (121 คือ validation ล้มเหลว, 13 คือ Unauthorized)',
   },
 ]
 
