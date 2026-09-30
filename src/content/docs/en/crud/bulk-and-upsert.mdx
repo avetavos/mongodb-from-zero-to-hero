@@ -1,6 +1,6 @@
 ---
 title: Upserts and bulk writes
-description: Insert-or-update with upsert, and combine many writes into one round trip with bulkWrite, ordered or unordered.
+description: Insert-or-update with upsert (and why it needs a unique index), and combine many writes into one round trip with bulkWrite, ordered or unordered - with the real acknowledgements, race counts and timings.
 sidebar:
   order: 6
 ---
@@ -9,34 +9,75 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-The last two moves in this module are about doing more with fewer round trips. An **upsert** answers a question you hit constantly: "update this document if it exists, otherwise create it." A **bulk write** lets you send a whole list of mixed operations — inserts, updates, deletes — to the server in a single call instead of one network trip per operation. Neither introduces new operators; they compose the methods you already know into something more efficient.
+The last two moves in this module are about doing more with fewer round trips. An **upsert** answers a question you hit constantly: "update this document if it exists, otherwise create it." A **bulk write** lets you send a whole list of mixed operations - inserts, updates, deletes - to the server in a single call instead of one network trip per operation. Neither introduces new operators; they compose the methods you already know into something more efficient.
 
-We finish with our `members` collection one more time.
+We finish with our `members` collection one more time. Every output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 (the Python, Go and Rust tabs were each run once in a scratch program on the same server).
 
-## Upsert: update or insert
-
-Add the upsert option to an update, and when the filter matches nothing, MongoDB inserts a new document built from the filter plus the update. When the filter *does* match, it behaves like an ordinary update. Here we record a visit for "Katherine" — if she is not yet a member, this creates her:
+## The data we write
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.updateOne(
-      { name: "Katherine" },
-      { $set: { joined: 2026 }, $inc: { visits: 1 } },
-      { upsert: true }
-    )
+    // mongosh/bulk-seed.js
+    db.members.insertMany([
+      { name: "Grace", joined: 2024, fines: 0 },
+      { name: "Linus", joined: 2023, fines: 2 },
+    ]);
+    assert.strictEqual(db.members.countDocuments(), 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/bulk-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Grace", joined: 2024, fines: 0 },
+      { name: "Linus", joined: 2023, fines: 2 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 2) throw new Error("expected 2");
+    ```
+  </TabItem>
+</Tabs>
+
+## Upsert: update or insert
+
+Add the upsert option to an update, and when the filter matches nothing, MongoDB inserts a new document built from the filter plus the update. When the filter *does* match, it behaves like an ordinary update. Here we record a visit for "Katherine" - if she is not yet a member, this creates her:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/upsert.js
+    const first = db.members.updateOne(
+      { name: "Katherine" },
+      { $set: { joined: 2026 }, $inc: { visits: 1 } },
+      { upsert: true }
+    );
+    console.log(first);
+    console.log(db.members.findOne({ name: "Katherine" }));
+    const second = db.members.updateOne(
+      { name: "Katherine" },
+      { $set: { joined: 2026 }, $inc: { visits: 1 } },
+      { upsert: true }
+    );
+    console.log(second);
+    assert.strictEqual(first.upsertedCount, 1);
+    assert.strictEqual(second.matchedCount, 1);
+    assert.strictEqual(db.members.findOne({ name: "Katherine" }).visits, 2);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/upsert.mjs
     const res = await db.collection("members").updateOne(
       { name: "Katherine" },
       { $set: { joined: 2026 }, $inc: { visits: 1 } },
       { upsert: true }
     );
+    console.log(res);
     console.log(res.upsertedId);
+    if (res.upsertedCount !== 1) throw new Error("expected an insert");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -51,7 +92,7 @@ Add the upsert option to an update, and when the filter matches nothing, MongoDB
   </TabItem>
   <TabItem label="Go">
     ```go
-    opts := options.Update().SetUpsert(true)
+    opts := options.UpdateOne().SetUpsert(true)
     res, err := coll.UpdateOne(
         ctx,
         bson.M{"name": "Katherine"},
@@ -81,52 +122,92 @@ Add the upsert option to an update, and when the filter matches nothing, MongoDB
   </TabItem>
 </Tabs>
 
-Because no Katherine existed, the acknowledgement reports an `upsertedId` — the `_id` of the document that was created. `matchedCount` is `0`, which is your signal that an insert happened rather than an update:
+Because no Katherine existed, the first call created her. **The acknowledgement differs between the shell and the drivers**, and the old lesson text got it wrong: the shell reports the new `_id` as `insertedId` (there is **no** `upsertedId` field in mongosh) plus `upsertedCount: 1`, while the Node driver reports `upsertedId` and `upsertedCount: 1`. In both, `matchedCount: 0` is your signal that an insert happened rather than an update:
 
-```json
+```text
+mongosh
 {
-  "acknowledged": true,
-  "matchedCount": 0,
-  "modifiedCount": 0,
-  "upsertedId": "65f0c5e6e4b0a1c2e4b0a1f0"
+  acknowledged: true,
+  insertedId: ObjectId('6abcaadc73c3d0e445c6944e'),
+  matchedCount: 0,
+  modifiedCount: 0,
+  upsertedCount: 1
 }
+
+Node
+{
+  acknowledged: true,
+  modifiedCount: 0,
+  upsertedId: new ObjectId('6abcaae473c3d0e445c69452'),
+  upsertedCount: 1,
+  matchedCount: 0
+}
+
+Python  6abcab0173c3d0e445c696c9          (res.upserted_id)
+Go      ObjectID("6abcab0373c3d0e445c696ca")   (res.UpsertedID)
+Rust    Some(ObjectId("6abcab0673c3d0e445c696cb"))
 ```
 
-The new document combines the filter and the update operators:
+The new document combines the filter and the update operators (`findOne`), and running the same call a second time updates her instead - `matchedCount: 1`, `modifiedCount: 1`, `upsertedCount: 0`, and `visits` ticks up to `2` (in Node the second ack has `upsertedId: null`):
 
-```json
-{
-  "_id": "65f0c5e6e4b0a1c2e4b0a1f0",
-  "name": "Katherine",
-  "joined": 2026,
-  "visits": 1
-}
+```text
+{ _id: ObjectId('6abcaadc73c3d0e445c6944e'), name: 'Katherine', joined: 2026, visits: 1 }
+{ acknowledged: true, insertedId: null, matchedCount: 1, modifiedCount: 1, upsertedCount: 0 }
 ```
 
-Run the very same call a second time and Katherine now exists, so it updates her instead: `matchedCount` becomes `1`, `visits` ticks up to `2`, and `upsertedId` is absent.
+### What goes into the inserted document: `$setOnInsert`
+
+The inserted document is the filter's **equality** conditions plus the update. Conditions that are not equalities are *not* copied, and `$setOnInsert` writes fields only when the upsert inserts (it does nothing on the update path):
+
+```js
+// mongosh/upsert-setoninsert.js
+const r1 = db.people.updateOne(
+  { name: "Ada", joined: { $gt: 2000 } },                       // name is equality, joined is a range
+  { $setOnInsert: { fines: 0, createdBy: "upsert" }, $inc: { visits: 1 } },
+  { upsert: true }
+);
+console.log(r1.upsertedCount, db.people.findOne({ name: "Ada" }, { _id: 0 }));
+db.people.updateOne({ name: "Ada" }, { $setOnInsert: { fines: 99 }, $inc: { visits: 1 } }, { upsert: true });
+console.log(db.people.findOne({ name: "Ada" }, { _id: 0 }));    // fines still 0: $setOnInsert skipped
+assert.strictEqual(db.people.findOne({ name: "Ada" }).fines, 0);
+assert.strictEqual("joined" in db.people.findOne({ name: "Ada" }), false);
+```
+
+```text
+1 { name: 'Ada', createdBy: 'upsert', fines: 0, visits: 1 }
+{ name: 'Ada', createdBy: 'upsert', fines: 0, visits: 2 }
+```
+
+The `name` equality came from the filter; the range on `joined` did not (no `joined` field was created); `fines: 99` on the second call was ignored because the document already existed.
 
 ## bulkWrite: many operations, one round trip
 
-`bulkWrite` takes a list of operations and sends them together. Each entry names its operation and carries the same filter and update you would pass individually, so you can mix inserts, updates, and deletes freely. Here we onboard one new member, charge a fine, and remove a lapsed member — all in a single call:
+`bulkWrite` takes a list of operations and sends them together. Each entry names its operation and carries the same filter and update you would pass individually, so you can mix inserts, updates, and deletes freely. Here we onboard one new member, charge a fine, and remove a lapsed member - all in a single call:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.bulkWrite([
+    // mongosh/bulk-write.js
+    const res = db.members.bulkWrite([
       { insertOne: { document: { name: "Tim", joined: 2026, fines: 0 } } },
       { updateOne: { filter: { name: "Grace" }, update: { $inc: { fines: 1 } } } },
       { deleteOne: { filter: { name: "Linus" } } }
-    ])
+    ]);
+    console.log(res);
+    assert.strictEqual(res.insertedCount, 1);
+    assert.strictEqual(res.deletedCount, 1);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/bulk-write.mjs
     const res = await db.collection("members").bulkWrite([
       { insertOne: { document: { name: "Tim", joined: 2026, fines: 0 } } },
       { updateOne: { filter: { name: "Grace" }, update: { $inc: { fines: 1 } } } },
       { deleteOne: { filter: { name: "Linus" } } },
     ]);
-    console.log(res.insertedCount, res.modifiedCount, res.deletedCount);
+    console.log(res);
+    if (res.insertedCount !== 1 || res.modifiedCount !== 1 || res.deletedCount !== 1) throw new Error("unexpected counts");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -159,51 +240,64 @@ Run the very same call a second time and Katherine now exists, so it updates her
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    use mongodb::options::WriteModel;
+    use mongodb::options::{DeleteOneModel, InsertOneModel, UpdateOneModel, WriteModel};
 
-    let res = coll
-        .client()
-        .bulk_write(vec![
-            WriteModel::InsertOne {
-                namespace: coll.namespace(),
-                document: doc! { "name": "Tim", "joined": 2026, "fines": 0 },
-            },
-            WriteModel::UpdateOne {
-                namespace: coll.namespace(),
-                filter: doc! { "name": "Grace" },
-                update: doc! { "$inc": { "fines": 1 } }.into(),
-                array_filters: None,
-                collation: None,
-                hint: None,
-                upsert: None,
-            },
-            WriteModel::DeleteOne {
-                namespace: coll.namespace(),
-                filter: doc! { "name": "Linus" },
-                collation: None,
-                hint: None,
-            },
-        ])
-        .await?;
+    let ns = coll.namespace();
+    let models = vec![
+        WriteModel::from(
+            InsertOneModel::builder()
+                .namespace(ns.clone())
+                .document(doc! { "name": "Tim", "joined": 2026, "fines": 0 })
+                .build(),
+        ),
+        WriteModel::from(
+            UpdateOneModel::builder()
+                .namespace(ns.clone())
+                .filter(doc! { "name": "Grace" })
+                .update(doc! { "$inc": { "fines": 1 } })
+                .build(),
+        ),
+        WriteModel::from(
+            DeleteOneModel::builder()
+                .namespace(ns.clone())
+                .filter(doc! { "name": "Linus" })
+                .build(),
+        ),
+    ];
+    let res = client.bulk_write(models).await?;
     println!("{} {} {}", res.inserted_count, res.modified_count, res.deleted_count);
     ```
   </TabItem>
 </Tabs>
 
-One acknowledgement summarises everything that happened across all three operations:
+One acknowledgement summarises everything that happened across all three operations. The shell and Node shapes (and Python's `bulk_api_result`) differ in detail:
 
-```json
+```text
+mongosh
 {
-  "acknowledged": true,
-  "insertedCount": 1,
-  "matchedCount": 1,
-  "modifiedCount": 1,
-  "deletedCount": 1,
-  "upsertedCount": 0
+  acknowledged: true,
+  insertedCount: 1,
+  insertedIds: { '0': ObjectId('6abcaadcbdebc81d34174703') },
+  matchedCount: 1,
+  modifiedCount: 1,
+  deletedCount: 1,
+  upsertedCount: 0,
+  upsertedIds: {}
 }
+
+Node
+BulkWriteResult {
+  insertedCount: 1, matchedCount: 1, modifiedCount: 1, deletedCount: 1, upsertedCount: 0,
+  upsertedIds: {}, insertedIds: { '0': new ObjectId('6abcaae45031e43a4870ad5a') }
+}
+
+Python  {'writeErrors': [], 'writeConcernErrors': [], 'nInserted': 1, 'nUpserted': 0, 'nMatched': 1, 'nModified': 1, 'nRemoved': 1, 'upserted': []}
+Go, Rust: 1 1 1
 ```
 
-The whole point is the round trip: instead of three separate conversations with the server, the driver batches the list and sends it once.
+The whole point is the round trip: instead of three separate conversations with the server, the driver batches the list and sends it once. Other operation kinds work the same way (`updateMany`, `replaceOne`, `deleteMany`, and `upsert: true` on an update entry); in the mongosh run, a bulk with an upserting `updateOne`, an `updateMany` and a `replaceOne` returned `matchedCount: 4, modifiedCount: 4, upsertedCount: 1, upsertedIds: { '0': ObjectId('...') }`.
+
+**A Rust note.** The Rust driver's `bulk_write` lives on the **client** (it spans namespaces) and needs a **MongoDB 8.0+ server**; the model types are builders (`InsertOneModel::builder()...`) wrapped into `WriteModel`. The struct-literal form (`WriteModel::InsertOne { namespace: ..., document: ... }`) that earlier drafts of this lesson showed does not compile on Rust driver 3.9.1 (`variant WriteModel::InsertOne has no field named namespace`) - the code above is what we ran.
 
 export const bulkDiagram = `flowchart LR
   App["Your app"] -->|"one bulkWrite call"| Batch["Batched: insert + update + delete"]
@@ -214,31 +308,71 @@ export const bulkDiagram = `flowchart LR
 
 <Mermaid code={bulkDiagram} title="bulkWrite packs many operations into one round trip and returns a combined result" />
 
+### How big can one bulkWrite be?
+
+Older advice says to hand-split big batches. The driver already does that on the wire (it respects the server's `maxWriteBatchSize` and `maxMessageSizeBytes` for you), so a single call can carry a very large list. On this Mac against a single-node replica set:
+
+```js
+// app/bulk-large.mjs
+const ops = Array.from({ length: 250000 }, (_, i) => ({ insertOne: { document: { n: i } } }));
+let t = Date.now();
+const r = await db.collection("bulk").bulkWrite(ops, { ordered: false });
+console.log("250k-op bulkWrite:", r.insertedCount, "in", Date.now() - t, "ms");
+t = Date.now();
+const r2 = await db.collection("many").insertMany(Array.from({ length: 100000 }, (_, i) => ({ n: i })));
+console.log("100k insertMany  :", r2.insertedCount, "in", Date.now() - t, "ms");
+if (r.insertedCount !== 250000) throw new Error("expected all 250000");
+```
+
+```text
+250k-op bulkWrite: 250000 in 833 ms
+100k insertMany  : 100000 in 323 ms
+```
+
+Timings are from two runs on one machine (862 ms and 833 ms for the 250 000 operations) - the point is that 250 000 operations went through in a single call without manual batching. What you still have to watch are limits that *are* visible to you, such as the 16 MiB size of any one document.
+
 ## Ordered versus unordered
 
-By default `bulkWrite` is **ordered**: it runs the operations in sequence and stops at the first one that errors, leaving the rest unrun. Switch it to **unordered** and the server may run the operations in any order and keeps going past failures, applying every operation that can succeed. Unordered is often faster and is the right choice when the operations do not depend on each other.
+By default `bulkWrite` is **ordered**: it runs the operations in sequence and stops at the first one that errors, leaving the rest unrun. Switch it to **unordered** and the server may run the operations in any order and keeps going past failures, applying every operation that can succeed. Unordered is often faster and is the right choice when the operations do not depend on each other. The original example inserted two different names and so could not fail either way; to see the difference you need something that fails - a unique index and a duplicate:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.bulkWrite(
-      [
-        { insertOne: { document: { name: "Barbara", joined: 2026 } } },
-        { insertOne: { document: { name: "Tim", joined: 2026 } } }
-      ],
-      { ordered: false }
-    )
+    // mongosh/bulk-ordered.js
+    db.roster.createIndex({ name: 1 }, { unique: true });
+    db.roster.insertOne({ name: "Tim", joined: 2026 });
+    const ops = () => [
+      { insertOne: { document: { name: "Barbara", joined: 2026 } } },
+      { insertOne: { document: { name: "Tim", joined: 2026 } } },        // duplicate: fails
+      { insertOne: { document: { name: "Margaret", joined: 2026 } } },
+    ];
+    for (const ordered of [true, false]) {
+      db.roster.deleteMany({ name: { $in: ["Barbara", "Margaret"] } });
+      let err;
+      try { db.roster.bulkWrite(ops(), { ordered }); } catch (e) { err = e; }
+      console.log(`ordered=${ordered}:`, err.name, err.code, "inserted", err.result.insertedCount,
+        "failed at", err.writeErrors.map((w) => w.index), "->", db.roster.find({}, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name));
+    }
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").bulkWrite(
-      [
-        { insertOne: { document: { name: "Barbara", joined: 2026 } } },
-        { insertOne: { document: { name: "Tim", joined: 2026 } } },
-      ],
-      { ordered: false }
-    );
+    // app/bulk-ordered.mjs
+    const roster = db.collection("roster");
+    await roster.createIndex({ name: 1 }, { unique: true });
+    await roster.insertOne({ name: "Tim", joined: 2026 });
+    const ops = () => [
+      { insertOne: { document: { name: "Barbara", joined: 2026 } } },
+      { insertOne: { document: { name: "Tim", joined: 2026 } } },
+      { insertOne: { document: { name: "Margaret", joined: 2026 } } },
+    ];
+    for (const ordered of [true, false]) {
+      await roster.deleteMany({ name: { $in: ["Barbara", "Margaret"] } });
+      try { await roster.bulkWrite(ops(), { ordered }); } catch (e) {
+        console.log(`ordered=${ordered}:`, e.name, e.code, "inserted", e.result.insertedCount,
+          "failed at", e.writeErrors.map((w) => w.index), "->", (await roster.find().sort({ name: 1 }).toArray()).map((d) => d.name));
+      }
+    }
     ```
   </TabItem>
   <TabItem label="Python">
@@ -269,58 +403,141 @@ By default `bulkWrite` is **ordered**: it runs the operations in sequence and st
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    use mongodb::options::{BulkWriteOptions, WriteModel};
+    use mongodb::options::{InsertOneModel, WriteModel};
 
-    let opts = BulkWriteOptions::builder().ordered(false).build();
-    coll.client()
-        .bulk_write(vec![
-            WriteModel::InsertOne {
-                namespace: coll.namespace(),
-                document: doc! { "name": "Barbara", "joined": 2026 },
-            },
-            WriteModel::InsertOne {
-                namespace: coll.namespace(),
-                document: doc! { "name": "Tim", "joined": 2026 },
-            },
-        ])
-        .with_options(opts)
-        .await?;
+    let ns = coll.namespace();
+    let models = vec![
+        WriteModel::from(
+            InsertOneModel::builder()
+                .namespace(ns.clone())
+                .document(doc! { "name": "Barbara", "joined": 2026 })
+                .build(),
+        ),
+        WriteModel::from(
+            InsertOneModel::builder()
+                .namespace(ns.clone())
+                .document(doc! { "name": "Tim", "joined": 2026 })
+                .build(),
+        ),
+    ];
+    client.bulk_write(models).ordered(false).await?;
     ```
   </TabItem>
 </Tabs>
 
-**In Compass:** there is no bulk-write panel, but upserts surface naturally — when you edit a document the **Update** action offers an **upsert** checkbox so a non-matching filter inserts instead.
+The real result: with `ordered: true` the second insert (index 1, the duplicate `Tim`) failed with code `11000` and Margaret, after it, never ran - only Barbara was inserted. With `ordered: false` the duplicate was still reported, but Barbara **and** Margaret both went in:
+
+```text
+ordered=true: MongoBulkWriteError 11000 inserted 1 failed at [ 1 ] -> [ 'Barbara', 'Tim' ]
+ordered=false: MongoBulkWriteError 11000 inserted 2 failed at [ 1 ] -> [ 'Barbara', 'Margaret', 'Tim' ]
+```
+
+In both modes the error tells you exactly which operation failed (`writeErrors[i].index`) and how many succeeded (`result.insertedCount`); neither mode rolls back what it applied.
+
+**In Compass:** there is no bulk-write panel; run a `bulkWrite` in the embedded shell, or in your driver.
 
 ## Tips and gotchas
 
-- An upsert builds its new document from **both** the filter's equality conditions and the update operators. Make the filter specific (the fields that identify the record) so the inserted document comes out the way you expect.
-- After an upsert, check `matchedCount`: `0` plus an `upsertedId` means a document was created; `1` means an existing one was updated.
-- Ordered `bulkWrite` stops at the first error. If you want every independent operation attempted regardless of failures, set the unordered option.
-- `bulkWrite` is about efficiency, not transactions. Unless you wrap it in a transaction, the operations are not all-or-nothing — some can succeed while others fail.
+- An upsert builds its new document from **both** the filter's equality conditions and the update operators - range conditions are not copied (see `$setOnInsert` above). Make the filter specific so the inserted document comes out the way you expect.
+- After an upsert, check `matchedCount`: `0` plus an `insertedId` (shell) / `upsertedId` (drivers) means a document was created; `1` means an existing one was updated.
+- **An upsert is only race-safe with a unique index** on the filter fields (proven below).
+- Ordered `bulkWrite` stops at the first error. If you want every independent operation attempted regardless of failures, set `ordered: false`.
+- `bulkWrite` is about efficiency, not transactions. Unless you wrap it in a transaction, the operations are not all-or-nothing - some can succeed while others fail (`inserted 1` above).
+- The shell result has `insertedCount` on `bulkWrite` but not on `insertMany`; check which object you have.
 
 <Callout title="Fewer round trips, same building blocks">
-Upserts and bulk writes do not add new query language — they pack the inserts, updates, and deletes you already know into a single trip to the server. That is most of what "making CRUD fast" means in practice.
+Upserts and bulk writes do not add new query language - they pack the inserts, updates, and deletes you already know into a single trip to the server. That is most of what "making CRUD fast" means in practice.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant asked for a page-view counter will reach for an upsert and explain that it "guarantees one row per page":
+
+<SpotTheBug lang="js" code={`// AI comment: "upsert is atomic, so there can never be two rows for the same page"
+async function recordView(db, page) {
+  await db.collection("counters").updateOne(
+    { page },
+    { $inc: { views: 1 } },
+    { upsert: true }
+  );
+}`}>
+
+The update of one document is atomic, but "find nothing, then insert" is two steps, and without a unique index two concurrent calls can both find nothing and both insert. We fired 100 parallel upserts per page for 20 pages on one client: **17 to 19 of the 20 pages ended up with duplicate rows, and one page collected up to 16 documents** (three runs: 19/20 with at most 7 documents, 17/20 with at most 13, 17/20 with at most 16 - the exact count varies with timing), every upsert reported success, and the totals were still correct (2000 views) - so nothing looked wrong. With a unique index on `page`, the same run produced exactly **one document per page, no rejected upserts, 2000 total views** (the server retries the loser of the race as an update):
+
+```js
+// app/upsert-race.mjs
+const ROUNDS = 20, PARALLEL = 100;
+async function race(useUniqueIndex) {
+  const c = db.collection(useUniqueIndex ? "counters_unique" : "counters_plain");
+  if (useUniqueIndex) await c.createIndex({ page: 1 }, { unique: true });
+  let roundsWithDuplicates = 0, maxDocs = 0, rejected = 0;
+  for (let r = 0; r < ROUNDS; r++) {
+    const page = `/home-${r}`;
+    const results = await Promise.allSettled(Array.from({ length: PARALLEL }, () =>
+      c.updateOne({ page }, { $inc: { views: 1 } }, { upsert: true })));
+    rejected += results.filter((x) => x.status === "rejected").length;
+    const docs = await c.countDocuments({ page });
+    if (docs > 1) roundsWithDuplicates++;
+    maxDocs = Math.max(maxDocs, docs);
+  }
+  const total = (await c.aggregate([{ $group: { _id: null, v: { $sum: "$views" } } }]).next()).v;
+  return { roundsWithDuplicates: `${roundsWithDuplicates}/${ROUNDS}`, maxDocsForOnePage: maxDocs, rejectedUpserts: rejected, totalViews: total };
+}
+const plain = await race(false);
+const unique = await race(true);
+console.log("without unique index:", plain);
+console.log("with unique index   :", unique);
+if (unique.maxDocsForOnePage !== 1 || unique.totalViews !== ROUNDS * PARALLEL) throw new Error("unique index should give one document per page");
+```
+
+```text
+without unique index: {
+  roundsWithDuplicates: '17/20',
+  maxDocsForOnePage: 16,
+  rejectedUpserts: 0,
+  totalViews: 2000
+}
+with unique index   : {
+  roundsWithDuplicates: '0/20',
+  maxDocsForOnePage: 1,
+  rejectedUpserts: 0,
+  totalViews: 2000
+}
+```
+
+The fix is one line, done once: `createIndex({ page: 1 }, { unique: true })`.
+
+</SpotTheBug>
+
+## Mental Model
+
+An upsert is **"match, else create" evaluated on the server**, but the *uniqueness* of what it creates is only as strong as the constraint behind it. A bulk write is **a list of independent commands in one envelope**: the envelope saves round trips, `ordered` decides whether the list stops at the first failure, and neither gives you all-or-nothing. Together: the unique index protects correctness, the bulk envelope protects latency.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `bulkWrite` | Combines many operations into one round trip, much faster than calling them separately | Results come back as one combined object — you must unpack each operation's own error yourself when some fail |
-| upsert | One round trip that covers both insert-if-missing and update-if-present | If multiple requests race with the same filter at once, a duplicate document can be created unless a unique index backs the filter |
-| Explicit check-then-insert/update (`findOne` first, then insert/update) | Fine-grained control, lets you decide extra logic before writing | Two round trips instead of one, and there is still a gap between the find and the write where another request can slip in (also a race, but harder to control) |
+| `bulkWrite` | Combines many operations into one round trip; 250 000 inserts in about 850 ms in one call | One combined result - you must unpack `writeErrors` yourself when some fail; not atomic |
+| `bulkWrite` ordered (default) | Predictable: operations run in list order and stop at the first error | One failure leaves every later operation unrun (`Margaret` above) |
+| `bulkWrite` unordered | Keeps going past failures; often faster | Order not guaranteed; you must read `writeErrors` |
+| upsert (with unique index) | One round trip covers insert-if-missing and update-if-present; race-safe | Needs the unique index (extra write cost and storage) |
+| upsert (no unique index) | Nothing extra to maintain | Concurrent calls duplicate documents (17-19 of 20 pages in our runs) |
+| Explicit check-then-write (`findOne` first) | Fine-grained control before writing | Two round trips and the same race window between find and write |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Believing an upsert always prevents duplicate documents** — without a unique index covering the filter fields, firing concurrent upserts with the same filter can create duplicates, because MongoDB checks "not found" and inserts separately in each request before either sees the other's result.
-- **Putting thousands of operations into a single `bulkWrite` without batching** — a payload that is too large can hit driver or server limits. Split it into reasonably sized batches and send several rounds instead.
-- **Using ordered `bulkWrite` (the default) when the operations are unrelated** — if operation 3 fails, operations 4 through 100 never run at all, even though nothing about them depended on the failed one, so work that should have succeeded is lost. Use unordered when operations are genuinely independent.
+- **"An upsert always prevents duplicates."** - only with a unique index behind the filter; without it we got up to 16 documents for one page.
+- **"`upsertedId` is in every result."** - mongosh reports `insertedId` and `upsertedCount`; the drivers report `upsertedId`.
+- **"You must split big bulk writes yourself."** - the driver batches on the wire; 250 000 operations ran in one call in about 850 ms. Batch only for memory or your own progress reporting.
+- **"Unordered means faster and safe."** - it keeps going past failures, but you still have to read `writeErrors`, and nothing is rolled back.
+- **"A range in the upsert filter ends up in the new document."** - only equality conditions are copied.
+- **"`bulkWrite` is a transaction."** - it is not; `inserted 1` remained after the failure.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **Inventory sync systems** — when syncing stock from a real warehouse every night, use an unordered `bulkWrite` combining thousands of `updateOne` operations (adjusting stock per SKU) into a handful of round trips, instead of firing an update per SKU.
->
-> **Page-view / analytics counters** — use an upsert with `updateOne({ page, date }, { $inc: { views: 1 } }, { upsert: true })` to create that day's count row if it does not exist yet, or increment it if it does, backed by a unique compound index on `(page, date)` to prevent duplicate rows under heavy concurrent traffic.
+> The `updateOne` reference states the requirement we measured: "To avoid multiple upserts, ensure that the `filter` field(s) are uniquely indexed" ([db.collection.updateOne](https://www.mongodb.com/docs/manual/reference/method/db.collection.updateOne/), consulted 2026-09-30). In our run the unique index produced no rejected upserts - the losing concurrent upsert was retried by the server as an update - so 2000 of 2000 increments landed on 20 documents.
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (Go's `options.Update()` was corrected to `options.UpdateOne()` for driver v2, and the Rust bulk_write tab rewritten - both failed to compile as originally written). They are not executed by the course's automated checker._
 
 export const quizBulk = [
   {
@@ -332,6 +549,7 @@ export const quizBulk = [
       'The filter is ignored and a blank document is created',
     ],
     answer: 1,
+    explain: 'The new document combined the equality filter (name: "Katherine") with the update ($set / $inc) - upsertedCount: 1.',
   },
   {
     q: 'What is the main benefit of bulkWrite over separate calls?',
@@ -342,26 +560,40 @@ export const quizBulk = [
       'It automatically retries failed operations',
     ],
     answer: 2,
+    explain: 'One call, one combined result. It is not a transaction: in the real run a failed operation left earlier inserts in place.',
   },
   {
-    q: 'How does an ordered bulkWrite behave when one operation fails?',
+    q: 'A unique index exists on name and the middle operation of three inserts is a duplicate. How do ordered and unordered bulkWrite differ?',
     options: [
-      'It runs the remaining operations anyway',
-      'It stops at the failure, leaving later operations unrun',
-      'It rolls back all previously applied operations',
-      'It converts the batch to unordered automatically',
+      'Ordered inserts 2, unordered inserts 1',
+      'Ordered inserts 1 and stops; unordered inserts 2 and reports the failure',
+      'Both insert 0 (all-or-nothing)',
+      'Both insert 3 and ignore the duplicate',
     ],
     answer: 1,
+    explain: 'Real result: ordered=true inserted 1 (Barbara) and never ran Margaret; ordered=false inserted 2. Both threw MongoBulkWriteError 11000 with writeErrors index 1.',
   },
   {
     q: 'After an upsert, which result signals that a new document was created?',
     options: [
       'modifiedCount is 1',
-      'matchedCount is 0 and an upsertedId is present',
+      'matchedCount is 0 and an inserted/upserted id is present (upsertedCount 1)',
       'deletedCount is 1',
       'acknowledged is false',
     ],
     answer: 1,
+    explain: 'In mongosh the id is called insertedId; in the drivers upsertedId. matchedCount 0 with upsertedCount 1 means an insert happened.',
+  },
+  {
+    q: '100 concurrent upserts with the same filter run against a collection with NO unique index. What does the real run show?',
+    options: [
+      'Always exactly one document',
+      'Often several duplicate documents, and every upsert still reports success',
+      'All but one upsert are rejected with an error',
+      'The collection is locked and the calls run one by one',
+    ],
+    answer: 1,
+    explain: '17-19 of 20 pages had duplicates (up to 16 documents) with no rejected upserts. With a unique index the same run produced 1 document per page.',
   },
 ]
 

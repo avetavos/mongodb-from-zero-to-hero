@@ -1,6 +1,6 @@
 ---
 title: Upsert และ bulk write
-description: insert-หรือ-update ด้วย upsert และรวมการเขียนหลายครั้งเป็น round trip เดียวด้วย bulkWrite ทั้งแบบ ordered และ unordered
+description: insert-หรือ-update ด้วย upsert (และทำไมต้องมี unique index) และรวมหลายการเขียนเป็น round trip เดียวด้วย bulkWrite แบบ ordered หรือ unordered — พร้อม acknowledgement จำนวนการแข่งขัน และเวลาจริง
 sidebar:
   order: 6
 ---
@@ -9,36 +9,75 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-สองท่าสุดท้ายในโมดูลนี้เป็นเรื่องของการทำสิ่งต่าง ๆ ได้มากขึ้นด้วย round trip ที่น้อยลง **upsert** ตอบคำถามที่คุณเจอตลอดเวลา นั่นคือ "ถ้า document นี้มีอยู่แล้วก็ update ถ้ายังไม่มีก็สร้างใหม่" **bulk write** ให้คุณส่งรายการของ operation ที่ปนกันทั้งหมด — insert, update, delete — ไปยัง server ในการเรียกครั้งเดียว แทนที่จะยิงข้ามเครือข่ายหนึ่งรอบต่อหนึ่ง operation
+สองท่าสุดท้ายในโมดูลนี้คือการทำมากขึ้นด้วย round trip น้อยลง **upsert** ตอบคำถามที่คุณเจอบ่อย: "อัปเดต document นี้ถ้ามีอยู่ ไม่เช่นนั้นสร้างใหม่" **bulk write** ให้คุณส่งรายการ operation ผสม — insert, update, delete — ไปยัง server ในการเรียกเดียวแทนที่จะเดินทางผ่านเครือข่ายทีละ operation ทั้งสองไม่ได้เพิ่ม operator ใหม่ แต่ประกอบเมธอดที่คุณรู้จักให้มีประสิทธิภาพมากขึ้น
 
-ทั้งคู่ไม่ได้เพิ่ม operator ใหม่ แต่เอา method ที่คุณรู้อยู่แล้วมาประกอบใหม่ให้คุ้มขึ้น
+เราจบด้วย collection `members` อีกครั้ง ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน)
 
-เราจบด้วย collection `members` ของเราอีกครั้งหนึ่ง
-
-## Upsert: update หรือ insert
-
-เพิ่ม option upsert เข้าไปในการ update แล้วเมื่อ filter ไม่ตรงกับอะไรเลย MongoDB จะ insert document ใหม่ที่สร้างขึ้นจาก filter บวกกับ update เมื่อ filter *เจอ* จริง ๆ ก็ทำตัวเหมือน update ธรรมดา ในที่นี้เราบันทึกการมาเยือนของ "Katherine" — ถ้าเธอยังไม่ได้เป็นสมาชิก สิ่งนี้จะสร้างเธอขึ้นมา:
+## ข้อมูลที่เราเขียน
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.updateOne(
-      { name: "Katherine" },
-      { $set: { joined: 2026 }, $inc: { visits: 1 } },
-      { upsert: true }
-    )
+    // mongosh/bulk-seed.js
+    db.members.insertMany([
+      { name: "Grace", joined: 2024, fines: 0 },
+      { name: "Linus", joined: 2023, fines: 2 },
+    ]);
+    assert.strictEqual(db.members.countDocuments(), 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/bulk-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Grace", joined: 2024, fines: 0 },
+      { name: "Linus", joined: 2023, fines: 2 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 2) throw new Error("expected 2");
+    ```
+  </TabItem>
+</Tabs>
+
+## Upsert: update หรือ insert
+
+เพิ่ม option upsert ให้การอัปเดต แล้วเมื่อ filter ไม่ตรงอะไรเลย MongoDB จะ insert document ใหม่ที่สร้างจาก filter บวก update เมื่อ filter *ตรง* มันทำตัวเหมือนการอัปเดตปกติ ที่นี่เราบันทึกการเข้าชมของ "Katherine" — ถ้าเธอยังไม่ใช่สมาชิก นี่จะสร้างเธอ:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/upsert.js
+    const first = db.members.updateOne(
+      { name: "Katherine" },
+      { $set: { joined: 2026 }, $inc: { visits: 1 } },
+      { upsert: true }
+    );
+    console.log(first);
+    console.log(db.members.findOne({ name: "Katherine" }));
+    const second = db.members.updateOne(
+      { name: "Katherine" },
+      { $set: { joined: 2026 }, $inc: { visits: 1 } },
+      { upsert: true }
+    );
+    console.log(second);
+    assert.strictEqual(first.upsertedCount, 1);
+    assert.strictEqual(second.matchedCount, 1);
+    assert.strictEqual(db.members.findOne({ name: "Katherine" }).visits, 2);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/upsert.mjs
     const res = await db.collection("members").updateOne(
       { name: "Katherine" },
       { $set: { joined: 2026 }, $inc: { visits: 1 } },
       { upsert: true }
     );
+    console.log(res);
     console.log(res.upsertedId);
+    if (res.upsertedCount !== 1) throw new Error("expected an insert");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -53,7 +92,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
   <TabItem label="Go">
     ```go
-    opts := options.Update().SetUpsert(true)
+    opts := options.UpdateOne().SetUpsert(true)
     res, err := coll.UpdateOne(
         ctx,
         bson.M{"name": "Katherine"},
@@ -83,52 +122,92 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-เพราะไม่มี Katherine อยู่ acknowledgement จึงรายงาน `upsertedId` — `_id` ของ document ที่ถูกสร้างขึ้น `matchedCount` เป็น `0` ที่เป็นสัญญาณบอกคุณว่าเกิดการ insert ขึ้นแทนที่จะเป็นการ update:
+เพราะไม่มี Katherine อยู่ การเรียกครั้งแรกจึงสร้างเธอ **acknowledgement ต่างกันระหว่าง shell และ driver** และเนื้อหาบทเก่าผิดตรงนี้: shell รายงาน `_id` ใหม่เป็น `insertedId` (**ไม่มี** field `upsertedId` ใน mongosh) พร้อม `upsertedCount: 1` ขณะที่ Node driver รายงาน `upsertedId` และ `upsertedCount: 1` ทั้งสองแบบ `matchedCount: 0` คือสัญญาณว่าเกิดการ insert ไม่ใช่ update:
 
-```json
+```text
+mongosh
 {
-  "acknowledged": true,
-  "matchedCount": 0,
-  "modifiedCount": 0,
-  "upsertedId": "65f0c5e6e4b0a1c2e4b0a1f0"
+  acknowledged: true,
+  insertedId: ObjectId('6abcaadc73c3d0e445c6944e'),
+  matchedCount: 0,
+  modifiedCount: 0,
+  upsertedCount: 1
 }
+
+Node
+{
+  acknowledged: true,
+  modifiedCount: 0,
+  upsertedId: new ObjectId('6abcaae473c3d0e445c69452'),
+  upsertedCount: 1,
+  matchedCount: 0
+}
+
+Python  6abcab0173c3d0e445c696c9          (res.upserted_id)
+Go      ObjectID("6abcab0373c3d0e445c696ca")   (res.UpsertedID)
+Rust    Some(ObjectId("6abcab0673c3d0e445c696cb"))
 ```
 
-document ใหม่ผสม filter และ update operator เข้าด้วยกัน:
+document ใหม่รวม filter และ update operator (`findOne`) และการรันการเรียกเดิมครั้งที่สองจะอัปเดตเธอแทน — `matchedCount: 1`, `modifiedCount: 1`, `upsertedCount: 0` และ `visits` เพิ่มเป็น `2` (ใน Node ack ที่สองมี `upsertedId: null`):
 
-```json
-{
-  "_id": "65f0c5e6e4b0a1c2e4b0a1f0",
-  "name": "Katherine",
-  "joined": 2026,
-  "visits": 1
-}
+```text
+{ _id: ObjectId('6abcaadc73c3d0e445c6944e'), name: 'Katherine', joined: 2026, visits: 1 }
+{ acknowledged: true, insertedId: null, matchedCount: 1, modifiedCount: 1, upsertedCount: 0 }
 ```
 
-รันการเรียกเดียวกันเป๊ะ ๆ เป็นครั้งที่สอง ตอนนี้ Katherine มีอยู่แล้ว จึงกลายเป็นการ update แทน `matchedCount` กลายเป็น `1`, `visits` ไต่ขึ้นไปเป็น `2` และ `upsertedId` ก็ไม่ปรากฏ
+### อะไรเข้าไปอยู่ใน document ที่ insert: `$setOnInsert`
 
-## bulkWrite: operation หลายรายการ round trip เดียว
+document ที่ insert คือเงื่อนไข **equality** ของ filter บวก update เงื่อนไขที่ไม่ใช่ equality *ไม่ถูก* คัดลอก และ `$setOnInsert` เขียน field เฉพาะเมื่อ upsert insert (ไม่ทำอะไรในทางอัปเดต):
 
-`bulkWrite` รับรายการของ operation แล้วส่งไปพร้อมกัน แต่ละรายการระบุ operation ของตัวเอง พร้อม filter และ update ชุดเดียวกับที่คุณจะส่งทีละครั้ง ดังนั้นคุณจึงผสม insert, update และ delete ได้อย่างอิสระ ในที่นี้เรารับสมาชิกใหม่หนึ่งคน คิดค่าปรับหนึ่งครั้ง และลบสมาชิกที่ขาดการติดต่อ — ทั้งหมดในการเรียกครั้งเดียว:
+```js
+// mongosh/upsert-setoninsert.js
+const r1 = db.people.updateOne(
+  { name: "Ada", joined: { $gt: 2000 } },                       // name is equality, joined is a range
+  { $setOnInsert: { fines: 0, createdBy: "upsert" }, $inc: { visits: 1 } },
+  { upsert: true }
+);
+console.log(r1.upsertedCount, db.people.findOne({ name: "Ada" }, { _id: 0 }));
+db.people.updateOne({ name: "Ada" }, { $setOnInsert: { fines: 99 }, $inc: { visits: 1 } }, { upsert: true });
+console.log(db.people.findOne({ name: "Ada" }, { _id: 0 }));    // fines still 0: $setOnInsert skipped
+assert.strictEqual(db.people.findOne({ name: "Ada" }).fines, 0);
+assert.strictEqual("joined" in db.people.findOne({ name: "Ada" }), false);
+```
+
+```text
+1 { name: 'Ada', createdBy: 'upsert', fines: 0, visits: 1 }
+{ name: 'Ada', createdBy: 'upsert', fines: 0, visits: 2 }
+```
+
+equality ของ `name` มาจาก filter; range บน `joined` ไม่มา (ไม่มี field `joined` ถูกสร้าง); `fines: 99` ในการเรียกครั้งที่สองถูกเมินเพราะ document มีอยู่แล้ว
+
+## bulkWrite: หลาย operation, round trip เดียว
+
+`bulkWrite` รับรายการ operation และส่งไปพร้อมกัน แต่ละรายการระบุชื่อ operation และมี filter กับ update เดียวกับที่คุณจะส่งแยกกัน จึงผสม insert, update และ delete ได้อย่างอิสระ ที่นี่เรารับสมาชิกใหม่หนึ่งคน คิดค่าปรับ และลบสมาชิกที่หมดอายุ — ทั้งหมดในการเรียกเดียว:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.bulkWrite([
+    // mongosh/bulk-write.js
+    const res = db.members.bulkWrite([
       { insertOne: { document: { name: "Tim", joined: 2026, fines: 0 } } },
       { updateOne: { filter: { name: "Grace" }, update: { $inc: { fines: 1 } } } },
       { deleteOne: { filter: { name: "Linus" } } }
-    ])
+    ]);
+    console.log(res);
+    assert.strictEqual(res.insertedCount, 1);
+    assert.strictEqual(res.deletedCount, 1);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/bulk-write.mjs
     const res = await db.collection("members").bulkWrite([
       { insertOne: { document: { name: "Tim", joined: 2026, fines: 0 } } },
       { updateOne: { filter: { name: "Grace" }, update: { $inc: { fines: 1 } } } },
       { deleteOne: { filter: { name: "Linus" } } },
     ]);
-    console.log(res.insertedCount, res.modifiedCount, res.deletedCount);
+    console.log(res);
+    if (res.insertedCount !== 1 || res.modifiedCount !== 1 || res.deletedCount !== 1) throw new Error("unexpected counts");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -161,51 +240,64 @@ document ใหม่ผสม filter และ update operator เข้าด�
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    use mongodb::options::WriteModel;
+    use mongodb::options::{DeleteOneModel, InsertOneModel, UpdateOneModel, WriteModel};
 
-    let res = coll
-        .client()
-        .bulk_write(vec![
-            WriteModel::InsertOne {
-                namespace: coll.namespace(),
-                document: doc! { "name": "Tim", "joined": 2026, "fines": 0 },
-            },
-            WriteModel::UpdateOne {
-                namespace: coll.namespace(),
-                filter: doc! { "name": "Grace" },
-                update: doc! { "$inc": { "fines": 1 } }.into(),
-                array_filters: None,
-                collation: None,
-                hint: None,
-                upsert: None,
-            },
-            WriteModel::DeleteOne {
-                namespace: coll.namespace(),
-                filter: doc! { "name": "Linus" },
-                collation: None,
-                hint: None,
-            },
-        ])
-        .await?;
+    let ns = coll.namespace();
+    let models = vec![
+        WriteModel::from(
+            InsertOneModel::builder()
+                .namespace(ns.clone())
+                .document(doc! { "name": "Tim", "joined": 2026, "fines": 0 })
+                .build(),
+        ),
+        WriteModel::from(
+            UpdateOneModel::builder()
+                .namespace(ns.clone())
+                .filter(doc! { "name": "Grace" })
+                .update(doc! { "$inc": { "fines": 1 } })
+                .build(),
+        ),
+        WriteModel::from(
+            DeleteOneModel::builder()
+                .namespace(ns.clone())
+                .filter(doc! { "name": "Linus" })
+                .build(),
+        ),
+    ];
+    let res = client.bulk_write(models).await?;
     println!("{} {} {}", res.inserted_count, res.modified_count, res.deleted_count);
     ```
   </TabItem>
 </Tabs>
 
-acknowledgement เพียงหนึ่งเดียวสรุปทุกอย่างที่เกิดขึ้นตลอด operation ทั้งสามรายการ:
+acknowledgement เดียวสรุปทุกอย่างที่เกิดขึ้นข้ามทั้งสาม operation รูปร่างของ shell และ Node (และ `bulk_api_result` ของ Python) ต่างกันในรายละเอียด:
 
-```json
+```text
+mongosh
 {
-  "acknowledged": true,
-  "insertedCount": 1,
-  "matchedCount": 1,
-  "modifiedCount": 1,
-  "deletedCount": 1,
-  "upsertedCount": 0
+  acknowledged: true,
+  insertedCount: 1,
+  insertedIds: { '0': ObjectId('6abcaadcbdebc81d34174703') },
+  matchedCount: 1,
+  modifiedCount: 1,
+  deletedCount: 1,
+  upsertedCount: 0,
+  upsertedIds: {}
 }
+
+Node
+BulkWriteResult {
+  insertedCount: 1, matchedCount: 1, modifiedCount: 1, deletedCount: 1, upsertedCount: 0,
+  upsertedIds: {}, insertedIds: { '0': new ObjectId('6abcaae45031e43a4870ad5a') }
+}
+
+Python  {'writeErrors': [], 'writeConcernErrors': [], 'nInserted': 1, 'nUpserted': 0, 'nMatched': 1, 'nModified': 1, 'nRemoved': 1, 'upserted': []}
+Go, Rust: 1 1 1
 ```
 
-หัวใจทั้งหมดอยู่ที่ round trip นั่นคือ แทนที่จะเป็นการสนทนากับ server สามครั้งแยกกัน driver รวมรายการทั้งหมดเป็นชุดเดียวแล้วส่งไปรอบเดียว
+จุดสำคัญคือ round trip: แทนที่จะคุยกับ server สามครั้งแยกกัน driver รวมรายการเป็นชุดแล้วส่งครั้งเดียว operation ชนิดอื่นทำงานแบบเดียวกัน (`updateMany`, `replaceOne`, `deleteMany` และ `upsert: true` บนรายการ update); ในการรัน mongosh bulk ที่มี `updateOne` แบบ upsert, `updateMany` และ `replaceOne` คืน `matchedCount: 4, modifiedCount: 4, upsertedCount: 1, upsertedIds: { '0': ObjectId('...') }`
+
+**หมายเหตุเรื่อง Rust** `bulk_write` ของ Rust driver อยู่บน **client** (ครอบคลุมหลาย namespace) และต้องใช้ **server MongoDB 8.0+**; ชนิด model เป็น builder (`InsertOneModel::builder()...`) ที่ห่อด้วย `WriteModel` รูป struct-literal (`WriteModel::InsertOne { namespace: ..., document: ... }`) ที่ร่างเก่าของบทนี้แสดงคอมไพล์ไม่ผ่านบน Rust driver 3.9.1 (`variant WriteModel::InsertOne has no field named namespace`) — โค้ดด้านบนคือสิ่งที่เรารัน
 
 export const bulkDiagram = `flowchart LR
   App["Your app"] -->|"one bulkWrite call"| Batch["Batched: insert + update + delete"]
@@ -214,33 +306,73 @@ export const bulkDiagram = `flowchart LR
   Server --> R2["modifiedCount: 1"]
   Server --> R3["deletedCount: 1"]`
 
-<Mermaid code={bulkDiagram} title="bulkWrite อัด operation หลายรายการเข้าไปใน round trip เดียวและคืนผลลัพธ์ที่รวมกัน" />
+<Mermaid code={bulkDiagram} title="bulkWrite รวมหลาย operation ไว้ใน round trip เดียวและคืนผลลัพธ์รวม" />
 
-## ordered เทียบกับ unordered
+### bulkWrite เดียวใหญ่ได้แค่ไหน?
 
-โดยปริยาย `bulkWrite` เป็นแบบ **ordered** นั่นคือรัน operation ไล่ตามลำดับ แล้วหยุดที่รายการแรกที่ error ทำให้ที่เหลือไม่ได้รัน สลับไปเป็นแบบ **unordered** แล้ว server อาจรัน operation ในลำดับใดก็ได้และเดินหน้าต่อแม้มีความล้มเหลว โดยใช้ทุก operation ที่สามารถสำเร็จได้ unordered มักจะเร็วกว่าและเป็นตัวเลือกที่ถูกต้องเมื่อ operation ต่าง ๆ ไม่ขึ้นต่อกัน
+คำแนะนำเก่าบอกให้แบ่ง batch ใหญ่เอง แต่ driver ทำให้แล้วบนสาย (เคารพ `maxWriteBatchSize` และ `maxMessageSizeBytes` ของ server ให้คุณ) การเรียกเดียวจึงรับรายการใหญ่มากได้ บน Mac เครื่องนี้กับ replica set โหนดเดียว:
+
+```js
+// app/bulk-large.mjs
+const ops = Array.from({ length: 250000 }, (_, i) => ({ insertOne: { document: { n: i } } }));
+let t = Date.now();
+const r = await db.collection("bulk").bulkWrite(ops, { ordered: false });
+console.log("250k-op bulkWrite:", r.insertedCount, "in", Date.now() - t, "ms");
+t = Date.now();
+const r2 = await db.collection("many").insertMany(Array.from({ length: 100000 }, (_, i) => ({ n: i })));
+console.log("100k insertMany  :", r2.insertedCount, "in", Date.now() - t, "ms");
+if (r.insertedCount !== 250000) throw new Error("expected all 250000");
+```
+
+```text
+250k-op bulkWrite: 250000 in 833 ms
+100k insertMany  : 100000 in 323 ms
+```
+
+เวลามาจากสองการรันบนเครื่องเดียว (862 ms และ 833 ms สำหรับ 250 000 operation) — ประเด็นคือ 250 000 operation ผ่านไปในการเรียกเดียวโดยไม่ต้องแบ่ง batch เอง สิ่งที่ยังต้องระวังคือขีดจำกัดที่ *มองเห็นได้* เช่นขนาด 16 MiB ของ document หนึ่งใบ
+
+## Ordered เทียบ unordered
+
+โดยค่าเริ่มต้น `bulkWrite` เป็น **ordered**: รัน operation ตามลำดับและหยุดที่อันแรกที่ error ทิ้งที่เหลือไว้ไม่ได้รัน สลับเป็น **unordered** แล้ว server รัน operation ในลำดับใดก็ได้และไปต่อผ่านความล้มเหลว ใช้ทุก operation ที่สำเร็จได้ Unordered มักเร็วกว่าและเป็นตัวเลือกที่ถูกเมื่อ operation ไม่พึ่งพากัน ตัวอย่างเดิม insert สองชื่อที่ต่างกันจึงไม่มีทางล้มเหลวทั้งสองแบบ; เพื่อเห็นความต่างต้องมีสิ่งที่ล้มเหลว — unique index กับตัวซ้ำ:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.bulkWrite(
-      [
-        { insertOne: { document: { name: "Barbara", joined: 2026 } } },
-        { insertOne: { document: { name: "Tim", joined: 2026 } } }
-      ],
-      { ordered: false }
-    )
+    // mongosh/bulk-ordered.js
+    db.roster.createIndex({ name: 1 }, { unique: true });
+    db.roster.insertOne({ name: "Tim", joined: 2026 });
+    const ops = () => [
+      { insertOne: { document: { name: "Barbara", joined: 2026 } } },
+      { insertOne: { document: { name: "Tim", joined: 2026 } } },        // duplicate: fails
+      { insertOne: { document: { name: "Margaret", joined: 2026 } } },
+    ];
+    for (const ordered of [true, false]) {
+      db.roster.deleteMany({ name: { $in: ["Barbara", "Margaret"] } });
+      let err;
+      try { db.roster.bulkWrite(ops(), { ordered }); } catch (e) { err = e; }
+      console.log(`ordered=${ordered}:`, err.name, err.code, "inserted", err.result.insertedCount,
+        "failed at", err.writeErrors.map((w) => w.index), "->", db.roster.find({}, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name));
+    }
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").bulkWrite(
-      [
-        { insertOne: { document: { name: "Barbara", joined: 2026 } } },
-        { insertOne: { document: { name: "Tim", joined: 2026 } } },
-      ],
-      { ordered: false }
-    );
+    // app/bulk-ordered.mjs
+    const roster = db.collection("roster");
+    await roster.createIndex({ name: 1 }, { unique: true });
+    await roster.insertOne({ name: "Tim", joined: 2026 });
+    const ops = () => [
+      { insertOne: { document: { name: "Barbara", joined: 2026 } } },
+      { insertOne: { document: { name: "Tim", joined: 2026 } } },
+      { insertOne: { document: { name: "Margaret", joined: 2026 } } },
+    ];
+    for (const ordered of [true, false]) {
+      await roster.deleteMany({ name: { $in: ["Barbara", "Margaret"] } });
+      try { await roster.bulkWrite(ops(), { ordered }); } catch (e) {
+        console.log(`ordered=${ordered}:`, e.name, e.code, "inserted", e.result.insertedCount,
+          "failed at", e.writeErrors.map((w) => w.index), "->", (await roster.find().sort({ name: 1 }).toArray()).map((d) => d.name));
+      }
+    }
     ```
   </TabItem>
   <TabItem label="Python">
@@ -271,99 +403,197 @@ export const bulkDiagram = `flowchart LR
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    use mongodb::options::{BulkWriteOptions, WriteModel};
+    use mongodb::options::{InsertOneModel, WriteModel};
 
-    let opts = BulkWriteOptions::builder().ordered(false).build();
-    coll.client()
-        .bulk_write(vec![
-            WriteModel::InsertOne {
-                namespace: coll.namespace(),
-                document: doc! { "name": "Barbara", "joined": 2026 },
-            },
-            WriteModel::InsertOne {
-                namespace: coll.namespace(),
-                document: doc! { "name": "Tim", "joined": 2026 },
-            },
-        ])
-        .with_options(opts)
-        .await?;
+    let ns = coll.namespace();
+    let models = vec![
+        WriteModel::from(
+            InsertOneModel::builder()
+                .namespace(ns.clone())
+                .document(doc! { "name": "Barbara", "joined": 2026 })
+                .build(),
+        ),
+        WriteModel::from(
+            InsertOneModel::builder()
+                .namespace(ns.clone())
+                .document(doc! { "name": "Tim", "joined": 2026 })
+                .build(),
+        ),
+    ];
+    client.bulk_write(models).ordered(false).await?;
     ```
   </TabItem>
 </Tabs>
 
-**ใน Compass:** ไม่มีแผง bulk-write แต่ upsert ปรากฏขึ้นเองอย่างเป็นธรรมชาติ — เมื่อคุณแก้ไข document การกระทำ **Update** จะมีช่อง checkbox **upsert** ให้ เพื่อให้ filter ที่ไม่ตรงกัน insert แทน
+ผลจริง: ด้วย `ordered: true` insert ที่สอง (index 1 `Tim` ซ้ำ) ล้มเหลวด้วย code `11000` และ Margaret ที่ตามหลังไม่เคยรัน — มีเพียง Barbara ที่ถูก insert ด้วย `ordered: false` ตัวซ้ำยังถูกรายงาน แต่ Barbara **และ** Margaret เข้าไปทั้งคู่:
 
-## เคล็ดลับและจุดที่ต้องระวัง
+```text
+ordered=true: MongoBulkWriteError 11000 inserted 1 failed at [ 1 ] -> [ 'Barbara', 'Tim' ]
+ordered=false: MongoBulkWriteError 11000 inserted 2 failed at [ 1 ] -> [ 'Barbara', 'Margaret', 'Tim' ]
+```
 
-- upsert สร้าง document ใหม่จาก **ทั้ง** เงื่อนไข equality ของ filter และ update operator ทำให้ filter เจาะจง (field ที่ระบุระเบียน) เพื่อให้ document ที่ insert ออกมาหน้าตาตรงกับที่คุณคาดไว้
-- หลังจาก upsert ให้ตรวจ `matchedCount` ค่า `0` บวกกับ `upsertedId` หมายความว่ามี document ถูกสร้างขึ้น ส่วน `1` หมายความว่ารายการที่มีอยู่ถูก update
-- ordered `bulkWrite` หยุดที่ error แรก ถ้าคุณต้องการให้ทุก operation ที่เป็นอิสระต่อกันถูกพยายามทำโดยไม่สนความล้มเหลว ก็กำหนด option แบบ unordered
-- `bulkWrite` เป็นเรื่องของประสิทธิภาพ ไม่ใช่ transaction เว้นแต่คุณจะห่อไว้ใน transaction operation ชุดนี้ไม่ได้เป็นแบบทั้งหมดหรือไม่ทำเลย บางรายการสำเร็จ ส่วนบางรายการล้มเหลวได้
+ทั้งสองโหมด error บอกชัดว่า operation ไหนล้มเหลว (`writeErrors[i].index`) และสำเร็จกี่รายการ (`result.insertedCount`); ไม่มีโหมดใด rollback สิ่งที่ใช้ไปแล้ว
 
-<Callout title="round trip น้อยลง องค์ประกอบเดิม">
-upsert และ bulk write ไม่ได้เพิ่มภาษา query ใหม่ — แต่อัด insert, update และ delete ที่คุณรู้อยู่แล้วให้ถึง server ในรอบเดียว นั่นคือสิ่งที่ "การทำให้ CRUD เร็ว" หมายถึงเป็นส่วนใหญ่ในทางปฏิบัติ
+**ใน Compass:** ไม่มีแผง bulk-write; รัน `bulkWrite` ใน shell ที่ฝังอยู่ หรือใน driver ของคุณ
+
+## เคล็ดลับและข้อควรระวัง
+
+- upsert สร้าง document ใหม่จาก **ทั้ง** เงื่อนไข equality ของ filter และ update operator — เงื่อนไข range ไม่ถูกคัดลอก (ดู `$setOnInsert` ด้านบน) ทำ filter ให้เจาะจงเพื่อให้ document ที่ insert ออกมาตามที่คาด
+- หลัง upsert ตรวจ `matchedCount`: `0` พร้อม `insertedId` (shell) / `upsertedId` (driver) หมายถึงมี document ถูกสร้าง; `1` หมายถึงอัปเดตอันที่มีอยู่
+- **upsert ปลอดภัยจากการแข่งขันก็ต่อเมื่อมี unique index** บน field ของ filter (พิสูจน์ด้านล่าง)
+- `bulkWrite` แบบ ordered หยุดที่ error แรก ถ้าต้องการให้ทุก operation ที่เป็นอิสระถูกลองไม่ว่าจะมีความล้มเหลว ตั้ง `ordered: false`
+- `bulkWrite` เกี่ยวกับประสิทธิภาพ ไม่ใช่ transaction ถ้าไม่ห่อด้วย transaction operation ไม่ all-or-nothing — บางอันสำเร็จขณะที่อันอื่นล้มเหลวได้ (`inserted 1` ด้านบน)
+- ผลใน shell มี `insertedCount` บน `bulkWrite` แต่ไม่มีบน `insertMany`; ตรวจว่าคุณถือ object ไหน
+
+<Callout title="round trip น้อยลง ชิ้นส่วนเดิม">
+upsert และ bulk write ไม่ได้เพิ่มภาษา query ใหม่ — พวกมันรวม insert, update และ delete ที่คุณรู้จักอยู่แล้วไว้ในการเดินทางเดียวไปยัง server นั่นคือสิ่งที่ "ทำให้ CRUD เร็ว" หมายถึงเกือบทั้งหมดในทางปฏิบัติ
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอตัวนับการเข้าชมหน้าจะหยิบ upsert และอธิบายว่า "รับประกันหนึ่งแถวต่อหน้า":
+
+<SpotTheBug lang="js" code={`// AI comment: "upsert is atomic, so there can never be two rows for the same page"
+async function recordView(db, page) {
+  await db.collection("counters").updateOne(
+    { page },
+    { $inc: { views: 1 } },
+    { upsert: true }
+  );
+}`}>
+
+การอัปเดตหนึ่ง document เป็น atomic แต่ "ไม่พบแล้ว insert" เป็นสองขั้น และเมื่อไม่มี unique index การเรียกพร้อมกันสองครั้งอาจไม่พบทั้งคู่และ insert ทั้งคู่ เรายิง upsert พร้อมกัน 100 ครั้งต่อหน้าเป็นเวลา 20 หน้าบน client เดียว: **17 ถึง 19 จาก 20 หน้ามี row ซ้ำ และหน้าหนึ่งสะสมได้ถึง 16 document** (สามครั้งที่รัน: 19/20 สูงสุด 7 document, 17/20 สูงสุด 13, 17/20 สูงสุด 16 — จำนวนแน่นอนขึ้นกับจังหวะเวลา) ทุก upsert รายงานสำเร็จ และผลรวมยังถูกต้อง (2000 views) จึงไม่มีอะไรดูผิดปกติ เมื่อมี unique index บน `page` การรันเดียวกันให้ **หนึ่ง document ต่อหน้าพอดี ไม่มี upsert ถูกปฏิเสธ รวม 2000 views** (server retry ผู้แพ้การแข่งขันเป็น update):
+
+```js
+// app/upsert-race.mjs
+const ROUNDS = 20, PARALLEL = 100;
+async function race(useUniqueIndex) {
+  const c = db.collection(useUniqueIndex ? "counters_unique" : "counters_plain");
+  if (useUniqueIndex) await c.createIndex({ page: 1 }, { unique: true });
+  let roundsWithDuplicates = 0, maxDocs = 0, rejected = 0;
+  for (let r = 0; r < ROUNDS; r++) {
+    const page = `/home-${r}`;
+    const results = await Promise.allSettled(Array.from({ length: PARALLEL }, () =>
+      c.updateOne({ page }, { $inc: { views: 1 } }, { upsert: true })));
+    rejected += results.filter((x) => x.status === "rejected").length;
+    const docs = await c.countDocuments({ page });
+    if (docs > 1) roundsWithDuplicates++;
+    maxDocs = Math.max(maxDocs, docs);
+  }
+  const total = (await c.aggregate([{ $group: { _id: null, v: { $sum: "$views" } } }]).next()).v;
+  return { roundsWithDuplicates: `${roundsWithDuplicates}/${ROUNDS}`, maxDocsForOnePage: maxDocs, rejectedUpserts: rejected, totalViews: total };
+}
+const plain = await race(false);
+const unique = await race(true);
+console.log("without unique index:", plain);
+console.log("with unique index   :", unique);
+if (unique.maxDocsForOnePage !== 1 || unique.totalViews !== ROUNDS * PARALLEL) throw new Error("unique index should give one document per page");
+```
+
+```text
+without unique index: {
+  roundsWithDuplicates: '17/20',
+  maxDocsForOnePage: 16,
+  rejectedUpserts: 0,
+  totalViews: 2000
+}
+with unique index   : {
+  roundsWithDuplicates: '0/20',
+  maxDocsForOnePage: 1,
+  rejectedUpserts: 0,
+  totalViews: 2000
+}
+```
+
+วิธีแก้คือบรรทัดเดียว ทำครั้งเดียว: `createIndex({ page: 1 }, { unique: true })`
+
+</SpotTheBug>
+
+## Mental Model
+
+upsert คือ **"ตรงก็ใช้ ไม่ตรงก็สร้าง" ที่ประเมินบน server** แต่ *ความไม่ซ้ำ* ของสิ่งที่มันสร้างแข็งแรงเท่าข้อจำกัดที่อยู่เบื้องหลังเท่านั้น bulk write คือ **รายการคำสั่งอิสระในซองเดียว**: ซองประหยัด round trip, `ordered` ตัดสินว่ารายการหยุดที่ความล้มเหลวแรกหรือไม่ และไม่มีอันไหนให้ all-or-nothing รวมกัน: unique index ปกป้องความถูกต้อง ซอง bulk ปกป้อง latency
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `bulkWrite` | รวมหลาย operation เป็น round trip เดียว เร็วกว่าการเรียกแยกมาก | ผลลัพธ์รวมเป็นก้อนเดียว ต้องแกะ error ของแต่ละ operation เองเวลามีบางตัวล้มเหลว |
-| upsert | round trip เดียว จบทั้ง insert-ถ้าไม่มี และ update-ถ้ามี | ถ้ามีหลาย request แข่งกันด้วย filter เดียวกันพร้อมกัน (race condition) อาจเกิด document ซ้ำได้ถ้าไม่มี unique index รองรับ |
-| check-then-insert/update แบบ explicit (`findOne` ก่อน แล้วค่อย insert/update) | ควบคุมได้ละเอียด ตัดสินใจ logic เพิ่มเติมได้ก่อนเขียน | สอง round trip แทนที่จะเป็นหนึ่ง และยังมีช่องว่างระหว่าง find กับ write ที่ request อื่นแทรกเข้ามาได้ (race เช่นกัน แต่ควบคุมยากกว่า) |
+| `bulkWrite` | รวมหลาย operation ใน round trip เดียว; insert 250 000 รายการในราว 850 ms ในการเรียกเดียว | ผลลัพธ์รวมเป็นชุดเดียว — ต้องแกะ `writeErrors` เองเมื่อบางอันล้มเหลว; ไม่ atomic |
+| `bulkWrite` ordered (ค่าเริ่มต้น) | คาดการณ์ได้: operation รันตามลำดับรายการและหยุดที่ error แรก | ความล้มเหลวหนึ่งครั้งทิ้ง operation ที่ตามมาทั้งหมดไม่ได้รัน (`Margaret` ด้านบน) |
+| `bulkWrite` unordered | ไปต่อผ่านความล้มเหลว; มักเร็วกว่า | ไม่รับประกันลำดับ; ต้องอ่าน `writeErrors` |
+| upsert (มี unique index) | round trip เดียวครอบคลุมทั้ง insert-ถ้าไม่มี และ update-ถ้ามี; ปลอดภัยจากการแข่งขัน | ต้องมี unique index (ต้นทุนการเขียนและพื้นที่เพิ่ม) |
+| upsert (ไม่มี unique index) | ไม่มีอะไรต้องดูแลเพิ่ม | การเรียกพร้อมกันทำ document ซ้ำ (17-19 จาก 20 หน้าในการรันของเรา) |
+| ตรวจก่อนเขียนแบบชัดเจน (`findOne` ก่อน) | ควบคุมละเอียดก่อนเขียน | สอง round trip และช่องว่างการแข่งขันเดียวกันระหว่าง find กับ write |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เชื่อว่า upsert ป้องกัน document ซ้ำได้เสมอ** — ถ้าไม่มี unique index ครอบ field ที่ใช้เป็น filter การยิง upsert พร้อมกันหลาย request ด้วย filter เดียวกันสามารถสร้าง document ซ้ำได้ เพราะ MongoDB ตรวจ "ไม่พบ" แล้ว insert แบบแยกกันในแต่ละ request ก่อนที่อีกฝั่งจะเห็นผลลัพธ์ของกันและกัน
-- **ใส่ operation หลายพันตัวลงใน `bulkWrite` เดียวโดยไม่แบ่ง batch** — payload ใหญ่เกินไปอาจชนลิมิตของ driver/ server ควรแบ่งเป็นชุดที่ขนาดพอเหมาะแล้วยิงหลายรอบ
-- **ใช้ ordered `bulkWrite` (ค่าเริ่มต้น) เมื่อ operation ต่าง ๆ ไม่เกี่ยวข้องกัน** — ถ้า operation ตัวที่ 3 ล้มเหลว operation ที่ 4-100 จะไม่ถูกรันเลย ทั้งที่ไม่มีอะไรเกี่ยวข้องกับตัวที่ล้มเหลว ทำให้งานที่ควรสำเร็จหายไปด้วย ควรใช้ unordered ถ้า operation เป็นอิสระต่อกันจริง ๆ
+- **"upsert ป้องกัน duplicate เสมอ"** — เฉพาะเมื่อมี unique index หลัง filter; ถ้าไม่มี เราได้ถึง 16 document สำหรับหนึ่งหน้า
+- **"`upsertedId` อยู่ในทุกผลลัพธ์"** — mongosh รายงาน `insertedId` และ `upsertedCount`; driver รายงาน `upsertedId`
+- **"ต้องแบ่ง bulk write ใหญ่เอง"** — driver แบ่ง batch บนสายให้; 250 000 operation รันในการเรียกเดียวในราว 850 ms แบ่ง batch เฉพาะเพื่อหน่วยความจำหรือการรายงานความคืบหน้าของคุณเอง
+- **"Unordered แปลว่าเร็วและปลอดภัย"** — มันไปต่อผ่านความล้มเหลว แต่คุณยังต้องอ่าน `writeErrors` และไม่มีอะไรถูก rollback
+- **"range ใน filter ของ upsert ไปอยู่ใน document ใหม่"** — คัดลอกเฉพาะเงื่อนไข equality
+- **"`bulkWrite` คือ transaction"** — ไม่ใช่; `inserted 1` ยังคงอยู่หลังความล้มเหลว
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบนับยอดสินค้าคงคลัง (inventory sync)** — เมื่อซิงก์สต็อกจากคลังสินค้าจริงเข้าระบบทุกคืน ใช้ `bulkWrite` แบบ unordered รวม `updateOne` หลายพันรายการ (แก้ยอด stock ต่อ SKU) เข้าเป็น round trip ไม่กี่ครั้ง แทนที่จะยิง update ทีละ SKU
->
-> **ระบบนับยอด page view / analytics counter** — ใช้ upsert กับ `updateOne({ page, date }, { $inc: { views: 1 } }, { upsert: true })` เพื่อสร้างแถวนับยอดของวันนั้นถ้ายังไม่มี หรือบวกเพิ่มถ้ามีอยู่แล้ว โดยมี unique compound index บน `(page, date)` กันไม่ให้เกิดแถวซ้ำเวลามี request มาพร้อมกันจำนวนมาก
+> reference ของ `updateOne` ระบุข้อกำหนดที่เราวัด: "To avoid multiple upserts, ensure that the `filter` field(s) are uniquely indexed" ([db.collection.updateOne](https://www.mongodb.com/docs/manual/reference/method/db.collection.updateOne/), เรียกอ่านเมื่อ 2026-09-30) ในการรันของเรา unique index ไม่ทำให้ upsert ใดถูกปฏิเสธ — ผู้แพ้การแข่งขันถูก server retry เป็น update — ดังนั้น 2000 จาก 2000 การเพิ่มตกลงบน 20 document
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (`options.Update()` ของ Go ถูกแก้เป็น `options.UpdateOne()` สำหรับ driver v2 และแท็บ Rust bulk_write ถูกเขียนใหม่ — ทั้งคู่คอมไพล์ไม่ผ่านตามที่เขียนไว้เดิม) ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizBulk = [
   {
-    q: 'รัน upsert แล้ว filter ไม่ match document ที่มีอยู่เลย จะเกิดอะไรขึ้น?',
+    q: 'upsert รันและ filter ไม่ตรง document ที่มีอยู่ใดเลย เกิดอะไรขึ้น?',
     options: [
-      'ไม่มีอะไรเปลี่ยนและมี error ถูกคืนกลับมา',
-      'document ใหม่ถูก insert จาก filter บวกกับ update operator',
-      'ทุก document ใน collection ถูก update',
-      'filter ถูกเพิกเฉยและ document เปล่าถูกสร้างขึ้น',
+      'ไม่มีอะไรเปลี่ยนและคืน error',
+      'insert document ใหม่จาก filter บวก update operator',
+      'ทุก document ใน collection ถูกอัปเดต',
+      'filter ถูกเมินและสร้าง document ว่าง',
     ],
     answer: 1,
+    explain: 'document ใหม่รวม filter แบบ equality (name: "Katherine") กับ update ($set / $inc) — upsertedCount: 1',
   },
   {
-    q: 'ประโยชน์หลักของ bulkWrite เหนือการเรียกแยกกันคืออะไร?',
+    q: 'ประโยชน์หลักของ bulkWrite เหนือการเรียกแยกคืออะไร?',
     options: [
-      'ทำให้ทุก operation เป็น atomic โดยอัตโนมัติ',
-      'ตรวจความถูกต้องของแต่ละ document เทียบกับ schema',
-      'ส่ง operation หลายรายการไปยัง server ใน round trip เดียว',
-      'retry operation ที่ล้มเหลวให้อัตโนมัติ',
+      'ทำให้ทุก operation เป็น atomic โดยค่าเริ่มต้น',
+      'ตรวจสอบแต่ละ document กับ schema',
+      'ส่งหลาย operation ไปยัง server ใน round trip เดียว',
+      'retry operation ที่ล้มเหลวอัตโนมัติ',
     ],
     answer: 2,
+    explain: 'หนึ่งการเรียก หนึ่งผลลัพธ์รวม ไม่ใช่ transaction: ในการรันจริง operation ที่ล้มเหลวทิ้ง insert ก่อนหน้าไว้',
   },
   {
-    q: 'ordered bulkWrite ทำตัวอย่างไรเมื่อ operation หนึ่งล้มเหลว?',
+    q: 'มี unique index บน name และ operation กลางจากสาม insert ซ้ำ bulkWrite แบบ ordered และ unordered ต่างกันอย่างไร?',
     options: [
-      'รัน operation ที่เหลือต่อไปอยู่ดี',
-      'หยุดตรงจุดที่ล้มเหลว operation ที่ตามมาจึงไม่ได้รัน',
-      'roll back ทุก operation ที่ทำไปก่อนหน้า',
-      'เปลี่ยนชุดนั้นเป็น unordered ให้อัตโนมัติ',
+      'ordered insert 2, unordered insert 1',
+      'ordered insert 1 แล้วหยุด; unordered insert 2 และรายงานความล้มเหลว',
+      'ทั้งคู่ insert 0 (all-or-nothing)',
+      'ทั้งคู่ insert 3 และเมินตัวซ้ำ',
     ],
     answer: 1,
+    explain: 'ผลจริง: ordered=true insert 1 (Barbara) และไม่เคยรัน Margaret; ordered=false insert 2 ทั้งคู่โยน MongoBulkWriteError 11000 กับ writeErrors index 1',
   },
   {
-    q: 'หลังจาก upsert ผลลัพธ์ใดเป็นสัญญาณว่ามี document ใหม่ถูกสร้างขึ้น?',
+    q: 'หลัง upsert ผลลัพธ์ใดบ่งบอกว่ามี document ใหม่ถูกสร้าง?',
     options: [
       'modifiedCount เป็น 1',
-      'matchedCount เป็น 0 และมี upsertedId ปรากฏอยู่',
+      'matchedCount เป็น 0 และมี id ที่ insert/upsert (upsertedCount 1)',
       'deletedCount เป็น 1',
       'acknowledged เป็น false',
     ],
     answer: 1,
+    explain: 'ใน mongosh id เรียก insertedId; ใน driver เรียก upsertedId matchedCount 0 กับ upsertedCount 1 หมายถึงเกิดการ insert',
+  },
+  {
+    q: 'upsert พร้อมกัน 100 ครั้งด้วย filter เดียวกันกับ collection ที่ไม่มี unique index การรันจริงแสดงอะไร?',
+    options: [
+      'ได้ document เดียวพอดีเสมอ',
+      'มัก duplicate หลาย document และทุก upsert ยังรายงานสำเร็จ',
+      'ทุกอันยกเว้นหนึ่งถูกปฏิเสธด้วย error',
+      'collection ถูกล็อกและการเรียกรันทีละอัน',
+    ],
+    answer: 1,
+    explain: '17-19 จาก 20 หน้ามี duplicate (สูงสุด 16 document) โดยไม่มี upsert ถูกปฏิเสธ เมื่อมี unique index การรันเดียวกันให้ 1 document ต่อหน้า',
   },
 ]
 
