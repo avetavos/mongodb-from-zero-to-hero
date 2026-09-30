@@ -1,6 +1,6 @@
 ---
-title: $facet and buckets
-description: Run several sub-pipelines in one pass with $facet, and group values into histogram-style ranges with $bucket and $bucketAuto.
+title: Facets and buckets
+description: "$facet for several answers in one request and $bucket / $bucketAuto for histograms - with the limits proven on 200 000 orders: the 16 MiB output error, where indexes do and do not apply, the missing-default error, and uneven $bucketAuto sizes."
 sidebar:
   order: 6
 ---
@@ -9,21 +9,46 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-The last two stages in this module answer questions that need *several* summaries at once. `$facet` runs many sub-pipelines side by side over the same input, so you can get a page of results and the total count and a breakdown in a single trip. `$bucket` and `$bucketAuto` group documents into ranges, the way a histogram sorts values into bins. Together they power the "dashboard" style query: one request, many panels.
+The last stages in this module answer questions that need *several* summaries at once. `$facet` runs many sub-pipelines side by side over the same input, so you get a page of results, the total count and a breakdown in one request. `$bucket` and `$bucketAuto` group documents into ranges, the way a histogram sorts values into bins. Together they power the "dashboard" query: one request, many panels.
 
-We return to the flat `sales` collection, where each document is a single order with a `price`, `quantity`, and `genre`.
+The lesson seeds the module's `sales` collection (200 000 orders `{ title, genre, quantity, price, buyer }`, index on `price`) and the `aplan()` helper from the module intro. Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program.
 
-## $facet runs sub-pipelines in parallel
+```js
+// mongosh/fb-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.aplan = (pipeline) => {               // one line per aggregate explain: what the first stage read, then the stages left in the pipeline
+  const e = db.sales.explain("executionStats").aggregate(pipeline);
+  const cursor = e.stages ? e.stages[0].$cursor : e, rest = e.stages ? e.stages.slice(1).map((s) => Object.keys(s)[0]) : [];
+  const chain = (p) => { const out = []; for (p = p.queryPlan ?? p; p; p = p.inputStage) out.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : "")); return out.join(" > "); };
+  const s = cursor.executionStats;
+  return chain(cursor.queryPlanner.winningPlan) + "  keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + (rest.length ? "  | left in pipeline: " + rest.join(" > ") : "");
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.sales.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;                                          // 500 titles, 5 genres, quantity 1..5, price 5..25, 1000 buyers (pseudo-random but repeatable)
+    return { title: "T" + (i % 500), genre: genres[(i % 500) % 5], quantity: 1 + ((Math.imul(i, 2654435761) >>> 0) % 5), price: 5 + ((Math.imul(i, 40503) >>> 0) % 21), buyer: "b" + (i % 1000) };
+  }), { ordered: false });
+}
+db.sales.createIndex({ price: 1 });
+console.log("sales:", db.sales.countDocuments(), "orders");
+```
 
-`$facet` takes an object whose keys are names you choose and whose values are **sub-pipelines**. Each sub-pipeline sees the **same** input documents — the ones that reached the `$facet` stage — and produces its own array of results. The output is one document with a field per facet. The classic use is "results plus a total count" for a paged listing:
+```text
+sales: 200000 orders
+```
+
+## $facet runs sub-pipelines over the same input
+
+`$facet` takes an object whose keys are names you choose and whose values are **sub-pipelines**. The manual says each is "passed the exact same set of input documents" ([$facet](https://www.mongodb.com/docs/manual/reference/operator/aggregation/facet/), consulted 2026-09-30). The output is one document with a field per facet. Below: the two highest-priced fiction orders, the total, and a breakdown by quantity, all for fiction orders priced 24 or more. The Node.js tab builds a results-plus-count page on its own 100-order collection:
 
 export const facetFlow = `flowchart LR
   In["sales documents"] --> F["$facet"]
-  F --> A["pageResults sub-pipeline"]
+  F --> A["topOrders sub-pipeline"]
   F --> B["totalCount sub-pipeline"]
-  F --> C["byGenre sub-pipeline"]
+  F --> C["byQuantity sub-pipeline"]
   A --> Out["one document with three fields"]
   B --> Out
   C --> Out`
@@ -33,57 +58,39 @@ export const facetFlow = `flowchart LR
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
+    // mongosh/fb-facet.js
+    const [r] = db.sales.aggregate([
+      { $match: { genre: "fiction", price: { $gte: 24 } } },
       { $facet: {
-          topOrders: [
-            { $sort: { price: -1 } },
-            { $limit: 2 },
-            { $project: { _id: 0, title: 1, price: 1 } }
-          ],
-          totalCount: [
-            { $count: "orders" }
-          ],
-          byGenre: [
-            { $group: { _id: "$genre", count: { $sum: 1 } } }
-          ]
-      } }
-    ])
+          topOrders: [{ $sort: { price: -1, _id: 1 } }, { $limit: 2 }, { $project: { _id: 0, title: 1, price: 1 } }],
+          totalCount: [{ $count: "orders" }],
+          byQuantity: [{ $group: { _id: "$quantity", count: { $sum: 1 } } }, { $sort: { _id: 1 } }],
+      } },
+    ]).toArray();
+    console.log(r);
+    assert.strictEqual(r.byQuantity.reduce((n, g) => n + g.count, 0), r.totalCount[0].orders);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
-      { $facet: {
-          topOrders: [
-            { $sort: { price: -1 } },
-            { $limit: 2 },
-            { $project: { _id: 0, title: 1, price: 1 } },
-          ],
-          totalCount: [
-            { $count: "orders" },
-          ],
-          byGenre: [
-            { $group: { _id: "$genre", count: { $sum: 1 } } },
-          ],
-      } },
+    // app/fb-facet.mjs
+    const sales = db.collection("sales");
+    await sales.insertMany(Array.from({ length: 100 }, (_, i) => ({ title: "T" + i, genre: i % 2 ? "fiction" : "science", price: 5 + (i % 20) })));
+    const [r] = await sales.aggregate([
+      { $match: { genre: "fiction" } },
+      { $facet: { page: [{ $sort: { price: -1, title: 1 } }, { $limit: 3 }, { $project: { _id: 0, title: 1, price: 1 } }], total: [{ $count: "n" }] } },
     ]).toArray();
+    console.log(JSON.stringify(r));
+    if (r.total[0].n !== 50 || r.page.length !== 3) throw new Error("unexpected facet");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     rows = list(db.sales.aggregate([
+        {"$match": {"genre": "fiction"}},
         {"$facet": {
-            "topOrders": [
-                {"$sort": {"price": -1}},
-                {"$limit": 2},
-                {"$project": {"_id": 0, "title": 1, "price": 1}},
-            ],
-            "totalCount": [
-                {"$count": "orders"},
-            ],
-            "byGenre": [
-                {"$group": {"_id": "$genre", "count": {"$sum": 1}}},
-            ],
+            "page": [{"$sort": {"price": -1, "title": 1}}, {"$limit": 3}],
+            "total": [{"$count": "n"}],
         }},
     ]))
     ```
@@ -91,309 +98,309 @@ export const facetFlow = `flowchart LR
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$facet", bson.D{
-            {"topOrders", bson.A{
-                bson.D{{"$sort", bson.D{{"price", -1}}}},
-                bson.D{{"$limit", 2}},
-                bson.D{{"$project", bson.D{{"_id", 0}, {"title", 1}, {"price", 1}}}},
+        {{Key: "$match", Value: bson.D{{Key: "genre", Value: "fiction"}}}},
+        {{Key: "$facet", Value: bson.D{
+            {Key: "page", Value: bson.A{
+                bson.D{{Key: "$sort", Value: bson.D{{Key: "price", Value: -1}, {Key: "title", Value: 1}}}},
+                bson.D{{Key: "$limit", Value: 3}},
             }},
-            {"totalCount", bson.A{
-                bson.D{{"$count", "orders"}},
-            }},
-            {"byGenre", bson.A{
-                bson.D{{"$group", bson.D{{"_id", "$genre"}, {"count", bson.D{{"$sum", 1}}}}}},
-            }},
+            {Key: "total", Value: bson.A{bson.D{{Key: "$count", Value: "n"}}}},
         }}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$facet": {
-            "topOrders": [
-                { "$sort": { "price": -1 } },
-                { "$limit": 2 },
-                { "$project": { "_id": 0, "title": 1, "price": 1 } }
-            ],
-            "totalCount": [
-                { "$count": "orders" }
-            ],
-            "byGenre": [
-                { "$group": { "_id": "$genre", "count": { "$sum": 1 } } }
-            ]
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$match": { "genre": "fiction" } },
+            doc! { "$facet": {
+                "page": [
+                    { "$sort": { "price": -1, "title": 1 } },
+                    { "$limit": 3 },
+                ],
+                "total": [{ "$count": "n" }],
+            } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-One document comes back, each facet under its own key:
-
-```json
-[
-  {
-    "topOrders": [
-      { "title": "Cosmos", "price": 22 },
-      { "title": "Foundation", "price": 15 }
-    ],
-    "totalCount": [ { "orders": 6 } ],
-    "byGenre": [
-      { "_id": "fiction", "count": 4 },
-      { "_id": "science", "count": 2 }
-    ]
-  }
-]
+```text
+{
+  topOrders: [ { title: 'T60', price: 25 }, { title: 'T95', price: 25 } ],
+  totalCount: [ { orders: 2684 } ],
+  byQuantity: [
+    { _id: 1, count: 537 },
+    { _id: 2, count: 536 },
+    { _id: 3, count: 539 },
+    { _id: 4, count: 536 },
+    { _id: 5, count: 536 }
+  ]
+}
 ```
 
-**In Compass:** `$facet` is available in the **Aggregations** tab, and each sub-pipeline can be built and previewed before you combine them. It is the natural way to assemble a results-plus-count query for a paginated screen.
+```text
+{"page":[{"title":"T19","price":24},{"title":"T39","price":24},{"title":"T59","price":24}],"total":[{"n":50}]}
+```
+
+**In Compass:** `$facet` is available in the **Aggregations** tab, and each sub-pipeline can be built and previewed before you combine them.
+
+### Where indexes apply
+
+The manual: if `$facet` is the first stage it performs a `COLLSCAN`, while a `$match` or `$sort` **before** it "can make use of indexes and the `$facet` will not trigger a `COLLSCAN`". The sub-pipelines themselves never get the collection's indexes:
+
+```js
+// mongosh/fb-facet-index.js
+const facets = { a: [{ $count: "n" }], b: [{ $group: { _id: "$genre", c: { $sum: 1 } } }] };
+console.log("$match before $facet  :", aplan([{ $match: { price: { $gte: 24 } } }, { $facet: facets }]));
+console.log("$match inside a facet :", aplan([{ $facet: { a: [{ $match: { price: { $gte: 24 } } }, { $count: "n" }] } }]));
+console.log("$sort+$limit in facet :", aplan([{ $facet: { top: [{ $sort: { price: 1 } }, { $limit: 5 }] } }]));
+console.log("same sort+limit, find :", (() => { const s = db.sales.find().sort({ price: 1 }).limit(5).explain("executionStats").executionStats; return "keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined; })());
+```
+
+```text
+$match before $facet  : PROJECTION_SIMPLE > FETCH > IXSCAN(price_1)  keys=13422 docs=13422  | left in pipeline: $facet
+$match inside a facet : PROJECTION_SIMPLE > COLLSCAN  keys=0 docs=200000  | left in pipeline: $facet
+$sort+$limit in facet : COLLSCAN  keys=0 docs=200000  | left in pipeline: $facet
+same sort+limit, find : keys=5 docs=5
+```
+
+### The 16 MiB output limit
+
+The whole `$facet` result is **one** document, so it is subject to the BSON limit ("If it exceeds 16 mebibytes, the aggregation produces an error"; the old lesson said the limit was per facet). Returning everything from one facet on 200 000 orders (about 20.9 MB) fails, and bounding the facet fixes it:
+
+```js
+// mongosh/fb-16mb.js
+try { db.sales.aggregate([{ $facet: { everything: [{ $match: {} }] } }]).toArray(); }
+catch (e) { console.log(e.codeName + ":", e.message.slice(e.message.indexOf("Serializing")).slice(0, 110)); }
+const ok = db.sales.aggregate([{ $facet: { everything: [{ $match: {} }, { $limit: 1000 }, { $project: { title: 1 } }], n: [{ $count: "n" }] } }]).toArray()[0];
+console.log("bounded facet:", ok.everything.length, "rows +", JSON.stringify(ok.n));
+```
+
+```text
+BSONObjectTooLarge: Serializing Document failed :: caused by :: Size 20942912 exceeds maximum 16793600
+bounded facet: 1000 rows + [{"n":200000}]
+```
 
 ## $bucket groups into explicit ranges
 
-`$bucket` sorts documents into bins you define by their **boundaries**. You give a `groupBy` expression, an ascending array of `boundaries`, a `default` bucket for values that fall outside, and an `output` of accumulators per bucket. Here we bin orders by price into "cheap," "mid," and "premium" bands:
+`$bucket` bins documents by **boundaries** you supply: a `groupBy` expression, an ascending `boundaries` array, an optional `default` for values outside, and an `output` of accumulators. Each bucket's `_id` is its lower bound (inclusive; the upper bound is exclusive). Without a `default`, a value outside the boundaries is an error:
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $bucket: {
-          groupBy: "$price",
-          boundaries: [0, 10, 20, 100],
-          default: "other",
-          output: {
-            count: { $sum: 1 },
-            titles: { $push: "$title" }
-          }
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $bucket: {
-          groupBy: "$price",
-          boundaries: [0, 10, 20, 100],
-          default: "other",
-          output: {
-            count: { $sum: 1 },
-            titles: { $push: "$title" },
-          },
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$bucket": {
-            "groupBy": "$price",
-            "boundaries": [0, 10, 20, 100],
-            "default": "other",
-            "output": {
-                "count": {"$sum": 1},
-                "titles": {"$push": "$title"},
-            },
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$bucket", bson.D{
-            {"groupBy", "$price"},
-            {"boundaries", bson.A{0, 10, 20, 100}},
-            {"default", "other"},
-            {"output", bson.D{
-                {"count", bson.D{{"$sum", 1}}},
-                {"titles", bson.D{{"$push", "$title"}}},
-            }},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$bucket": {
-            "groupBy": "$price",
-            "boundaries": [0, 10, 20, 100],
-            "default": "other",
-            "output": {
-                "count": { "$sum": 1 },
-                "titles": { "$push": "$title" }
-            }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
+```js
+// mongosh/fb-bucket.js
+const b = { groupBy: "$price", boundaries: [5, 10, 20], output: { orders: { $sum: 1 }, avgQty: { $avg: "$quantity" } } };
+console.log("with default   :", JSON.stringify(db.sales.aggregate([{ $bucket: { ...b, default: "other" } }, { $project: { orders: 1, avgQty: { $round: ["$avgQty", 2] } } }]).toArray()));
+try { db.sales.aggregate([{ $bucket: b }]).toArray(); } catch (e) { console.log("no default     :", e.codeName + " -", e.message.slice(e.message.indexOf("$switch"))); }
+const total = db.sales.aggregate([{ $bucket: { ...b, default: "other" } }]).toArray().reduce((n, x) => n + x.orders, 0);
+assert.strictEqual(total, 200000);
+```
 
-Each bucket's `_id` is its lower boundary, and the accumulators summarise the orders that landed there:
-
-```json
-[
-  { "_id": 0, "count": 2, "titles": ["Cheap Reads", "Pocket Atlas"] },
-  { "_id": 10, "count": 3, "titles": ["Dune", "Foundation", "Neuromancer"] },
-  { "_id": 20, "count": 1, "titles": ["Cosmos"] }
-]
+```text
+with default   : [{"_id":5,"orders":43721,"avgQty":3},{"_id":10,"orders":99136,"avgQty":3},{"_id":"other","orders":57143,"avgQty":3}]
+no default     : Location7158303 - $switch could not find a matching branch for an input, and no default was specified.
 ```
 
 ## $bucketAuto picks the boundaries for you
 
-When you do not know good boundaries up front, `$bucketAuto` chooses them so the documents spread across a target number of buckets as evenly as it can. You give a `groupBy` and a `buckets` count; it returns each bucket's `min` and `max` inside its `_id`:
+`$bucketAuto` chooses boundaries to spread documents over the number of buckets you ask for. It returns each bucket's `min` and `max` in `_id`, but the sizes are only as even as the data allows:
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $bucketAuto: {
-          groupBy: "$price",
-          buckets: 3
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $bucketAuto: {
-          groupBy: "$price",
-          buckets: 3,
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$bucketAuto": {
-            "groupBy": "$price",
-            "buckets": 3,
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$bucketAuto", bson.D{
-            {"groupBy", "$price"},
-            {"buckets", 3},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$bucketAuto": {
-            "groupBy": "$price",
-            "buckets": 3
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-The boundaries are computed for you, each bucket carrying its range and a count:
-
-```json
-[
-  { "_id": { "min": 8, "max": 12 }, "count": 2 },
-  { "_id": { "min": 12, "max": 18 }, "count": 2 },
-  { "_id": { "min": 18, "max": 22 }, "count": 2 }
-]
+```js
+// mongosh/fb-bucketauto.js
+const rows = db.sales.aggregate([{ $bucketAuto: { groupBy: "$price", buckets: 4 } }]).toArray();
+console.log(rows.map((r) => "[" + r._id.min + ", " + r._id.max + (r === rows[rows.length - 1] ? "]" : ")") + " " + r.count).join("   "));
+const wholeValues = rows.every((r, i) => r.count === db.sales.countDocuments({ price: i === rows.length - 1 ? { $gte: r._id.min, $lte: r._id.max } : { $gte: r._id.min, $lt: r._id.max } }));
+console.log("every bucket equals a whole range of price values (no value split across buckets):", wholeValues, "- so sizes cannot be forced to 50 000 each");
+assert.ok(wholeValues);
+assert.strictEqual(rows.reduce((n, r) => n + r.count, 0), 200000);
 ```
+
+```text
+[5, 11) 57144   [11, 17) 57143   [17, 23) 57142   [23, 25] 28571
+every bucket equals a whole range of price values (no value split across buckets): true - so sizes cannot be forced to 50 000 each
+```
+
+## One request is not the same as less work
+
+A `$facet` saves round trips, not server work: it runs every sub-pipeline over the input. Three panels as one facet versus three separate requests on the same machine:
+
+```js
+// mongosh/fb-facet-vs-queries.js
+const ms = (f) => { const t = Date.now(); f(); return Date.now() - t; };
+const facet = ms(() => db.sales.aggregate([{ $match: { genre: "fiction" } }, { $facet: {
+  page: [{ $sort: { price: 1, _id: 1 } }, { $limit: 10 }], total: [{ $count: "n" }], byQty: [{ $group: { _id: "$quantity", c: { $sum: 1 } } }] } }]).toArray());
+db.sales.createIndex({ genre: 1, price: 1, _id: 1 });
+const facetIdx = ms(() => db.sales.aggregate([{ $match: { genre: "fiction" } }, { $facet: {
+  page: [{ $sort: { price: 1, _id: 1 } }, { $limit: 10 }], total: [{ $count: "n" }], byQty: [{ $group: { _id: "$quantity", c: { $sum: 1 } } }] } }]).toArray());
+const separate = ms(() => {
+  db.sales.find({ genre: "fiction" }).sort({ price: 1, _id: 1 }).limit(10).toArray();
+  db.sales.countDocuments({ genre: "fiction" });
+  db.sales.aggregate([{ $match: { genre: "fiction" } }, { $group: { _id: "$quantity", c: { $sum: 1 } } }]).toArray();
+});
+console.log({ facetOneRequest: facet, facetWithCompoundIndex: facetIdx, threeSeparateRequests: separate });
+```
+
+```text
+{
+  facetOneRequest: 85,
+  facetWithCompoundIndex: 79,
+  threeSeparateRequests: 53
+}
+```
+
+Locally the separate, indexed requests were faster (there is no network latency to save). Over a real network two extra round trips cost more than that difference, and a single request reads one consistent snapshot - so measure with your own latency before choosing.
 
 ## Tips and gotchas
 
-- Each `$facet` sub-pipeline starts from the **same** input. Filter *before* the `$facet` if you want every facet to share a narrowed set, rather than repeating the `$match` inside each one.
-- `$facet` cannot use an index on its sub-pipelines, since they run over already-streamed documents. Keep the input small by matching early.
-- `$bucket` requires `boundaries` in ascending order; a value below the first or above the last boundary goes to `default`, and without a `default` such values raise an error.
-- `$bucketAuto` aims for even bucket sizes but will not split identical values across buckets, so the counts can come out uneven when many documents share a value.
+- Filter *before* the `$facet` so every facet shares a narrowed, index-served input; do not repeat the `$match` inside each facet.
+- The facet output is one document under the 16 MiB BSON limit: bound big facets with `$limit`/`$project`/`$group`.
+- `$sort` + `$limit` inside a facet cannot use an index; a paged list is often better as `find` + a count.
+- `$bucket` boundaries must ascend; a value outside them needs a `default` or the stage fails.
+- `$bucketAuto` never splits identical values, so sizes are uneven when values repeat.
 
 <Callout title="Many answers in one pass, or values into bins">
-$facet computes several sub-pipelines over the same input and returns them as fields of one document — ideal for results-plus-count. $bucket and $bucketAuto group a numeric expression into ranges: you supply the boundaries for $bucket, and $bucketAuto picks them to balance the bins.
+`$facet` computes several sub-pipelines over the same input and returns them as fields of one document - ideal for results-plus-count, bounded by 16 MiB and blind to indexes inside. `$bucket` and `$bucketAuto` group a numeric expression into ranges: you supply the boundaries for `$bucket`; `$bucketAuto` picks them.
 </Callout>
+
+## Reading AI-generated code
+
+Asked for a paged list with a total "in one request", an assistant puts the whole thing in a `$facet`:
+
+<SpotTheBug lang="js" code={`// AI comment: "one request for the page and the total"
+db.sales.aggregate([
+  { $facet: {
+      items: [{ $sort: { price: 1, _id: 1 } }, { $skip: 100 }, { $limit: 10 }],
+      total: [{ $count: "n" }],
+  } },
+]);`}>
+
+It returns the right rows, but the `$facet` is the first stage, so it scans the whole collection and sorts in memory: 200 000 documents read and 134 ms, against 10 documents and 4 ms for a plain `find` with the `{ price: 1, _id: 1 }` index plus `estimatedDocumentCount()`. The fence asserts that both return the same ten rows. Use `find` (or a `$match`/`$sort`/`$skip`/`$limit` pipeline) for the page, and count separately.
+
+```js
+// mongosh/fb-bug.js
+db.sales.createIndex({ price: 1, _id: 1 });                                              // the index a paged listing sorted by price would use
+const buggy = [{ $facet: { items: [{ $sort: { price: 1, _id: 1 } }, { $skip: 100 }, { $limit: 10 }], total: [{ $count: "n" }] } }];   // "results + total in one request"
+const time = (f) => { const t = Date.now(); const r = f(); return [r, Date.now() - t]; };
+const [a, aMs] = time(() => db.sales.aggregate(buggy).toArray()[0]);
+const [b, bMs] = time(() => ({ items: db.sales.find().sort({ price: 1, _id: 1 }).skip(100).limit(10).toArray(), total: db.sales.estimatedDocumentCount() }));
+console.log("$facet, sort inside  :", a.total[0].n, "total,", a.items.length, "rows in", aMs, "ms");
+console.log("find + estimatedCount:", b.total, "total,", b.items.length, "rows in", bMs, "ms");
+const st = db.sales.explain("executionStats").aggregate(buggy);
+const c = st.stages ? st.stages[0].$cursor : st;
+console.log("the facet read", c.executionStats.totalDocsExamined, "documents; the find read", db.sales.find().sort({ price: 1, _id: 1 }).skip(100).limit(10).explain("executionStats").executionStats.totalDocsExamined);
+assert.deepStrictEqual(a.items.map((d) => d._id), b.items.map((d) => d._id));
+```
+
+```text
+$facet, sort inside  : 200000 total, 10 rows in 134 ms
+find + estimatedCount: 200000 total, 10 rows in 4 ms
+the facet read 200000 documents; the find read 10
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`$facet` is a fan-out: the input is read once and handed to several independent mini-pipelines whose results are stapled into one document. Everything before it can use the collection's indexes; nothing inside it can, and the stapled document has a hard size cap.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `$facet` (combine several sub-pipelines in one request) | Get results plus a count in a single request, reducing round trips between client and server | Each facet's output is capped at 16MB, and `$facet` cannot use an index on its sub-pipelines |
-| Separate queries (instead of `$facet`) | Each query can use an index fully, with no `$facet` limit | More round trips to the server, and you must manage consistency across multiple queries yourself |
-| `$bucket` (explicit boundaries) | Precise control over each bucket's range to match business logic, such as company-defined price bands | You must know the boundaries in advance; if the data distribution shifts, you have to adjust the boundaries yourself |
-| `$bucketAuto` (automatically computed boundaries) | No need to know the data distribution in advance; document counts per bucket stay balanced | Bucket boundaries are not stable between runs if the data changes, making it harder to compare results across time periods |
+| `$facet` | Several summaries, one request, one snapshot | Output capped at 16 MiB; sub-pipelines cannot use indexes |
+| Separate queries | Each uses its best index (53 ms vs 85 ms locally) | More round trips; results from different moments |
+| `$bucket` | Boundaries match business bands | You maintain the boundaries; a default is required for strays |
+| `$bucketAuto` | No need to know the distribution | Uneven sizes; boundaries shift with the data |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Feeding large documents into `$facet` without filtering first, then hitting a 16MB error** — each `$facet` sub-pipeline has a 16MB output limit per facet. If the input is large, always `$match`/`$limit` before entering `$facet`.
-- **Expecting a `$facet` sub-pipeline to use an index like a normal pipeline** — `$facet` runs over documents that are already streamed in, not directly from the collection, so its inner sub-pipelines cannot use an index. Match down to a small set before this stage.
-- **Using `$bucket` without setting a `default` and being surprised the pipeline errors** — if a value falls outside the `boundaries` and no `default` is set, `$bucket` raises an error immediately rather than silently skipping the value.
+- **"The 16 MiB limit is per facet."** - it applies to the whole output document.
+- **"`$facet` can never use an index."** - a `$match` before it did (13 422 keys); only its inside cannot.
+- **"One `$facet` is cheaper than three queries."** - it saves round trips, not work (85 ms vs 53 ms here).
+- **"`$bucket` skips out-of-range values."** - it fails without a `default`.
+- **"`$bucketAuto` gives equal buckets."** - 57 144 / 57 143 / 57 142 / 28 571.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A paginated analytics dashboard** — a product listing page that must show both the current page and a total count in one request uses `$facet` split into `pageResults` and `totalCount` sub-pipelines, avoiding two separate queries.
->
-> **A typical real estate price report** — a system that groups homes into price bands (budget/mid-range/luxury) commonly uses `$bucket` with boundaries the business defines, while exploring a new market with an unknown price distribution uses `$bucketAuto` to let the system pick the groups automatically. Keller Williams uses this same aggregation-pipeline approach to summarise more than 70 million listing records on MongoDB Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+> The manual's `$facet` page states both limits proven here: "the `$facet` stage does not make use of indexes if it is the first stage in the pipeline" and "the final output document is subject to the 16 mebibyte BSON document size limit" ([$facet](https://www.mongodb.com/docs/manual/reference/operator/aggregation/facet/), consulted 2026-09-30). Keller Williams uses this style of summary pipeline over its listing data on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the facet returned a page and a total) but they are not executed by the course's automated checker._
 
 export const quizFacets = [
   {
-    q: 'What input does each sub-pipeline of a $facet stage receive?',
+    q: 'What does each sub-pipeline of $facet receive as input?',
     options: [
-      'The output of the sub-pipeline listed before it',
+      'The output of the previous sub-pipeline',
       'The same set of documents that reached the $facet stage',
-      'A random subset of the collection',
-      'Only the documents matched by the first facet',
+      'The whole collection',
+      'Nothing - they run on an empty stream',
     ],
     answer: 1,
+    explain: 'The fiction/price>=24 match fed 2 684 orders to all three facets: totalCount 2 684 and the byQuantity counts summed to 2 684.',
   },
   {
-    q: 'A common use of $facet is to return paged results together with which other thing in one query?',
+    q: 'Where does an index help a pipeline containing $facet?',
     options: [
-      'A second copy of the collection',
-      'The total count of matching documents',
-      'The database server logs',
-      'A list of indexes',
+      'Inside each sub-pipeline',
+      'On a $match/$sort placed before the $facet stage',
+      'Nowhere - aggregation ignores indexes',
+      'Only on the last sub-pipeline',
     ],
     answer: 1,
+    explain: '$match before $facet: IXSCAN(price_1) with 13 422 keys; the same filter inside a facet: COLLSCAN over 200 000 documents.',
   },
   {
-    q: 'In $bucket, where does a value that falls outside all boundaries go?',
+    q: '$facet: { everything: [ { $match: {} } ] } on 200 000 orders fails. Why?',
     options: [
-      'Into the first bucket',
-      'Into the last bucket',
-      'Into the default bucket (or an error if none is set)',
-      'It is silently dropped',
-    ],
-    answer: 2,
-  },
-  {
-    q: 'How does $bucketAuto differ from $bucket?',
-    options: [
-      'It requires you to list boundaries explicitly',
-      'It chooses boundaries itself to spread documents across a target bucket count',
-      'It can only bucket strings',
-      'It returns a single grand-total document',
+      '$facet cannot contain $match',
+      'The single output document (about 20.9 MB) exceeds the 16 MiB BSON limit',
+      '$match needs a field',
+      'Facets are limited to 1000 documents',
     ],
     answer: 1,
+    explain: 'BSONObjectTooLarge: "Size 20942912 exceeds maximum 16793600". A $limit inside the facet fixed it (1000 rows).',
+  },
+  {
+    q: '$bucket with boundaries [5, 10, 20] and no default meets a price of 25. What happens?',
+    options: [
+      'The value is skipped silently',
+      'The stage fails with "$switch could not find a matching branch ... and no default was specified"',
+      'It goes into the last bucket',
+      'It becomes null',
+    ],
+    answer: 1,
+    explain: 'With default: "other" the 57 143 out-of-range orders were collected; without it the pipeline failed with Location7158303.',
+  },
+  {
+    q: 'Why are $bucketAuto buckets not equal in size?',
+    options: [
+      'It is a bug',
+      'Identical values are never split across buckets, so sizes move in whole-value steps (57 144 / 57 143 / 57 142 / 28 571)',
+      'buckets must be a power of two',
+      'It samples the data',
+    ],
+    answer: 1,
+    explain: 'Every bucket count equalled the count of a whole range of prices; the last bucket [23, 25] holds the remainder.',
+  },
+  {
+    q: 'A paged list is built as one $facet with $sort/$skip/$limit and $count. What did it cost compared with find + estimatedDocumentCount?',
+    options: [
+      'Nothing - same work',
+      'The facet read all 200 000 documents (134 ms); find read 10 through an index (4 ms)',
+      'The facet is always faster',
+      'The facet returned wrong rows',
+    ],
+    answer: 1,
+    explain: 'Both returned identical rows; the facet had a COLLSCAN because its inner $sort cannot use the index.',
   },
 ]
 
