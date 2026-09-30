@@ -1,6 +1,6 @@
 ---
 title: การ query nested document
-description: เข้าถึง field ที่ฝังอยู่ด้วย dot notation เข้าใจว่าทำไมการ match sub-document ทั้งก้อนจึงไวต่อลำดับ ส่วนการ match ราย field ไม่เป็น และ query array ของ sub-document
+description: เข้าถึง field ที่ฝังด้วย dot notation เข้าใจว่าทำไมการจับคู่ทั้ง sub-document ไวต่อลำดับ แต่การจับคู่ตาม field ไม่ไว query array ของ sub-document และเลี่ยงกับดักการอัปเดตที่ลบ field พี่น้อง — พิสูจน์ทั้งหมดบน document ที่ต่างกัน
 sidebar:
   order: 4
 ---
@@ -8,27 +8,74 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-document ซ้อนกันได้ สมาชิกหนึ่งคนสามารถถือ object `address` ที่ฝังอยู่ และ object นั้นมี field ของตัวเอง มีสองวิธีที่ต่างกันชัดเจนในการ query เข้าไปใน sub-document และทั้งสองทำงานต่างกันมาก: คุณสามารถเข้าถึง field ภายในเดียวด้วย **dot notation** หรือจับคู่ **sub-document ทั้งก้อน** ในคราวเดียว วิธีแรกผ่อนปรน วิธีที่สองคือการเปรียบเทียบแบบตรงเป๊ะที่ไวต่อลำดับซึ่งทำคนประหลาดใจ บทเรียนนี้ทำให้ความต่างนั้นเป็นรูปธรรม
+document ซ้อนกันได้ สมาชิกมี object `address` ฝังอยู่ และ object นั้นมี field ของตัวเอง มีสองวิธีที่ต่างกันในการ query เข้าไปใน sub-document และทั้งสองทำงานต่างกันมาก: เข้าถึง field ด้านในตัวเดียวด้วย **dot notation** หรือจับคู่ **ทั้ง sub-document** พร้อมกัน แบบแรกใจกว้าง แบบที่สองเป็นการเปรียบเทียบตรงเป๊ะที่ไวต่อลำดับซึ่งทำให้คนแปลกใจ บทนี้ทำให้ความต่างนั้นเป็นรูปธรรม ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน)
 
-ตอนนี้สมาชิกแต่ละคนมี `address` ที่ฝังอยู่พร้อม `city` และ `zip` และมี `contact` พร้อม `email` และ `phone`
+## ข้อมูลที่เรา query
 
-## การเข้าถึง field ภายในด้วย dot notation
-
-หากต้องการจับคู่ field เดียวที่ฝังลึกอยู่ใน object ให้ระบุ path ด้วยจุด: `"address.city"` เครื่องหมายอัญประกาศจำเป็นเพราะ key มีจุดอยู่ ตรงนี้เราหาสมาชิกทุกคนที่อาศัยอยู่ใน Cambridge:
+สมาชิกด้านล่างเก็บที่อยู่เดียวกันใน *รูปร่างที่ต่างกัน* โดยตั้งใจ: Grace มี `city` ก่อน `zip`, Ada มี `zip` ก่อน `city`, Linus มี field `country` เพิ่ม และ Alan เก็บที่อยู่เป็น string ธรรมดา:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ "address.city": "Cambridge" })
+    // mongosh/nest-seed.js
+    db.members.insertMany([
+      { name: "Grace",    address: { city: "Cambridge", zip: "02139" }, contact: { email: "grace@example.org", phone: "555-0101" },
+        reviews: [{ book: "Algorithms", rating: 3 }, { book: "Networks", rating: 5 }] },
+      { name: "Margaret", address: { city: "Boston", zip: "02110" }, contact: { email: "m@example.org" },
+        reviews: [{ book: "Algorithms", rating: 5 }, { book: "Networks", rating: 3 }] },
+      { name: "Ada",      address: { zip: "02139", city: "Cambridge" }, reviews: [] },              // zip BEFORE city
+      { name: "Linus",    address: { city: "Cambridge", zip: "02139", country: "US" } },            // extra field
+      { name: "Edsger" },                                                                            // no address
+      { name: "Alan",     address: "Cambridge, UK" },                                                // a string, not an object
+    ]);
+    globalThis.names = (f) => db.members.find(f, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 6);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/nest-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Grace",    address: { city: "Cambridge", zip: "02139" }, contact: { email: "grace@example.org", phone: "555-0101" },
+        reviews: [{ book: "Algorithms", rating: 3 }, { book: "Networks", rating: 5 }] },
+      { name: "Margaret", address: { city: "Boston", zip: "02110" }, contact: { email: "m@example.org" },
+        reviews: [{ book: "Algorithms", rating: 5 }, { book: "Networks", rating: 3 }] },
+      { name: "Ada",      address: { zip: "02139", city: "Cambridge" }, reviews: [] },
+      { name: "Linus",    address: { city: "Cambridge", zip: "02139", country: "US" } },
+      { name: "Edsger" },
+      { name: "Alan",     address: "Cambridge, UK" },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 6) throw new Error("expected 6");
+    ```
+  </TabItem>
+</Tabs>
+
+## เข้าถึง field ด้านในด้วย dot notation
+
+การจับคู่ field หนึ่งที่ฝังอยู่ใน object ให้ระบุ path ด้วยจุด: `"address.city"` ต้องใส่เครื่องหมายคำพูดเพราะ key มีจุด ที่นี่เราหาสมาชิกทุกคนที่อยู่ Cambridge:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/nest-dot.js
+    console.log("address.city = Cambridge  :", names({ "address.city": "Cambridge" }));
+    console.log("address.zip $exists       :", names({ "address.zip": { $exists: true } }));
+    console.log("address.city missing      :", names({ "address.city": { $exists: false } }));
+    console.log("contact.phone missing     :", names({ "contact.phone": { $exists: false } }));
+    assert.strictEqual(names({ "address.city": "Cambridge" }), "Ada, Grace, Linus");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/nest-dot.mjs
     const docs = await db.collection("members")
       .find({ "address.city": "Cambridge" })
       .toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 3) throw new Error("expected Ada, Grace and Linus");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,37 +104,40 @@ document ซ้อนกันได้ สมาชิกหนึ่งคน�
   </TabItem>
 </Tabs>
 
-query เข้าถึงเข้าไปใน `address` แล้ว match เฉพาะ `city` โดยไม่สนใจอย่างอื่นที่ sub-document เก็บไว้:
+query เข้าไปใน `address` และจับคู่เฉพาะ `city` โดยไม่สนว่า sub-document มีอะไรอื่นและ field เรียงอย่างไร — Ada (`zip` มาก่อน) และ Linus (มี `country` เพิ่ม) ตรงเช่นเดียวกับ Grace dot path ต่อกันลึกได้เท่าที่ข้อมูลลึกและผสมกับ operator ได้อย่างอิสระ:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
-    "name": "Grace",
-    "address": { "city": "Cambridge", "zip": "02139" }
-  }
-]
+```text
+address.city = Cambridge  : Ada, Grace, Linus
+address.zip $exists       : Ada, Grace, Linus, Margaret
+address.city missing      : Alan, Edsger
+contact.phone missing     : Ada, Alan, Edsger, Linus, Margaret
 ```
 
-dot path ต่อกันได้ลึกเท่าที่ข้อมูลของคุณลึก และรวมกับ operator ได้อย่างอิสระ — `{ "address.zip": { $exists: true } }` ทำงานตรงตามที่คุณคาดเป๊ะ
+Alan (ที่ `address` เป็น string ดังนั้น `address.city` ไม่มีทางมี) และ Edsger (ไม่มี `address`) ทั้งคู่ "ขาด" สำหรับ `address.city`; ไม่มี error สำหรับ path ที่ผ่าน non-object
 
-## การจับคู่ sub-document ทั้งก้อน: ลำดับมีผล
+## จับคู่ทั้ง sub-document: ลำดับสำคัญ
 
-คุณยังสามารถส่ง document ทั้งก้อนเป็นค่าให้ field `address` ได้ด้วย วิธีนี้ **ไม่** เหมือน query แบบ dot notation เพราะบังคับ match แบบ *เป๊ะทุกอย่าง*: field เดียวกัน ค่าเดียวกัน และ **ลำดับเดียวกัน** โดยไม่อนุญาตให้มี field เกิน ตรงนี้เราจับคู่ที่อยู่เต็ม:
+คุณส่ง document ทั้งก้อนเป็นค่าให้ field `address` ได้เช่นกัน นี่ **ไม่ใช่** เหมือน dotted query มันต้องการการจับคู่ *ตรงเป๊ะ*: field เดียวกัน ค่าเดียวกัน และ **ลำดับเดียวกัน** ไม่อนุญาต field เกิน ที่นี่เราจับคู่ที่อยู่เต็มใน สามรูปแบบ:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      address: { city: "Cambridge", zip: "02139" }
-    })
+    // mongosh/nest-whole.js
+    console.log("{ city, zip }          :", names({ address: { city: "Cambridge", zip: "02139" } }));
+    console.log("{ zip, city } reversed :", names({ address: { zip: "02139", city: "Cambridge" } }));
+    console.log("{ zip } only           :", names({ address: { zip: "02139" } }));
+    assert.strictEqual(names({ address: { city: "Cambridge", zip: "02139" } }), "Grace");
+    assert.strictEqual(names({ address: { zip: "02139" } }), "");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/nest-whole.mjs
     const docs = await db.collection("members").find({
       address: { city: "Cambridge", zip: "02139" }
     }).toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1 || docs[0].name !== "Grace") throw new Error("expected only Grace");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -125,37 +175,38 @@ dot path ต่อกันได้ลึกเท่าที่ข้อม�
   </TabItem>
 </Tabs>
 
-อันนี้ตรงกับ Grace — แต่เป็นเพราะ `address` ที่เก็บไว้ของเธอมี `city` มาก่อนและ `zip` มาทีหลัง โดยไม่มี field อื่น:
+สามคนที่ใช้ city และ zip เดียวกัน แต่รูปแบบ whole-document พบคนละคนเดียวสำหรับแต่ละการสะกด:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
-    "name": "Grace",
-    "address": { "city": "Cambridge", "zip": "02139" }
-  }
-]
+```text
+{ city, zip }          : Grace
+{ zip, city } reversed : Ada
+{ zip } only           : 
 ```
 
-หาก document ที่เก็บไว้เรียง `zip` ก่อน `city` หรือเพิ่ม field `country` เข้ามา filter เดียวกันนี้จะส่งกลับ **ไม่มีอะไรเลย** — นั่นคือกับดักความไวต่อลำดับ และเป็นเหตุผลว่าทำไม dot notation จึงมักเป็นตัวเลือกที่ปลอดภัยกว่า สังเกตว่าตัวอย่าง Go ใช้ `bson.D` ที่เป็น document ที่มีลำดับ ก็เพราะลำดับมีความสำคัญตรงนี้พอดี
+`{ city, zip }` ตรงเฉพาะ Grace ที่ลำดับที่เก็บเป็นแบบนั้น — **ไม่ใช่** Ada (ค่าเดียวกัน ลำดับกลับ) และ **ไม่ใช่** Linus (มี `country` เกิน) กลับ filter แล้วมันตรง Ada แทน sub-document บางส่วน (`{ zip }` เดี่ยว ๆ) ไม่ตรงใครเลย นั่นคือกับดักไวต่อลำดับ และเป็นเหตุผลที่ dot notation เป็นค่าเริ่มต้นที่ปลอดภัยกว่า ตัวอย่าง Go ใช้ `bson.D` ซึ่งเป็น document ที่ *มีลำดับ*: `bson.M` ของ Go คือ map และ Go ไม่กำหนดลำดับการวน map ในการรันของเรา (Go 1.27.1, driver v2.9.1) `bson.M` สองคีย์บังเอิญ marshal ตามลำดับต้นทาง — ตรงคนที่ถูก 500 ครั้งจาก 500 — แต่นั่นคือรายละเอียดการ implement ที่ไม่ควรพึ่งพา; `bson.D` คือรูปแบบที่รับประกัน object JavaScript, dict ของ Python และ `doc!` ของ Rust เก็บลำดับการแทรก
 
 ## array ของ sub-document
 
-รูปร่างจริงที่พบบ่อยที่สุดคือ array ที่ element เป็น sub-document สมมติว่าสมาชิกแต่ละคนมี array `reviews` แต่ละรีวิวมี `book` และ `rating` query แบบใช้จุดธรรมดาอย่าง `"reviews.rating"` ตรวจเงื่อนไข *ข้ามทุก* รีวิว ดังนั้นหากต้องการบังคับทั้งสอง field บนรีวิว *เดียวกัน* คุณรวมจิตวิญญาณของ dot path เข้ากับ `$elemMatch` ตรงนี้เราหาสมาชิกที่มีรีวิวของ *Algorithms* ที่ให้คะแนนอย่างน้อย 4:
+รูปร่างจริงที่พบบ่อยที่สุดคือ array ที่ element เป็น sub-document สมมติสมาชิกแต่ละคนมี array `reviews` แต่ละรีวิวมี `book` และ `rating` dotted query ธรรมดาอย่าง `"reviews.rating"` ตรวจเงื่อนไขข้าม *ทุก* รีวิว ดังนั้นเพื่อบังคับทั้งสอง field บนรีวิว *เดียวกัน* คุณใช้ `$elemMatch` ที่นี่เราหาสมาชิกที่มีรีวิว *Algorithms* คะแนนอย่างน้อย 4 — Grace ให้ Algorithms 3 และ Networks 5, Margaret กลับกัน:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
-    })
+    // mongosh/nest-array.js
+    console.log("plain dotted paths :", names({ "reviews.book": "Algorithms", "reviews.rating": { $gte: 4 } }));
+    console.log("$elemMatch         :", names({ reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } } }));
+    console.log("reviews.0.book     :", names({ "reviews.0.book": "Algorithms" }));
+    assert.strictEqual(names({ reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } } }), "Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/nest-array.mjs
     const docs = await db.collection("members").find({
       reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
     }).toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1 || docs[0].name !== "Margaret") throw new Error("expected only Margaret");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -193,57 +244,136 @@ dot path ต่อกันได้ลึกเท่าที่ข้อม�
   </TabItem>
 </Tabs>
 
-เฉพาะสมาชิกที่รีวิว *เดียวกัน* ระบุชื่อหนังสือนั้นและผ่านเกณฑ์คะแนนเท่านั้นที่ตรง:
+เฉพาะสมาชิกที่รีวิว *เดียวกัน* ระบุหนังสือนั้นและคะแนนผ่านเกณฑ์จึงตรง รูปแบบธรรมดายังคืน Grace ที่ให้ Algorithms 3 แต่หนังสือ *เล่มอื่น* 5:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "reviews": [
-      { "book": "Algorithms", "rating": 5 },
-      { "book": "Networks", "rating": 3 }
-    ]
-  }
-]
+```text
+plain dotted paths : Grace, Margaret
+$elemMatch         : Margaret
+reviews.0.book     : Grace, Margaret
 ```
 
-**ใน Compass:** แถบ filter รับ key แบบมีจุดได้โดยตรง เช่น `{ "address.city": "Cambridge" }` แท็บ Documents แสดง object ที่ซ้อนกันเป็น tree node ที่กางได้ ซึ่งทำให้ง่ายต่อการยืนยันลำดับ field ที่แน่นอนก่อนที่คุณจะลองจับคู่ sub-document ทั้งก้อน
+`reviews.0.book` ระบุรีวิวแรกด้วย index (เปราะถ้า array เรียงใหม่)
 
-## เคล็ดลับและจุดที่พลาดง่าย
+## การอัปเดต field ซ้อน: กับดักลบพี่น้อง
 
-- **ความไวต่อลำดับคือเรื่องใหญ่** การจับคู่ embedded document โดยส่ง document ทั้งก้อนให้ field เปรียบเทียบทั้งก้อนแบบตามตัวอักษร — field เดียวกัน ค่าเดียวกัน ลำดับเดียวกัน ไม่มีส่วนเกิน จัดเรียง key ใหม่แล้วการจับคู่จะหายไปอย่างเงียบ ๆ
-- **dot notation ไม่ขึ้นกับลำดับและจับคู่บางส่วน** `{ "address.city": "Cambridge" }` สนใจ field เดียวและไม่สนใจอย่างอื่น จึงเป็นตัวเลือกที่ใช้กันประจำวันกับข้อมูลที่ embed อยู่
-- **ใส่อัญประกาศให้ key ใดก็ตามที่มีจุด** `address.city` ต้องเขียนเป็น string `"address.city"` ตัว identifier ที่มีจุดโดยไม่ใส่อัญประกาศไม่ถูกต้องใน document literal ของ driver ส่วนใหญ่
-- **array ของ sub-document ต้องใช้ `$elemMatch` สำหรับเงื่อนไขหลาย field** ด้วยเหตุผลเดียวกับ array แบบ scalar — มิฉะนั้นเงื่อนไขจะกระจายไปทั่ว element ต่าง ๆ ของ array
+ความต่างระหว่าง whole กับ path เดียวกันตัดสินว่า *การอัปเดต* ทำอะไร การตั้ง field ด้านในเดียวด้วย dot path เก็บพี่น้องไว้; การตั้งพ่อเป็น document ใหม่ **แทนที่** มัน:
 
-<Callout title="จุดสำหรับ field, document เต็มสำหรับทั้งก้อน">
-หากต้องการจับคู่ field ที่ฝังลึกเดียว ให้ใช้ dot path ที่ใส่อัญประกาศ — บางส่วนและไม่ขึ้นกับลำดับ หากต้องการจับคู่ embedded document ทั้งก้อน ให้ส่ง document สมบูรณ์ให้ field — แต่ต้องรู้ว่านี่คือการเทียบแบบเป๊ะและสนลำดับ ซึ่งพังทันทีที่ key ถูกจัดเรียงใหม่หรือมี field เพิ่มเข้ามา
+```js
+// mongosh/nest-update.js
+db.people.insertMany([
+  { name: "Linus", address: { city: "Cambridge", zip: "02139", country: "US" } },
+  { name: "Ada",   address: { city: "Cambridge", zip: "02139", country: "US" } },
+]);
+db.people.updateOne({ name: "Linus" }, { $set: { "address.zip": "02140" } });          // by path
+db.people.updateOne({ name: "Ada" },   { $set: { address: { zip: "02141" } } });       // by whole document
+console.log(db.people.findOne({ name: "Linus" }, { _id: 0 }));
+console.log(db.people.findOne({ name: "Ada" }, { _id: 0 }));
+assert.strictEqual(db.people.findOne({ name: "Linus" }).address.city, "Cambridge");
+assert.strictEqual("city" in db.people.findOne({ name: "Ada" }).address, false);
+```
+
+```text
+{
+  name: 'Linus',
+  address: { city: 'Cambridge', zip: '02140', country: 'US' }
+}
+{ name: 'Ada', address: { zip: '02141' } }
+```
+
+Ada เสีย `city` และ `country` กฎง่าย ๆ: **query และอัปเดต field ซ้อนด้วย dot path**
+
+## dot path และ index
+
+dotted path ทำ index เหมือน field ปกติ:
+
+```js
+// mongosh/nest-index.js
+db.members.createIndex({ "address.city": 1 });
+const e = db.members.find({ "address.city": "Cambridge" }).explain("executionStats");
+console.log(e.queryPlanner.winningPlan.inputStage.stage, "keys", e.executionStats.totalKeysExamined, "docs", e.executionStats.totalDocsExamined);
+assert.strictEqual(e.queryPlanner.winningPlan.inputStage.stage, "IXSCAN");
+```
+
+```text
+IXSCAN keys 3 docs 3
+```
+
+**ใน Compass:** ช่อง **Filter** รับ dotted key ตรง ๆ เช่น `{ "address.city": "Cambridge" }`; tab Documents แสดง object ซ้อนเป็นโหนดที่ขยายได้ ทำให้ยืนยันลำดับ field ก่อนลองจับคู่ทั้ง sub-document ได้ง่าย (เอกสาร Compass, [query filter](https://www.mongodb.com/docs/compass/current/query/filter/), มี `{ "school.name": "Northwestern" }` เป็นตัวอย่าง field ที่ฝัง)
+
+## เคล็ดลับและข้อควรระวัง
+
+- **ความไวต่อลำดับคือเรื่องใหญ่** การจับคู่ embedded document ด้วยการส่ง document เต็มให้ field เปรียบเทียบทั้งก้อนตามตัวอักษร — field เดียวกัน ค่าเดียวกัน ลำดับเดียวกัน ไม่มีเกิน สลับ key แล้วการจับคู่หายไปเงียบ ๆ (`Grace` เทียบ `Ada` ด้านบน)
+- **dot notation ไม่ขึ้นกับลำดับและเป็นบางส่วน** `{ "address.city": "Cambridge" }` สนใจ field เดียวและไม่มีอะไรอื่น จึงเป็นตัวเลือกประจำวันสำหรับข้อมูลที่ฝัง
+- **ใส่เครื่องหมายคำพูดกับ key ที่มีจุด** `address.city` ต้องเขียนเป็น string `"address.city"`
+- **array ของ sub-document ต้องใช้ `$elemMatch` สำหรับเงื่อนไขหลาย field** เหตุผลเดียวกับ array ของ scalar — ไม่เช่นนั้นเงื่อนไขกระจายข้าม element
+- **field ที่ *ชื่อ* มีจุดเข้าถึงด้วยชื่อธรรมดาไม่ได้** กับ `{ "a.b": 1, a: { b: 2 } }`, `{ "a.b": 2 }` พบ document และ `{ "a.b": 1 }` ไม่พบอะไร — string ที่มีจุดหมายถึง path เสมอ หลีกเลี่ยงจุดในชื่อ field
+- **อัปเดต field ซ้อนด้วย path** ไม่ใช่การส่งพ่อ (`address.zip` เทียบ `address: { zip }`)
+
+<Callout title="dot สำหรับ field, document เต็มสำหรับทั้งก้อน">
+เพื่อจับคู่ field ลึกตัวเดียว ใช้ dot path ที่ใส่คำพูด — บางส่วนและไม่ขึ้นกับลำดับ เพื่อจับคู่ embedded document ทั้งก้อน ส่ง document เต็มให้ field — แต่รู้ไว้ว่ามันเป็นการเปรียบเทียบตรงเป๊ะที่มีลำดับ ซึ่งพังทันทีที่ key ที่เก็บถูกสลับหรือมี field เพิ่ม
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอ "สมาชิกในรหัสไปรษณีย์ 02139" มักเขียน filter แบบ sub-document ที่มีเฉพาะ field ที่สนใจ:
+
+<SpotTheBug lang="js" code={`// AI comment: "find members whose address has zip 02139"
+const local = await db.collection("members")
+  .find({ address: { zip: "02139" } })
+  .toArray();
+console.log(\`\${local.length} local members\`);   // prints 0`}>
+
+`{ address: { zip: "02139" } }` ไม่ได้แปลว่า "address มี zip 02139" — มันแปลว่า "`address` คือ document `{ zip: "02139" }` *เป๊ะ*" บนข้อมูลของเรา มันตรง **ไม่มีใคร** ทั้งที่สามคนอยู่ใน zip นั้น (Ada, Grace และ Linus) โค้ดไม่ error; รายการเตือนแค่ว่างเปล่า วิธีแก้คือ dot path:
+
+```js
+// mongosh/nest-zip-fix.js
+const bug = names({ address: { zip: "02139" } });
+const fixed = names({ "address.zip": "02139" });
+console.log("sub-document form :", JSON.stringify(bug));
+console.log("dot-path form     :", fixed);
+assert.strictEqual(bug, "");
+assert.strictEqual(fixed, "Ada, Grace, Linus");
+```
+
+```text
+sub-document form : ""
+dot-path form     : Ada, Grace, Linus
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+nested document คือ **ต้นไม้ของ path** dot notation ถามเกี่ยวกับ *ใบเดียว* ของต้นไม้ โดยไม่สนอย่างอื่น; sub-document filter ถามว่า *ทั้งกิ่ง* เหมือนค่าที่คุณส่งให้ทุกไบต์หรือไม่ การแบ่งเดียวกันควบคุมการอัปเดต: `"address.zip"` แก้ใบ, `address: {...}` แทนที่กิ่ง ถามตัวเองว่า "ฉันพูดถึงใบหรือกิ่ง?" ก่อนเขียน filter
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| dot-notation query บน nested field ที่ตื้นและ schema นิ่ง | อ่านง่าย ใช้ index ได้ดี — compound index บน dot path ทำงานเหมือน field ปกติ | ต้องรู้ path ที่แน่นอนล่วงหน้า เปลี่ยน schema แล้วต้องแก้ query ทุกจุดที่อ้างถึง |
-| document ที่ซ้อนลึกหรือ shape ไม่แน่นอนในแต่ละ document | ยืดหยุ่นสำหรับข้อมูลที่มีรูปร่างต่างกันในแต่ละ document | สร้าง index ที่ครอบคลุมยาก selectivity แย่ลง และ query ต้องรับมือกรณี field หายไปหรือ type ต่างกัน |
-| จับคู่ sub-document ทั้งก้อนแบบตรงเป๊ะ | ตรวจสอบ "เหมือนกันทั้งหมด" ได้ในคำสั่งเดียว | ไวต่อลำดับ field และ field ส่วนเกิน ใช้งานได้แคบกว่า dot notation มาก |
+| query แบบ dot notation บน field ซ้อนที่ตื้นและเสถียร | อ่านง่าย index ได้ดี — `IXSCAN` 3 key สำหรับ 3 ผลลัพธ์ด้านบน | ต้องรู้ path แน่นอนล่วงหน้า; schema เปลี่ยนแปลว่าต้องแก้ทุก query ที่อ้างถึง |
+| ซ้อนลึกหรือรูปร่างต่างกันต่อ document | ยืดหยุ่นสำหรับข้อมูลที่รูปร่างต่างกันไปแต่ละ document | สร้าง covering index ยาก selectivity แย่ลง และ query ต้องรับมือ field ที่ขาดหรือชนิดต่างกัน (address เป็น string ของ Alan) |
+| จับคู่ทั้ง sub-document เป๊ะ | ตรวจ "เหมือนกันทุกประการ" ในการเรียกเดียว | ไวต่อลำดับ field และ field เกิน (Ada, Linus พลาด) แคบกว่า dot notation มาก |
+| `$set` ด้วย dot path | เปลี่ยนใบเดียว เก็บพี่น้อง | ต้องจำ path ของทุก field ที่แตะ |
+| `$set` ทั้ง sub-document | แทนที่กิ่งในขั้นเดียว | ทิ้งพี่น้องที่ลืมใส่ (Ada เสีย `city` และ `country`) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คาดหวังว่า index บน dot path ที่ซ้อนลึกจะมีประสิทธิภาพเท่า index บน field ระดับบนสุดเสมอ** — ยิ่งซ้อนลึกและ shape ของแต่ละ document ไม่สม่ำเสมอ ยิ่งทำให้ selectivity แย่ลงและ index ต้องครอบคลุมกรณีที่กว้างเกินจำเป็น
-- **ใช้ dot notation กับ field ที่บาง document เก็บเป็น object ซ้อน แต่บางอันเก็บเป็นค่าอื่นหรือไม่มี field เลย** — query ไม่ error แต่ผลลัพธ์ขาดหายไปเงียบ ๆ เพราะ document ที่รูปร่างต่างกันจะไม่ถูกจับคู่ ทำให้ debug ยาก
-- **ปล่อยให้ schema ซ้อนลึกขึ้นเรื่อย ๆ (4-5 ชั้น) โดยไม่ทบทวนว่าควร flatten หรือแยก collection** — ยิ่งซ้อนลึก dot path ยิ่งยาวและเปราะบางต่อการเปลี่ยน schema ทุกครั้งที่มีการปรับโครงสร้างข้อมูล
+- **"`{ address: { zip: '02139' } }` หาที่อยู่ที่มี zip นั้น"** — ต้องการให้ sub-document เท่ากับมันเป๊ะ; มันตรงไม่มีใคร
+- **"ลำดับ field ใน sub-document ไม่สำคัญ"** — สำหรับการจับคู่ทั้ง sub-document สำคัญ (Grace เทียบ Ada)
+- **"dotted path ให้ error ถ้าพ่อไม่ใช่ object"** — แค่ไม่ตรง (address เป็น string ของ Alan)
+- **"`$set: { address: { zip } }` อัปเดต zip"** — มันแทนที่ `address` ทั้งก้อน
+- **"index บน dotted path เป็นชั้นสอง"** — `address.city` ถูก index และใช้เหมือน field ทั่วไป
+- **"เงื่อนไข dotted ธรรมดาบน array ของ sub-document ตรึง element เดียว"** — กระจายข้าม element; ใช้ `$elemMatch`
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบ user profile ของแอป e-commerce** — สร้าง index บน `address.zipcode` และ `address.country` เพราะ schema ของ address นิ่งและตื้น ทำให้ query หาผู้ใช้ตามพื้นที่จัดส่งเร็วและใช้ index ได้เต็มที่
->
-> **CMS ที่เก็บ content block เป็น nested JSON ที่มีรูปร่างต่างกันในแต่ละหน้า** — เพจแต่ละประเภท (บทความ, landing page, product page) เก็บ field ซ้อนลึกไม่เท่ากัน ทีม backend มักหลีกเลี่ยงการ query ลึกเข้าไปใน block เหล่านี้โดยตรง แล้วใช้ field สรุปไว้ระดับบนสุดแทนเพื่อให้ query และ index ง่ายขึ้น
+> บทช่วยสอน embedded document ของคู่มือ MongoDB ระบุกฎที่เราวัด: "MongoDB does not recommend comparisons on embedded documents because the operations require an *exact* match of the specified `<value>` document, including the field order" และสำหรับ dot notation ระบุว่า "the field and nested field must be inside quotation marks" ([Query on Embedded/Nested Documents](https://www.mongodb.com/docs/manual/tutorial/query-embedded-documents/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกันและคืนสมาชิกชุดเดียวกัน (dot path: Grace และ Ada; whole document: Grace เท่านั้น; `$elemMatch`: Margaret) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizNested = [
   {
-    q: 'คุณจะจับคู่ field city ภายใน object address ที่ฝังอยู่ได้อย่างไร?',
+    q: 'จะจับคู่ field city ภายใน embedded object address ได้อย่างไร?',
     options: [
       '{ address: { city: "Cambridge" } }',
       '{ "address.city": "Cambridge" }',
@@ -251,31 +381,46 @@ export const quizNested = [
       '{ address: "city.Cambridge" }',
     ],
     answer: 1,
+    explain: 'dot notation เข้าถึง field ด้านในตัวเดียว; { address: { city } } ต้องการให้ทั้ง sub-document เท่ากับ { city } และตรงไม่มีใคร',
   },
   {
-    q: 'อะไรคือสิ่งพิเศษเกี่ยวกับการจับคู่ embedded sub-document ทั้งก้อน อย่าง { address: { city, zip } }?',
+    q: 'การจับคู่ทั้ง embedded sub-document อย่าง { address: { city, zip } } มีอะไรพิเศษ?',
     options: [
-      'match ทุก document ที่มี field เหล่านั้น',
-      'เป็นการเทียบแบบเป๊ะ: field เดียวกัน ค่าเดียวกัน ลำดับเดียวกัน ไม่มีส่วนเกิน',
-      'เหมือนกับ dot notation ทุกประการ',
-      'ตรวจเฉพาะ field แรกเท่านั้น',
+      'ตรงกับ document ใดก็ตามที่มี field เหล่านั้น',
+      'เป็นการเปรียบเทียบตรงเป๊ะ: field เดียวกัน ค่าเดียวกัน ลำดับเดียวกัน ไม่มีเกิน',
+      'เหมือน dot notation ทุกประการ',
+      'ตรวจเฉพาะ field แรก',
     ],
     answer: 1,
+    explain: 'ตรงเฉพาะ Grace (เก็บ city, zip); Ada (zip, city) และ Linus (มี country เกิน) ไม่ตรง',
   },
   {
-    q: 'ทำไมตัวอย่าง Go จึงใช้ bson.D สำหรับการจับคู่ sub-document ทั้งก้อน?',
+    q: 'ทำไมตัวอย่าง Go ใช้ bson.D สำหรับการจับคู่ทั้ง sub-document?',
     options: [
       'bson.D เร็วกว่า bson.M',
-      'เพราะลำดับ field มีความสำคัญและ bson.D รักษาลำดับไว้',
+      'เพราะลำดับ field สำคัญ และ bson.D มีลำดับ ส่วน map ของ Go (bson.M) ไม่กำหนดลำดับ',
       'bson.M เก็บ string ไม่ได้',
-      'จำเป็นต้องใช้กับทุก query',
+      'จำเป็นสำหรับทุก query',
     ],
     answer: 1,
+    explain: 'bson.D รักษาลำดับโดยโครงสร้าง ในการรันของเรา bson.M สองคีย์บังเอิญ marshal ตามลำดับต้นทาง แต่ไม่รับประกัน',
   },
   {
-    q: 'หากต้องการบังคับ book และ rating บน element เดียวกันของ array reviews คุณใช้:',
-    options: ['สองเงื่อนไขแบบใช้จุด', '$all', '$elemMatch', '$size'],
+    q: 'เพื่อบังคับ book และ rating บน element เดียวกันของ array reviews คุณใช้:',
+    options: ['สองเงื่อนไข dotted', '$all', '$elemMatch', '$size'],
     answer: 2,
+    explain: 'แบบ dotted ธรรมดายังคืน Grace (Algorithms 3, Networks 5); $elemMatch คืนเฉพาะ Margaret',
+  },
+  {
+    q: 'Linus มี address { city, zip, country } updateOne({ name: "Linus" }, { $set: { address: { zip: "02141" } } }) ทำอะไรกับมัน?',
+    options: [
+      'เปลี่ยนเฉพาะ zip และเก็บ city กับ country',
+      'แทนที่ address ทั้งก้อนด้วย { zip: "02141" } ทิ้ง city และ country',
+      'เกิด error เพราะ address ไม่ใช่ scalar',
+      'เพิ่ม field address ตัวที่สอง',
+    ],
+    answer: 1,
+    explain: 'findOne จริงแสดง address: { zip: "02141" } ส่วน $set ด้วย "address.zip" เก็บพี่น้องไว้',
   },
 ]
 

@@ -1,6 +1,6 @@
 ---
 title: Querying nested documents
-description: Reach embedded fields with dot notation, understand why matching a whole sub-document is order-sensitive while matching by field is not, and query arrays of sub-documents.
+description: Reach embedded fields with dot notation, understand why matching a whole sub-document is order-sensitive while matching by field is not, query arrays of sub-documents, and avoid the update trap that wipes sibling fields - all proven on documents that differ.
 sidebar:
   order: 4
 ---
@@ -8,11 +8,50 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Documents nest. A member can carry an embedded `address` object, and that object has its own fields. There are two distinct ways to query into a sub-document, and they behave very differently: you can reach a single inner field with **dot notation**, or you can match the **whole sub-document** at once. The first is forgiving; the second is an exact, order-sensitive comparison that surprises people. This lesson makes the difference concrete.
+Documents nest. A member can carry an embedded `address` object, and that object has its own fields. There are two distinct ways to query into a sub-document, and they behave very differently: you can reach a single inner field with **dot notation**, or you can match the **whole sub-document** at once. The first is forgiving; the second is an exact, order-sensitive comparison that surprises people. This lesson makes the difference concrete. Every output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 (Python, Go and Rust tabs were each run once in a scratch program on the same server).
 
-Each member now has an embedded `address` with `city` and `zip`, and a `contact` with `email` and `phone`.
+## The data we query
+
+The members below hold the same address in *different shapes* on purpose: Grace has `city` before `zip`, Ada has `zip` before `city`, Linus has an extra `country` field, and Alan stores the address as a plain string:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/nest-seed.js
+    db.members.insertMany([
+      { name: "Grace",    address: { city: "Cambridge", zip: "02139" }, contact: { email: "grace@example.org", phone: "555-0101" },
+        reviews: [{ book: "Algorithms", rating: 3 }, { book: "Networks", rating: 5 }] },
+      { name: "Margaret", address: { city: "Boston", zip: "02110" }, contact: { email: "m@example.org" },
+        reviews: [{ book: "Algorithms", rating: 5 }, { book: "Networks", rating: 3 }] },
+      { name: "Ada",      address: { zip: "02139", city: "Cambridge" }, reviews: [] },              // zip BEFORE city
+      { name: "Linus",    address: { city: "Cambridge", zip: "02139", country: "US" } },            // extra field
+      { name: "Edsger" },                                                                            // no address
+      { name: "Alan",     address: "Cambridge, UK" },                                                // a string, not an object
+    ]);
+    globalThis.names = (f) => db.members.find(f, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 6);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/nest-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Grace",    address: { city: "Cambridge", zip: "02139" }, contact: { email: "grace@example.org", phone: "555-0101" },
+        reviews: [{ book: "Algorithms", rating: 3 }, { book: "Networks", rating: 5 }] },
+      { name: "Margaret", address: { city: "Boston", zip: "02110" }, contact: { email: "m@example.org" },
+        reviews: [{ book: "Algorithms", rating: 5 }, { book: "Networks", rating: 3 }] },
+      { name: "Ada",      address: { zip: "02139", city: "Cambridge" }, reviews: [] },
+      { name: "Linus",    address: { city: "Cambridge", zip: "02139", country: "US" } },
+      { name: "Edsger" },
+      { name: "Alan",     address: "Cambridge, UK" },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 6) throw new Error("expected 6");
+    ```
+  </TabItem>
+</Tabs>
 
 ## Reaching an inner field with dot notation
 
@@ -21,14 +60,22 @@ To match on one field buried inside an embedded object, name the path with a dot
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ "address.city": "Cambridge" })
+    // mongosh/nest-dot.js
+    console.log("address.city = Cambridge  :", names({ "address.city": "Cambridge" }));
+    console.log("address.zip $exists       :", names({ "address.zip": { $exists: true } }));
+    console.log("address.city missing      :", names({ "address.city": { $exists: false } }));
+    console.log("contact.phone missing     :", names({ "contact.phone": { $exists: false } }));
+    assert.strictEqual(names({ "address.city": "Cambridge" }), "Ada, Grace, Linus");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/nest-dot.mjs
     const docs = await db.collection("members")
       .find({ "address.city": "Cambridge" })
       .toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 3) throw new Error("expected Ada, Grace and Linus");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,37 +104,40 @@ To match on one field buried inside an embedded object, name the path with a dot
   </TabItem>
 </Tabs>
 
-The query reaches into `address` and matches only its `city`, ignoring whatever else the sub-document holds:
+The query reaches into `address` and matches only its `city`, ignoring whatever else the sub-document holds and however its fields are ordered - Ada (`zip` first) and Linus (extra `country`) both match alongside Grace. Dot paths chain as deep as your data goes and combine freely with operators:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
-    "name": "Grace",
-    "address": { "city": "Cambridge", "zip": "02139" }
-  }
-]
+```text
+address.city = Cambridge  : Ada, Grace, Linus
+address.zip $exists       : Ada, Grace, Linus, Margaret
+address.city missing      : Alan, Edsger
+contact.phone missing     : Ada, Alan, Edsger, Linus, Margaret
 ```
 
-Dot paths chain as deep as your data goes and combine freely with operators — `{ "address.zip": { $exists: true } }` works exactly as you would expect.
+Alan (whose `address` is a string, so `address.city` cannot exist) and Edsger (no `address`) are both "missing" for `address.city`; no error is raised for a path through a non-object.
 
 ## Matching a whole sub-document: order matters
 
-You can also hand the `address` field an entire document as its value. This is **not** the same as a dotted query. It demands an *exact* match: the same fields, the same values, and the **same order**, with no extra fields allowed. Here we match the full address:
+You can also hand the `address` field an entire document as its value. This is **not** the same as a dotted query. It demands an *exact* match: the same fields, the same values, and the **same order**, with no extra fields allowed. Here we match the full address, in three forms:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      address: { city: "Cambridge", zip: "02139" }
-    })
+    // mongosh/nest-whole.js
+    console.log("{ city, zip }          :", names({ address: { city: "Cambridge", zip: "02139" } }));
+    console.log("{ zip, city } reversed :", names({ address: { zip: "02139", city: "Cambridge" } }));
+    console.log("{ zip } only           :", names({ address: { zip: "02139" } }));
+    assert.strictEqual(names({ address: { city: "Cambridge", zip: "02139" } }), "Grace");
+    assert.strictEqual(names({ address: { zip: "02139" } }), "");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/nest-whole.mjs
     const docs = await db.collection("members").find({
       address: { city: "Cambridge", zip: "02139" }
     }).toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1 || docs[0].name !== "Grace") throw new Error("expected only Grace");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -125,37 +175,38 @@ You can also hand the `address` field an entire document as its value. This is *
   </TabItem>
 </Tabs>
 
-This matches Grace — but only because her stored `address` has `city` first and `zip` second, with no other fields:
+The same three people share a city and a zip, yet the whole-document form finds a different single person for each spelling:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d4",
-    "name": "Grace",
-    "address": { "city": "Cambridge", "zip": "02139" }
-  }
-]
+```text
+{ city, zip }          : Grace
+{ zip, city } reversed : Ada
+{ zip } only           : 
 ```
 
-If the stored document listed `zip` before `city`, or added a `country` field, this same filter would return **nothing** — that is the order-sensitivity trap, and it is why dot notation is usually the safer choice. Note the Go example uses `bson.D`, an ordered document, precisely because order is significant here.
+`{ city, zip }` matches only Grace, whose stored order is exactly that - **not** Ada (same values, reversed order) and **not** Linus (an extra `country`). Reverse the filter and it matches Ada instead. A partial sub-document (`{ zip }` alone) matches nobody. That is the order-sensitivity trap, and it is why dot notation is the safer default. The Go example uses `bson.D`, an *ordered* document: a Go `bson.M` is a map, and Go does not define map iteration order. In our run (Go 1.27.1, driver v2.9.1) a two-key `bson.M` happened to marshal in source order - it matched the right person 500 times out of 500 - but that is an implementation detail you should not rely on; `bson.D` is the guaranteed form. JavaScript objects, Python dicts and Rust `doc!` keep insertion order.
 
 ## Arrays of sub-documents
 
-The most common real shape is an array whose elements are sub-documents. Say each member has a `reviews` array, each review a `book` and a `rating`. A plain dotted query like `"reviews.rating"` checks the condition across *all* reviews, so to require both fields on the *same* review you combine the dot path's spirit with `$elemMatch`. Here we find members with a review of *Algorithms* rated at least 4:
+The most common real shape is an array whose elements are sub-documents. Say each member has a `reviews` array, each review a `book` and a `rating`. A plain dotted query like `"reviews.rating"` checks the condition across *all* reviews, so to require both fields on the *same* review you combine the dot path's spirit with `$elemMatch`. Here we find members with a review of *Algorithms* rated at least 4 - Grace rated Algorithms 3 and Networks 5, Margaret the reverse:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
-    })
+    // mongosh/nest-array.js
+    console.log("plain dotted paths :", names({ "reviews.book": "Algorithms", "reviews.rating": { $gte: 4 } }));
+    console.log("$elemMatch         :", names({ reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } } }));
+    console.log("reviews.0.book     :", names({ "reviews.0.book": "Algorithms" }));
+    assert.strictEqual(names({ reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } } }), "Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/nest-array.mjs
     const docs = await db.collection("members").find({
       reviews: { $elemMatch: { book: "Algorithms", rating: { $gte: 4 } } }
     }).toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1 || docs[0].name !== "Margaret") throw new Error("expected only Margaret");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -193,53 +244,132 @@ The most common real shape is an array whose elements are sub-documents. Say eac
   </TabItem>
 </Tabs>
 
-Only members whose *same* review names that book and clears the rating bar match:
+Only members whose *same* review names that book and clears the rating bar match. The plain form also returned Grace, who rated Algorithms 3 but some *other* book 5:
 
-```json
-[
-  {
-    "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-    "name": "Margaret",
-    "reviews": [
-      { "book": "Algorithms", "rating": 5 },
-      { "book": "Networks", "rating": 3 }
-    ]
-  }
-]
+```text
+plain dotted paths : Grace, Margaret
+$elemMatch         : Margaret
+reviews.0.book     : Grace, Margaret
 ```
 
-**In Compass:** the filter bar accepts dotted keys directly, for example `{ "address.city": "Cambridge" }`. The Documents tab shows nested objects as expandable tree nodes, which makes it easy to confirm the exact field order before you attempt a whole-sub-document match.
+`reviews.0.book` addresses the first review by index (fragile if the array is reordered).
+
+## Updating a nested field: the sibling-wiping trap
+
+The same whole-versus-path distinction decides what an *update* does. Setting one inner field by dot path keeps its siblings; setting the parent to a new document **replaces** it:
+
+```js
+// mongosh/nest-update.js
+db.people.insertMany([
+  { name: "Linus", address: { city: "Cambridge", zip: "02139", country: "US" } },
+  { name: "Ada",   address: { city: "Cambridge", zip: "02139", country: "US" } },
+]);
+db.people.updateOne({ name: "Linus" }, { $set: { "address.zip": "02140" } });          // by path
+db.people.updateOne({ name: "Ada" },   { $set: { address: { zip: "02141" } } });       // by whole document
+console.log(db.people.findOne({ name: "Linus" }, { _id: 0 }));
+console.log(db.people.findOne({ name: "Ada" }, { _id: 0 }));
+assert.strictEqual(db.people.findOne({ name: "Linus" }).address.city, "Cambridge");
+assert.strictEqual("city" in db.people.findOne({ name: "Ada" }).address, false);
+```
+
+```text
+{
+  name: 'Linus',
+  address: { city: 'Cambridge', zip: '02140', country: 'US' }
+}
+{ name: 'Ada', address: { zip: '02141' } }
+```
+
+Ada lost `city` and `country`. Rule of thumb: **query and update nested fields with dot paths.**
+
+## Dot paths and indexes
+
+A dotted path indexes like any field:
+
+```js
+// mongosh/nest-index.js
+db.members.createIndex({ "address.city": 1 });
+const e = db.members.find({ "address.city": "Cambridge" }).explain("executionStats");
+console.log(e.queryPlanner.winningPlan.inputStage.stage, "keys", e.executionStats.totalKeysExamined, "docs", e.executionStats.totalDocsExamined);
+assert.strictEqual(e.queryPlanner.winningPlan.inputStage.stage, "IXSCAN");
+```
+
+```text
+IXSCAN keys 3 docs 3
+```
+
+**In Compass:** the **Filter** field accepts dotted keys directly, for example `{ "address.city": "Cambridge" }`; the Documents tab shows nested objects as expandable nodes, which makes it easy to confirm the exact field order before you attempt a whole-sub-document match (Compass documentation, [query filter](https://www.mongodb.com/docs/compass/current/query/filter/), lists `{ "school.name": "Northwestern" }` as an embedded-field example).
 
 ## Tips and gotchas
 
-- **Order sensitivity is the big one.** Matching an embedded document by handing the field a full document compares the whole thing literally — same fields, same values, same order, no extras. Re-arrange the keys and the match silently disappears.
+- **Order sensitivity is the big one.** Matching an embedded document by handing the field a full document compares the whole thing literally - same fields, same values, same order, no extras. Re-arrange the keys and the match silently disappears (`Grace` vs `Ada` above).
 - **Dot notation is order-independent and partial.** `{ "address.city": "Cambridge" }` cares about one field and nothing else, which is why it is the everyday choice for embedded data.
-- **Quote any key with a dot.** `address.city` must be written as the string `"address.city"`; an unquoted dotted identifier is not valid in most drivers' document literals.
-- **Arrays of sub-documents need `$elemMatch` for multi-field conditions**, for the same reason scalar arrays do — otherwise the conditions spread across different elements of the array.
+- **Quote any key with a dot.** `address.city` must be written as the string `"address.city"`.
+- **Arrays of sub-documents need `$elemMatch` for multi-field conditions**, for the same reason scalar arrays do - otherwise the conditions spread across different elements.
+- **A field whose *name* contains a dot cannot be reached by its plain name.** With `{ "a.b": 1, a: { b: 2 } }`, `{ "a.b": 2 }` found the document and `{ "a.b": 1 }` found nothing - the dotted string always means the path. Avoid dots in field names.
+- **Update nested fields by path**, not by handing over the parent (`address.zip` vs `address: { zip }`).
 
 <Callout title="Dot for a field, full document for the whole thing">
-To match one buried field, use a quoted dot path — partial and order-free. To match an entire embedded document, hand the field a complete document — but know it is an exact, ordered comparison that breaks the moment the stored keys are reordered or a field is added.
+To match one buried field, use a quoted dot path - partial and order-free. To match an entire embedded document, hand the field a complete document - but know it is an exact, ordered comparison that breaks the moment the stored keys are reordered or a field is added.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant asked for "members in the 02139 zip" will often write a sub-document filter with just the field it cares about:
+
+<SpotTheBug lang="js" code={`// AI comment: "find members whose address has zip 02139"
+const local = await db.collection("members")
+  .find({ address: { zip: "02139" } })
+  .toArray();
+console.log(\`\${local.length} local members\`);   // prints 0`}>
+
+`{ address: { zip: "02139" } }` does not mean "address has a zip of 02139" - it means "`address` is *exactly* the document `{ zip: "02139" }`". On our data it matched **nobody**, although three members live in that zip (Ada, Grace and Linus). The code does not error; the reminder list is simply empty. The fix is the dot path:
+
+```js
+// mongosh/nest-zip-fix.js
+const bug = names({ address: { zip: "02139" } });
+const fixed = names({ "address.zip": "02139" });
+console.log("sub-document form :", JSON.stringify(bug));
+console.log("dot-path form     :", fixed);
+assert.strictEqual(bug, "");
+assert.strictEqual(fixed, "Ada, Grace, Linus");
+```
+
+```text
+sub-document form : ""
+dot-path form     : Ada, Grace, Linus
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A nested document is a **path tree**. Dot notation asks about *one leaf* of the tree, ignoring everything else; a sub-document filter asks whether a *whole branch* is byte-for-byte the value you handed over. The same split governs updates: `"address.zip"` edits a leaf, `address: {...}` replaces a branch. Ask "am I talking about a leaf or a branch?" before writing the filter.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Dot-notation query on a shallow, stable nested field | Easy to read, indexes well — a compound index on a dot path behaves like a normal field | You must know the exact path in advance; a schema change means updating every query that references it |
-| Deeply nested or per-document varying shape | Flexible for data whose shape differs document to document | Hard to build a covering index for, worse selectivity, and queries must handle missing fields or differing types |
-| Matching a whole sub-document exactly | Checks "identical in every way" in one call | Sensitive to field order and extra fields, far narrower than dot notation |
+| Dot-notation query on a shallow, stable nested field | Easy to read, indexes well - `IXSCAN`, 3 keys for 3 hits above | You must know the exact path in advance; a schema change means updating every query that references it |
+| Deeply nested or per-document varying shape | Flexible for data whose shape differs document to document | Hard to build a covering index for, worse selectivity, and queries must handle missing fields or differing types (Alan's string address) |
+| Matching a whole sub-document exactly | Checks "identical in every way" in one call | Sensitive to field order and extra fields (Ada, Linus missed), far narrower than dot notation |
+| `$set` by dot path | Changes one leaf, keeps siblings | You must remember the path for every field you touch |
+| `$set` a whole sub-document | Replaces a branch in one step | Drops any sibling you forgot (Ada lost `city` and `country`) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Expecting an index on a deeply nested dot path to always perform as well as one on a top-level field** — the deeper the nesting and the less uniform each document's shape, the worse the selectivity, and the index ends up covering broader cases than necessary.
-- **Using dot notation on a field that some documents store as a nested object but others store differently or omit entirely** — the query does not error, but results quietly come up short, since differently-shaped documents simply do not match. This makes debugging hard.
-- **Letting a schema nest deeper and deeper (four or five levels) without reconsidering whether to flatten it or split into a separate collection** — the deeper the nesting, the longer and more fragile the dot paths become every time the data is restructured.
+- **"`{ address: { zip: '02139' } }` finds addresses with that zip."** - it needs the sub-document to equal it exactly; it matched nobody.
+- **"Field order inside a sub-document does not matter."** - for whole-sub-document matching it does (Grace vs Ada).
+- **"A dotted path errors if the parent is not an object."** - it just does not match (Alan's string `address`).
+- **"`$set: { address: { zip } }` updates the zip."** - it replaces the whole `address`.
+- **"An index on a dotted path is second-class."** - `address.city` indexed and used like any field.
+- **"Plain dotted conditions on an array of sub-documents pin one element."** - they spread across elements; use `$elemMatch`.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An e-commerce app's user profile system** — indexes `address.zipcode` and `address.country` because the address schema is stable and shallow, making queries for users by shipping area fast and fully indexed.
->
-> **A CMS storing content blocks as nested JSON that varies shape per page** — different page types (articles, landing pages, product pages) store nested fields to different depths. Backend teams commonly avoid querying deep into these blocks directly and instead keep summary fields at the top level, to keep queries and indexes simple.
+> The MongoDB manual's embedded-document tutorial states the rule we measured: "MongoDB does not recommend comparisons on embedded documents because the operations require an *exact* match of the specified `<value>` document, including the field order", and for dot notation notes that "the field and nested field must be inside quotation marks" ([Query on Embedded/Nested Documents](https://www.mongodb.com/docs/manual/tutorial/query-embedded-documents/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server and returned the same members (dot path: Grace and Ada; whole document: Grace only; `$elemMatch`: Margaret) but they are not executed by the course's automated checker._
 
 export const quizNested = [
   {
@@ -251,6 +381,7 @@ export const quizNested = [
       '{ address: "city.Cambridge" }',
     ],
     answer: 1,
+    explain: 'Dot notation reaches one inner field; { address: { city } } would demand the whole sub-document equal { city } and matched nobody.',
   },
   {
     q: 'What is special about matching a whole embedded sub-document, like { address: { city, zip } }?',
@@ -261,21 +392,35 @@ export const quizNested = [
       'It only checks the first field',
     ],
     answer: 1,
+    explain: 'Only Grace (stored city, zip) matched; Ada (zip, city) and Linus (extra country) did not.',
   },
   {
     q: 'Why does the Go example use bson.D for a whole-sub-document match?',
     options: [
       'bson.D is faster than bson.M',
-      'Because field order is significant and bson.D preserves it',
+      'Because field order is significant and bson.D is ordered; a Go map (bson.M) has no defined order',
       'bson.M cannot hold strings',
       'It is required for all queries',
     ],
     answer: 1,
+    explain: 'bson.D preserves order by construction. In our run a two-key bson.M happened to marshal in source order, but that is not guaranteed.',
   },
   {
     q: 'To require book and rating on the SAME element of a reviews array, you use:',
     options: ['Two dotted conditions', '$all', '$elemMatch', '$size'],
     answer: 2,
+    explain: 'The plain dotted form also returned Grace (Algorithms 3, Networks 5); $elemMatch returned only Margaret.',
+  },
+  {
+    q: 'Linus has address { city, zip, country }. What does updateOne({ name: "Linus" }, { $set: { address: { zip: "02141" } } }) do to it?',
+    options: [
+      'Changes only zip and keeps city and country',
+      'Replaces the whole address with { zip: "02141" }, dropping city and country',
+      'Raises an error because address is not a scalar',
+      'Adds a second address field',
+    ],
+    answer: 1,
+    explain: 'The real findOne showed address: { zip: "02141" }. $set with "address.zip" keeps the siblings.',
   },
 ]
 
