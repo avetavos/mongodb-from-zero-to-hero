@@ -73,7 +73,7 @@ Every number here was captured on this Mac with mongo 8.3.11, mongosh 2.11.1 and
 
 - **Replica sets** — a crashed primary stalled one write for about 10.8 s (the docs say the median election "should not typically exceed 12 seconds"); a cleanly stopped one for 0.3 s; with two of three members gone the survivor refused writes.
 - **Sharding** — a timestamp shard key put 100 000 of 100 000 documents on one shard, a hashed key split them 48 900 / 51 100; `enableSharding` was not needed.
-- **Performance** — a profile entry with `COLLSCAN` and 50 000 documents examined for 5 000 returned; a client per request multiplied new connections.
+- **Performance** — a profile entry with `COLLSCAN` and 49 999 documents examined for 5 000 returned; a client per request multiplied new connections.
 - **Security** — the default container accepted an insert with no credentials; `Command find requires authentication`; a missing `authSource` failed with code 18.
 
 ## Mental Model

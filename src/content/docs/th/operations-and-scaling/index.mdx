@@ -73,7 +73,7 @@ MongoDB ใน production คือสี่ปัญหาที่มีสี
 
 - **Replica set** — primary ที่ล่มทำให้การเขียนหนึ่งครั้งค้างราว 10.8 วินาที (เอกสารบอกว่าค่ามัธยฐานของ election "should not typically exceed 12 seconds"); ตัวที่หยุดอย่างสะอาดค้าง 0.3 วินาที; เมื่อสองในสามสมาชิกหายไป ตัวที่รอดปฏิเสธการเขียน
 - **Sharding** — shard key แบบ timestamp ทำให้ 100 000 จาก 100 000 document อยู่บน shard เดียว ส่วน key แบบ hashed แบ่ง 48 900 / 51 100; ไม่ต้องใช้ `enableSharding`
-- **Performance** — profile entry ที่เป็น `COLLSCAN` ตรวจ 50 000 document เพื่อคืน 5 000; client ต่อ request ทำให้ connection ใหม่เพิ่มขึ้นมาก
+- **Performance** — profile entry ที่เป็น `COLLSCAN` ตรวจ 49 999 document เพื่อคืน 5 000; client ต่อ request ทำให้ connection ใหม่เพิ่มขึ้นมาก
 - **Security** — container เริ่มต้นรับ insert โดยไม่ต้องมี credential; `Command find requires authentication`; การไม่ใส่ `authSource` ล้มด้วย code 18
 
 ## Mental Model
