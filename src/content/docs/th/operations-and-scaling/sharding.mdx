@@ -1,6 +1,6 @@
 ---
 title: Sharding
-description: MongoDB แบ่ง collection หนึ่งออกไปยังหลาย shards ตาม shard key อย่างไร บทบาทของ mongos และ config servers และวิธีเลือก shard key ที่คุณจะไม่ต้องเสียใจภายหลัง
+description: MongoDB แบ่ง collection เดียวข้ามหลาย shard ด้วย shard key อย่างไร — รันบนคลัสเตอร์จริง (config server, สอง shard, mongos) — วัด hashed เทียบกับ key ที่เพิ่มขึ้นแบบ monotonic, targeted เทียบกับ scatter-gather ใน explain, analyzeShardKey และ resharding
 sidebar:
   order: 3
 ---
@@ -9,13 +9,33 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-replica set ทำให้ข้อมูลของคุณยังอยู่รอด แต่สมาชิกทุกตัวก็ยังถือ *ทั้งหมด* ของชุดข้อมูล นั่นใช้ได้ไปจนถึงจุดที่เครื่องหนึ่งไม่สามารถบรรจุข้อมูลทั้งหมดของคุณได้อีกต่อไป หรือ primary หนึ่งไม่สามารถรับ write ทั้งหมดได้อีกต่อไป การเพิ่มหน่วยความจำและดิสก์ที่เร็วขึ้น — การ scale *up* — มีเพดานและแพงขึ้นอย่างรวดเร็ว ส่วน **Sharding** เลือก scale *out* แทน คือกระจาย collection เชิงตรรกะหนึ่งอันออกไปหลายเครื่อง ทั้งข้อมูลและภาระ write จึงถูกแบ่งกัน แต่ละเครื่องถือแค่ส่วนของตัวเอง และคุณเพิ่ม capacity ด้วยการเพิ่มเครื่อง
+replica set ทำให้ข้อมูลของคุณคงอยู่ แต่สมาชิกทุกตัวยังถือข้อมูล *ทั้งหมด* ซึ่งใช้ได้จนกว่าเครื่องเดียวจะไม่พอเก็บข้อมูลทั้งหมด หรือ primary ตัวเดียวรับการเขียนทั้งหมดไม่ไหว การเพิ่มหน่วยความจำและดิสก์ที่เร็วขึ้น — scale *up* — มีเพดาน **Sharding** scale *out*: แบ่ง collection เชิงตรรกะหนึ่งอันข้ามหลายเครื่อง ข้อมูลและโหลดการเขียนจึงถูกแบ่งกัน
+
+ทุกอย่างด้านล่างรันบนเครื่อง Mac นี้ บนคลัสเตอร์ชั่วคราวของ container `mongo:8.3.11` สี่ตัวบน Docker network แต่ละตัวจำกัด 512 MB และลบทิ้งหลังใช้งาน: config server หนึ่งตัว (replica set โหนดเดียว), สอง shard (`shardA`, `shardB` โหนดเดียวต่อตัว) และ `mongos` หนึ่งตัว ด้วย mongosh 2.11.1 มันเป็นคลัสเตอร์สำหรับสอน — shard และ config server ใน production เป็น replica set สามโหนด — และตัวตรวจอัตโนมัติของคอร์สรัน fence เหล่านี้ไม่ได้ (ต้องมีคลัสเตอร์) output จึงบันทึกจากการรันจริง แท็บ Python/Go/Rust สะท้อนการเรียกใน shell และไม่ได้ถูกรันโดยตัวตรวจ
+
+## Lab
+
+```bash
+# scripts/shard-lab.sh
+docker network create mongodb-shard-lab
+run() { docker run -d --name "$1" --hostname "$1" --network mongodb-shard-lab --memory 512m mongo:8 "${@:2}"; }
+run cfg     mongod --configsvr --replSet cfg    --bind_ip_all --wiredTigerCacheSizeGB 0.25
+run shard-a mongod --shardsvr  --replSet shardA --bind_ip_all --wiredTigerCacheSizeGB 0.25
+run shard-b mongod --shardsvr  --replSet shardB --bind_ip_all --wiredTigerCacheSizeGB 0.25
+docker exec cfg     mongosh --quiet --port 27019 --eval 'rs.initiate({ _id: "cfg", configsvr: true, members: [{ _id: 0, host: "cfg:27019" }] })'
+docker exec shard-a mongosh --quiet --port 27018 --eval 'rs.initiate({ _id: "shardA", members: [{ _id: 0, host: "shard-a:27018" }] })'
+docker exec shard-b mongosh --quiet --port 27018 --eval 'rs.initiate({ _id: "shardB", members: [{ _id: 0, host: "shard-b:27018" }] })'
+run mongos  mongos --configdb cfg/cfg:27019 --bind_ip_all
+docker exec mongos mongosh --quiet --eval 'sh.addShard("shardA/shard-a:27018"); sh.addShard("shardB/shard-b:27018")'
+# clean up: docker rm -f cfg shard-a shard-b mongos && docker network rm mongodb-shard-lab
+```
 
 ## ส่วนประกอบของ sharded cluster
 
-Sharding นำเสนอสามบทบาทนอกเหนือจากตัว shards เอง **shard** คือ replica set ที่ถือส่วนหนึ่งของข้อมูล **config servers** คือ replica set อีกชุดหนึ่งที่เก็บ metadata ของ cluster — แผนที่ว่าข้อมูลไหนอยู่บน shard ไหน และ **mongos** คือ router ขนาดเบาที่แอปพลิเคชันของคุณเชื่อมต่อแทนที่จะต่อ shard ใด shard หนึ่งตรง ๆ โดย `mongos` จะดูแผนที่นั้นแล้วส่งต่อแต่ละ request ไปยัง shard ที่ถูกต้อง
+**shard** คือ replica set ที่ถือข้อมูลส่วนหนึ่ง **config server** คือ replica set ของมันเองที่เก็บ metadata ของคลัสเตอร์ — chunk ไหนอยู่ shard ไหน **mongos** คือ router ที่แอปเชื่อมต่อแทน shard ตัวใดตัวหนึ่ง มันอ่าน metadata นั้นและส่งต่อแต่ละคำขอไปยัง shard ที่ถูกต้อง
 
 export const shardTopology = `flowchart TB
   App["Application"] --> M["mongos router"]
@@ -25,50 +45,47 @@ export const shardTopology = `flowchart TB
   M --> Sh3["Shard 3 (replica set)"]
   CFG -. "tells mongos where each chunk lives" .- M`
 
-<Mermaid code={shardTopology} title="แอปพลิเคชันคุยกับ mongos เท่านั้น ซึ่งใช้แผนที่ของ config servers เพื่อนำทาง request ไปยัง shard ที่ถูกต้อง" />
+<Mermaid code={shardTopology} title="แอปพลิเคชันคุยกับ mongos เท่านั้น ซึ่งใช้แผนที่ของ config server เพื่อส่งคำขอไปยัง shard ที่ถูกต้อง" />
 
-แอปของคุณไม่เคยคุยกับ shard โดยตรง แต่ต่อเข้า `mongos` ซึ่งดูแยกไม่ออกจาก server MongoDB ปกติ เบื้องหลัง endpoint เดียวนั้น `mongos` อ่าน metadata ที่ config servers ถืออยู่และตัดสินใจว่าแต่ละ query และแต่ละ write อยู่ที่ไหน
+คลัสเตอร์ในสายตาของ `mongos`:
 
-## shard key, chunks และ balancer
+```js
+// mongosh/sh-topology.js @skip-verify needs the sharded lab cluster (real output below)
+console.log(db.getSiblingDB("config").shards.find({}, { host: 1 }).toArray());
+console.log("balancer enabled:", sh.getBalancerState(), "| mode:", db.adminCommand({ balancerStatus: 1 }).mode);
+```
 
-ทั้งระบบขึ้นอยู่กับการตัดสินใจหนึ่งอย่าง: **shard key** ที่เป็นฟิลด์ (หรือชุดของฟิลด์) ที่ MongoDB ใช้ตัดสินว่า document หนึ่งอยู่บน shard ไหน MongoDB แบ่งช่วงของ key ออกเป็นบล็อกที่ต่อเนื่องกันเรียกว่า **chunks** และกำหนดแต่ละ chunk ให้กับ shard เมื่อข้อมูลโตขึ้น chunk ที่ใหญ่เกินไปจะถูกแบ่งเป็นสอง และทำงานเบื้องหลังที่เรียกว่า **balancer** จะย้าย chunk ระหว่าง shard อย่างเงียบ ๆ เพื่อให้แต่ละ shard ถือของพอ ๆ กัน
+```text
+[
+  { _id: 'shardA', host: 'shardA/shard-a:27018' },
+  { _id: 'shardB', host: 'shardB/shard-b:27018' }
+]
+balancer enabled: true | mode: full
+```
 
-export const chunkFlow = `flowchart LR
-  K["Shard key value"] --> C["Which chunk owns this value"]
-  C --> S["Which shard owns that chunk"]
-  S --> Done["Document lands on that shard"]
-  Bal["Balancer"] -. "migrates chunks to keep shards even" .- S`
+## Shard collection — `enableSharding` เป็นทางเลือก
 
-<Mermaid code={chunkFlow} title="shard key ของ document ตัดสินว่าอยู่ chunk ไหน แล้ว chunk ตัดสินว่าอยู่ shard ไหน ส่วน balancer คอยเกลี่ยจำนวน chunk ให้เท่ากันเมื่อเวลาผ่านไป" />
-
-มีสองวิธีในการแมป key ไปยัง chunks **Ranged** sharding เก็บค่า key ที่อยู่ใกล้กันไว้ด้วยกัน — มีประโยชน์เมื่อคุณ query ตามช่วง แต่เสี่ยงถ้า write กระจุกตัวที่ปลายด้านหนึ่งของช่วง เพราะ write จะไปกองทับกันอยู่บน shard เดียว **Hashed** sharding ส่ง key ผ่าน hash ก่อน กระจายแม้แต่ค่าที่เรียงต่อเนื่องให้กระจายทั่วถึงข้าม shards — เยี่ยมสำหรับการกระจาย write แต่ทำลาย locality ไปด้วย query แบบช่วงจึงต้องกระจายไปถามทุก shard คุณเปิด sharding บน collection และเลือกกลยุทธ์ได้ในการเรียกเดียว:
+บทช่วยสอนเก่า (และบทเรียนเวอร์ชันเก่านี้) เริ่มด้วย `sh.enableSharding("library")` manual บอกว่า: "Starting in MongoDB 6.0, this command is not required to shard a collection. The enableSharding command explicitly creates a database" ([enableSharding](https://www.mongodb.com/docs/manual/reference/command/enableSharding/), ตรวจเมื่อ 2026-09-30) หลักฐานบน 8.3.11 — คำสั่งแรกสุดบนคลัสเตอร์ใหม่:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    sh.enableSharding("library")
-
-    // Ranged shard key on memberId
-    sh.shardCollection("library.loans", { memberId: 1 })
-
-    // Or hashed, to spread writes evenly
-    sh.shardCollection("library.events", { deviceId: "hashed" })
+    // mongosh/sh-shard-collection.js @skip-verify needs the sharded lab cluster (real output below)
+    const r = sh.shardCollection("library.loans", { memberId: 1 });   // no enableSharding first
+    console.log("shardCollection ok:", r.ok);
+    console.log(db.getSiblingDB("config").databases.find({ _id: "library" }, { primary: 1 }).toArray());
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/sh-shard-collection.mjs @skip-verify needs the sharded lab cluster
     const admin = client.db("admin");
-    await admin.command({ enableSharding: "library" });
-    await admin.command({
-      shardCollection: "library.loans",
-      key: { memberId: 1 },
-    });
+    await admin.command({ shardCollection: "library.loans", key: { memberId: 1 } });
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     admin = client.admin
-    admin.command("enableSharding", "library")
     admin.command(
         "shardCollection", "library.loans", key={"memberId": 1}
     )
@@ -98,82 +115,237 @@ export const chunkFlow = `flowchart LR
   </TabItem>
 </Tabs>
 
+```text
+shardCollection ok: 1
+[ { _id: 'library', primary: 'shardB' } ]
+```
+
+database ถูกสร้างตามต้องการและได้ **primary shard** (`shardB` ในการรันนี้; คลัสเตอร์เลือกให้) — บ้านของ collection ที่ไม่ได้ shard นั่นคือทั้งหมดที่ `enableSharding` ยังทำอยู่
+
+## shard key, chunk และ balancer
+
+**shard key** คือฟิลด์ (หรือหลายฟิลด์) ที่ MongoDB ใช้ตัดสินว่า document เป็นของ shard ไหน มันแบ่งช่วงค่าของ key เป็น **chunk** ที่ต่อเนื่องกันและกำหนดแต่ละ chunk ให้ shard; **balancer** เบื้องหลังย้าย chunk เพื่อให้ shard สมดุล **Ranged** sharding เก็บค่าใกล้กันไว้ด้วยกัน (ดีสำหรับ range query เสี่ยงถ้าการเขียนกระจุกที่ปลายด้านหนึ่ง); **hashed** sharding hash key ก่อน (การเขียนกระจายเท่ากัน แต่ range ต้องกระจายไปทุก shard)
+
+export const chunkFlow = `flowchart LR
+  K["Shard key value"] --> C["Which chunk owns this value"]
+  C --> S["Which shard owns that chunk"]
+  S --> Done["Document lands on that shard"]
+  Bal["Balancer"] -. "migrates chunks to keep shards even" .- S`
+
+<Mermaid code={chunkFlow} title="shard key ของ document ตัดสิน chunk และ chunk ตัดสิน shard; balancer ปรับจำนวน chunk ให้เท่ากันเมื่อเวลาผ่านไป" />
+
+### Targeted เทียบกับ scatter-gather ใน `explain`
+
+query ที่มี shard key เป็น **targeted**; ที่ไม่มีเป็น **scatter-gather** ด้านล่าง โหลด 100 000 document ลง collection แบบ hashed (`events`, key `deviceId`) แล้ว `explain` บน `mongos`:
+
+```js
+// mongosh/sh-route.js @skip-verify needs the sharded lab cluster (real output below)
+const lib = db.getSiblingDB("library");
+lib.events.drop();
+sh.shardCollection("library.events", { deviceId: "hashed" });
+let batch = [];
+for (let i = 0; i < 100000; i++) {
+  batch.push({ deviceId: "dev-" + (i % 5000), i });
+  if (batch.length === 10000) { lib.events.insertMany(batch, { ordered: false }); batch = []; }
+}
+function route(label, cursor) {
+  const p = cursor.explain().queryPlanner.winningPlan;
+  console.log(label, "->", p.stage, (p.shards ?? []).map((s) => s.shardName));
+}
+route("deviceId = dev-42 (shard key, equality)", lib.events.find({ deviceId: "dev-42" }));
+route("i = 42            (no shard key)       ", lib.events.find({ i: 42 }));
+route("deviceId range    (hashed key, range)  ", lib.events.find({ deviceId: { $gte: "dev-1", $lt: "dev-2" } }));
+```
+
+```text
+deviceId = dev-42 (shard key, equality) -> SINGLE_SHARD [ 'shardA' ]
+i = 42            (no shard key)        -> SHARD_MERGE [ 'shardA', 'shardB' ]
+deviceId range    (hashed key, range)   -> SHARD_MERGE [ 'shardA', 'shardB' ]
+```
+
+equality บน shard key ไปที่ shard เดียวพอดี (`SINGLE_SHARD`); ไม่มี shard key หรือ *range* บน hashed key ต้องใช้ทั้งสอง (`SHARD_MERGE`) นั่นคือราคาของการ hash: ลำดับถูกทำลาย
+
 ## การเลือก shard key ที่ดี
 
-shard key ที่ไม่ดีไม่สามารถแก้ไขแบบเงียบ ๆ ภายหลังได้ ดังนั้นการเลือกนี้สมควรได้รับความใส่ใจตั้งแต่แรก สามคุณสมบัติที่ทำให้ key ดี **High cardinality** หมายถึง key มีค่าที่แตกต่างกันจำนวนมาก เพื่อให้ข้อมูลแบ่งออกเป็น chunks ได้หลายอัน — ฟิลด์ที่มีค่าเพียงไม่กี่ค่าจำกัดว่าคุณกระจายได้ไกลแค่ไหน **Even distribution** หมายถึงค่ากระจายตัวข้าม document เพื่อให้ไม่มี shard ใด shard หนึ่งกลายเป็นคอขวด และ **low hotspotting** หมายถึง write ไม่ได้พุ่งเป้าไปยังช่วงที่กำลังโตเดียวกันทั้งหมด; key ที่เพิ่มขึ้นเรื่อย ๆ อย่างสม่ำเสมอเช่น timestamp หรือ id ที่ auto-increment คือกับดักคลาสสิก เพราะทุก write ใหม่ลงบน chunk "สูงสุด" เดียวกันและถล่ม shard เดียว การ hash key เช่นนั้น หรือการนำมาผสมกับฟิลด์ที่มี cardinality สูงกว่า จะทำลาย hotspot นั้น
+shard key ที่ไม่ดีแก้แบบเงียบ ๆ ทีหลังไม่ได้ (ดู resharding ด้านล่าง) สามคุณสมบัติที่สำคัญ: **cardinality สูง** (ค่าแตกต่างกันมาก จึงมี chunk มาก), **การกระจายสม่ำเสมอ** (ไม่มีค่าใดครอบงำ) และ **ไม่มี hotspot** ตอนเขียน key ที่เพิ่มขึ้นเรื่อย ๆ — timestamp, id แบบ auto-increment — คือกับดักคลาสสิก
 
-**ใน Atlas:** มุมมอง cluster เปิด sharding ออกมาเป็นตัวเลือกการตั้งค่า และ *Shard Key Advisor* กับ *Shard Key Analyzer* ช่วยให้คุณประเมินการกระจายตัวของ key ที่กำลังพิจารณาก่อนตัดสินใจ ซึ่งคุ้มมากที่จะใช้ เมื่อพิจารณาว่า key เปลี่ยนยากแค่ไหนหลังจากนั้น
+### วัด candidate ด้วย `analyzeShardKey`
+
+ตั้งแต่ MongoDB 7.0 `analyzeShardKey` "calculates metrics for evaluating a shard key for an unsharded or sharded collection" ([analyzeShardKey](https://www.mongodb.com/docs/manual/reference/command/analyzeShardKey/), ตรวจเมื่อ 2026-09-30) — คือเครื่องมือที่บทเรียนเก่าเรียกว่า "Shard Key Advisor" คุณลักษณะของ key รันบนข้อมูลที่มีอยู่แล้ว (metric การกระจายอ่าน/เขียนต้องมี query sampling ผ่าน `configureQueryAnalyzer` เพิ่ม) สอง candidate บน 20 000 document เดียวกัน:
+
+```js
+// mongosh/sh-analyze.js @skip-verify needs the sharded lab cluster (real output below)
+const lib = db.getSiblingDB("library");
+lib.readings.drop();
+lib.readings.insertMany(Array.from({ length: 20000 }, (_, i) => ({ ts: i, deviceId: "dev-" + (i % 5000) })));   // unsharded copy to analyse
+lib.readings.createIndex({ ts: 1 });
+lib.readings.createIndex({ deviceId: 1 });
+function analyze(key) {
+  const k = db.adminCommand({ analyzeShardKey: "library.readings", key }).keyCharacteristics;
+  return { key, numDocsTotal: Number(k.numDocsTotal), numDistinctValues: Number(k.numDistinctValues), mostCommonFrequency: Number(k.mostCommonValues[0].frequency), monotonicity: k.monotonicity.type };
+}
+console.log(analyze({ ts: 1 }));
+console.log(analyze({ deviceId: 1 }));
+```
+
+```text
+{
+  key: { ts: 1 },
+  numDocsTotal: 20000,
+  numDistinctValues: 20000,
+  mostCommonFrequency: 1,
+  monotonicity: 'monotonic'
+}
+{
+  key: { deviceId: 1 },
+  numDocsTotal: 20000,
+  numDistinctValues: 5000,
+  mostCommonFrequency: 4,
+  monotonicity: 'not monotonic'
+}
+```
+
+`ts` ถูกติดธง `monotonic`: ทุก document ใหม่เรียงหลังทุกตัวก่อนหน้า การ insert ทั้งหมดจึงลงที่ chunk บนสุด `deviceId` เป็น `not monotonic` มี 5 000 ค่าที่ไม่ซ้ำ และค่าที่พบบ่อยที่สุดปรากฏ 4 ครั้ง — key ที่สมเหตุสมผล (เครื่องมือนี้อธิบายข้อมูล ไม่ได้ตัดสินแทนคุณ)
+
+### เปลี่ยนใจทีหลัง
+
+คำแนะนำเก่า — "การเปลี่ยน shard key ต้องสร้าง collection ใหม่" — ล้าสมัยแล้ว `reshardCollection` (MongoDB 5.0) เปลี่ยน key ของ collection แบบออนไลน์ และ 8.0 เพิ่ม `moveCollection` (ย้าย collection ที่ไม่ได้ shard ไปอีก shard) และ `unshardCollection` ([resharding](https://www.mongodb.com/docs/manual/core/sharding-reshard-a-collection/), [moveCollection](https://www.mongodb.com/docs/manual/reference/command/moveCollection/), [unshardCollection](https://www.mongodb.com/docs/manual/reference/command/unshardCollection/), ตรวจเมื่อ 2026-09-30) ก็ยังมีต้นทุน: manual ระบุว่า "The minimum duration of a resharding operation is always 5 minutes" ทำ reshard ได้ทีละ collection และการเขียนมีช่วง critical section สั้น ๆ การรันจริง (collection 10 000 document):
+
+```js
+// mongosh/sh-reshard.js @skip-verify needs the sharded lab cluster and ~5 minutes (real output below)
+const adm = db.getSiblingDB("admin");
+const lib = db.getSiblingDB("library");
+lib.tickers.drop();
+lib.tickers.insertMany(Array.from({ length: 10000 }, (_, i) => ({ ts: i, deviceId: "dev-" + (i % 5000) })));
+lib.tickers.createIndex({ ts: 1 });                       // a populated collection needs an index on the key first
+sh.shardCollection("library.tickers", { ts: 1 });
+let t = Date.now();
+console.log("reshardCollection ts:1 -> deviceId:hashed ok:", adm.runCommand({ reshardCollection: "library.tickers", key: { deviceId: "hashed" } }).ok, Math.round((Date.now() - t) / 1000) + " s");
+console.log(db.getSiblingDB("config").collections.find({ _id: "library.tickers" }, { key: 1 }).toArray());
+```
+
+```text
+reshardCollection ts:1 -> deviceId:hashed ok: 1 331 s
+[ { _id: 'library.tickers', key: { deviceId: 'hashed' } } ]
+```
+
+**ใน Compass / Atlas:** Compass แสดง shard key ของ collection ที่ shard แล้วในมุมมอง Indexes/Schema ส่วน Atlas เปิด sharding เป็นตัวเลือกของคลัสเตอร์ ทั้งสองขับคำสั่งเดียวกัน — `analyzeShardKey` และ `reshardCollection` — ที่แสดงข้างบน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- เลือก shard key อย่างระมัดระวัง; **เปลี่ยนทีหลังยากมาก** และสมัยก่อนถึงกับต้องสร้าง collection ใหม่ collection ที่ reshard ได้มีอยู่ในเวอร์ชันสมัยใหม่ แต่ก็ยังเป็น operation ที่ควรหลีกเลี่ยง ดังนั้นเลือก key ให้ถูกตั้งแต่ครั้งแรก
-- อย่า shard เร็วเกินไป replica set เดี่ยวรองรับ traffic ได้มากมาย shard เมื่อคุณมีหลักฐานว่าเครื่องเดียวตามไม่ทัน ไม่ใช่ตามความรู้สึก
-- query ที่ใส่ shard key มาด้วยคือ **targeted** — `mongos` ส่งตรงไปยัง shard เดียวเป๊ะ ๆ ส่วน query ที่ไม่มี shard key คือ **scatter-gather** ต้องกระจายไปถามทุก shard ออกแบบ query ทั่วไปของคุณให้พก shard key ไปด้วย
-- hashed key กระจาย write ได้สวยงามแต่ทำลาย query แบบช่วง; ranged key รักษา locality ไว้แต่เสี่ยง hotspot เลือกการแลกเปลี่ยนที่ตรงกับวิธีที่คุณอ่านและเขียนจริง ๆ
+- **เลือก key ให้ถูกตั้งแต่เนิ่น ๆ** แต่รู้ว่าเปลี่ยนได้: resharding ใช้ได้ ใช้เวลาอย่างน้อยห้านาทีและมีต้นทุน
+- **อย่า shard เร็วเกินไป** replica set เดียวรับทราฟฟิกได้มาก shard เมื่อมีหลักฐาน
+- **ใส่ shard key ใน query ที่ใช้บ่อย** — วัดข้างบน: `SINGLE_SHARD` แบบ targeted เทียบกับ `SHARD_MERGE` บนทั้งสอง shard
+- sharding ไม่แก้ query ที่ไม่มี index; มันคูณการ scan ด้วยจำนวน shard
 
 <Callout title="shard key คือการตัดสินใจที่สำคัญ">
-Sharding กระจาย collection หนึ่งข้ามหลาย shards และ router ใช้แผนที่ของ config servers เพื่อส่งแต่ละ request ไปยัง shard ที่ถูกต้อง ทุกอย่างขึ้นอยู่กับ shard key: เลือกอันที่มี high cardinality และ even distribution และหลีกเลี่ยง key ที่เพิ่มขึ้นแบบ monotonic ที่ทำให้เกิด hotspot บน shard เดียว
+วัด candidate ด้วย analyzeShardKey กระจายการเขียนด้วย key ที่ cardinality สูง และหลีกเลี่ยง key แบบ monotonic เว้นแต่จะ hash การวัดข้างล่างคือข้อโต้แย้ง: key แบบ timestamp ทำให้ 100 000 จาก 100 000 document อยู่บน shard เดียว
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอให้ "shard collection readings สำหรับ query แบบ time-series" เลือก timestamp:
+
+<SpotTheBug lang="js" code={`// AI comment: "ts has 100000 distinct values (high cardinality) and supports time-range queries, so it spreads data evenly"
+sh.shardCollection("library.readings", { ts: 1 });`}>
+
+cardinality สูงเป็นเงื่อนไขที่จำเป็น แต่ไม่เพียงพอ `ts` มีแต่ *เพิ่มขึ้น* ทุกการ insert จึงตกในช่วงสูงสุด ซึ่งอยู่บน shard เดียว การรันจริง — insert 100 000 document ผ่าน `mongos` ด้วยแต่ละ key:
+
+```js
+// mongosh/sh-hotspot.js @skip-verify needs the sharded lab cluster (real output below)
+const lib = db.getSiblingDB("library");
+for (const c of ["readings_ranged", "readings_hashed"]) lib[c].drop();
+sh.shardCollection("library.readings_ranged", { ts: 1 });               // the AI's choice
+sh.shardCollection("library.readings_hashed", { deviceId: "hashed" });  // the fix
+let a = [], b = [];
+for (let i = 0; i < 100000; i++) {
+  a.push({ ts: i, deviceId: "dev-" + (i % 5000) });
+  b.push({ ts: i, deviceId: "dev-" + (i % 5000) });
+  if (a.length === 10000) { lib.readings_ranged.insertMany(a, { ordered: false }); lib.readings_hashed.insertMany(b, { ordered: false }); a = []; b = []; }
+}
+for (const c of ["readings_ranged", "readings_hashed"]) {
+  console.log(c, lib[c].aggregate([{ $collStats: { storageStats: {} } }, { $project: { _id: 0, shard: 1, docs: "$storageStats.count" } }]).toArray());
+}
+```
+
+```text
+readings_ranged [ { shard: 'shardB', docs: 100000 } ]
+readings_hashed [ { shard: 'shardB', docs: 51100 }, { shard: 'shardA', docs: 48900 } ]
+```
+
+key แบบ ranged ของ timestamp ส่งทุกอย่างไป shard เดียว (primary shard ซึ่งคือ `shardB` ที่นี่); key แบบ hashed แบ่งได้ราวครึ่งต่อครึ่ง ทางแก้มีต้นทุนของมันเอง (วัดไว้ก่อนหน้า): time-range query บน hashed key กลายเป็น scatter-gather ถ้าต้องการทั้งสองอย่าง key แบบผสมเช่น `{ deviceId: 1, ts: 1 }` หรือ hashed prefix คือคำตอบที่ใช้กันบ่อย — วิเคราะห์ก่อนตัดสินใจ
+
+</SpotTheBug>
+
+## Mental Model
+
+collection ที่ shard แล้วคือ **รายการเรียงลำดับของช่วง key (chunk) โดยแต่ละช่วงเป็นของ shard หนึ่ง** เก็บอยู่ใน config server; `mongos` คือตารางค้นหาที่อยู่ข้างหน้า ทุกอย่างสืบเนื่องจากวิธีที่ key ของคุณแมปลงบนรายการนั้น: equality ตกที่ช่วงเดียว (targeted), ช่วงของ key ตกที่ไม่กี่ช่วง *ถ้า key มีลำดับ* (ranged) หรือ *ทุกช่วง* ถ้า hash และค่าที่เพิ่มขึ้นเสมอจะตกที่ช่วงสุดท้ายตลอดไป (hotspot)
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| Ranged sharding | รองรับ query แบบช่วงได้เร็ว — targeted ไปยัง chunk ที่ต่อเนื่องกัน | เสี่ยง hotspot ถ้า write กระจุกตัวที่ปลายด้านหนึ่งของช่วง |
-| Hashed sharding | กระจาย write สม่ำเสมอข้าม shard ลด hotspot | ทำลาย locality ของช่วง query แบบช่วงกลายเป็น scatter-gather ทุก shard |
+| Ranged sharding | ค่า key ใกล้กันอยู่ใน chunk เดียวกัน range บน key จึงใช้ chunk น้อย | key แบบ monotonic ทำให้เกิด hotspot: 100 000 จาก 100 000 document บน shard เดียว |
+| Hashed sharding | การเขียนกระจายเท่ากัน (48 900 / 51 100 ในการรัน) | range query และ query ที่ไม่ใช้ key กลายเป็น `SHARD_MERGE` บนทุก shard |
+| Shard เร็ว | มีที่ให้เติบโต | ความซับซ้อนในการดำเนินงาน (สี่โปรเซสที่นี่ มากกว่านั้นใน production); ทุก query ต้องมี key ไม่เช่นนั้นกระจายทั่ว |
+| Reshard ทีหลัง | เปลี่ยน key ออนไลน์ได้ตั้งแต่ 5.0 | อย่างน้อย 5 นาทีต่อครั้ง ทีละ collection |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เลือก field ที่เพิ่มขึ้นแบบ monotonic (เช่น timestamp หรือ auto-increment `_id`) เป็น shard key ตรง ๆ** — ทุก write ใหม่พุ่งไปที่ chunk บนสุดของช่วงเดียว ถล่ม shard เดียวขณะที่ shard อื่นว่างเปล่า นี่คือ hotspot ที่พบบ่อยที่สุดของ sharded cluster ที่เพิ่งเปิดใช้งาน
-- **ลืมว่า balancer ต้องใช้ I/O และ network ระหว่าง migrate chunk** — migration เกิดขึ้นแบบ background แต่ก็แย่ง resource กับ traffic จริงอยู่ดี cluster ที่ sensitive ต่อ latency ควรตั้ง balancing window ไว้ในช่วงที่ traffic ต่ำ
-- **คิดว่า sharding แก้ปัญหา query ที่ไม่มี index รองรับ** — sharding กระจายข้อมูล ไม่ได้ทำให้ query ที่ scan ทั้ง collection เร็วขึ้น ถ้า query ไม่มี index ที่เหมาะสม ก็จะ scan ทุก shard พร้อมกันแทนที่จะ scan เครื่องเดียว ซึ่งแย่กว่าเดิม
+- **"ต้องรัน `sh.enableSharding()` ก่อน"** — ไม่ใช่ตั้งแต่ 6.0; `shardCollection` ครั้งแรกสร้าง database เอง
+- **"cardinality สูงก็พอสำหรับ shard key"** — `ts` มีค่าไม่ซ้ำ 20 000 ค่าในการวิเคราะห์ (100 000 ในการโหลด) แต่ยังทำให้ทุก document อยู่บน shard เดียว
+- **"เปลี่ยน shard key ไม่ได้"** — `reshardCollection` เปลี่ยนได้ออนไลน์ (5.0+) ใช้เวลาอย่างน้อยห้านาที
+- **"เพิ่ม shard ทำให้ทุก query เร็วขึ้น"** — query ที่ไม่มี shard key ไปทุก shard; และ query ที่ไม่มี index ก็ scan บนแต่ละตัว
+- **"มีคำสั่ง Shard Key Advisor"** — เครื่องมือฝั่ง server คือ `analyzeShardKey` (7.0+); อะไรที่เรียกว่า "advisor" คือ UI ที่ครอบมัน
+- **"`mongos` เก็บข้อมูล"** — มันคือ router ที่ไม่เก็บสถานะ ข้อมูลอยู่บน shard, metadata อยู่บน config server
 
-> 💡 ตัวอย่างจากของจริง
->
-> **ระบบค้นหาและ log ขนาดใหญ่ทั่วไป** — ใช้ sharded cluster ของ MongoDB เก็บข้อมูลระดับหลายพันล้าน document กระจายข้ามหลาย shard
->
-> **MongoDB Atlas** — ช่วยแนะนำเวลาที่ควร shard ผ่าน Shard Key Advisor และจัดการ balancer กับ chunk migration ให้อัตโนมัติ ลดงาน operational ที่ต้องทำเองเทียบกับ self-hosted cluster
+_แท็บ Python/Go/Rust สะท้อนการเรียกใน shell; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizShard = [
   {
     q: 'แอปพลิเคชันเชื่อมต่อกับอะไรใน sharded cluster?',
+    options: ['shard ที่สุ่มเลือก', 'router mongos', 'config server โดยตรง', 'balancer'],
+    answer: 1,
+    explain: 'mongos อ่านแผนที่ chunk จาก config server และส่งแต่ละคำขอ; ใน lab ทุกคำสั่งรันผ่านมัน',
+  },
+  {
+    q: 'บน MongoDB 8.3 คุณรัน sh.shardCollection("library.loans", { memberId: 1 }) บนคลัสเตอร์ใหม่โดยไม่มี enableSharding เกิดอะไรขึ้น?',
     options: [
-      'shard ที่ถูกเลือกแบบสุ่ม',
-      'mongos router',
-      'config servers โดยตรง',
-      'balancer',
+      'ล้มเหลว: database ไม่ได้เปิด sharding',
+      'สำเร็จ: database ถูกสร้างตามต้องการพร้อม primary shard',
+      'ขอให้ยืนยัน',
+      'shard ทุก collection ใน database',
     ],
     answer: 1,
+    explain: 'การรันจริง: ok 1 และ config.databases แสดงว่า database library ถูกสร้างพร้อม primary shard enableSharding เป็นทางเลือกตั้งแต่ 6.0',
   },
   {
-    q: 'config servers เก็บอะไร?',
+    q: 'คุณ shard บน { ts: 1 } ที่ ts เป็นตัวเลขที่เพิ่มขึ้นเรื่อย ๆ แล้ว insert 100 000 document พวกมันไปอยู่ที่ไหน?',
+    options: ['กระจายเท่ากันบนสอง shard', 'ทั้งหมดบน shard เดียว (ตัวที่เป็นเจ้าของช่วงบนสุด)', 'บน config server', 'ถูกปฏิเสธ'],
+    answer: 1,
+    explain: 'การรันจริง: readings_ranged มี 100000 document บน shard เดียว (primary shard) และไม่มีบนอีกตัว; analyzeShardKey ติดธง ts ว่า monotonic',
+  },
+  {
+    q: 'query ไหนถูกส่งไปที่ shard เดียวบน collection ที่ hash ด้วย deviceId?',
     options: [
-      'สำเนาเต็มของทุก document',
-      'metadata ของ cluster ที่แมปว่า chunks ไหนอยู่บน shards ไหน',
-      'oplog ของแต่ละ shard',
-      'ผลลัพธ์ query ที่ถูก cache ไว้',
+      'find({ i: 42 })',
+      'find({ deviceId: "dev-42" })',
+      'find({ deviceId: { $gte: "dev-1", $lt: "dev-2" } })',
+      'ไม่มี: collection แบบ hashed กระจายเสมอ',
     ],
     answer: 1,
+    explain: 'equality บน shard key เป็น SINGLE_SHARD; query ที่ไม่ใช้ key และ range บน hashed key เป็น SHARD_MERGE ข้ามทั้งสอง shard',
   },
   {
-    q: 'คุณสมบัติใดที่เป็นปัญหาสำหรับ shard key?',
+    q: 'จริงหรือไม่ที่การเปลี่ยน shard key ต้องสร้าง collection ใหม่?',
     options: [
-      'High cardinality',
-      'การกระจายตัวของค่าที่สม่ำเสมอ',
-      'ค่าที่เพิ่มขึ้นแบบ monotonic ที่ส่งทุก write ใหม่ไปยัง shard เดียว',
-      'การถูกใช้ใน query ทั่วไป',
+      'จริง เสมอ',
+      'ไม่: reshardCollection (5.0+) เปลี่ยนแบบออนไลน์ แม้แต่ละครั้งใช้เวลาอย่างน้อย 5 นาที',
+      'ไม่: เปลี่ยนทันทีด้วย sh.setKey',
+      'เฉพาะ hashed key',
     ],
-    answer: 2,
-  },
-  {
-    q: 'การแลกเปลี่ยนของ hashed shard key เทียบกับ ranged คืออะไร?',
-    options: [
-      'hashed key กระจาย write อย่างสม่ำเสมอแต่ทำให้ query แบบช่วงกระจายออกไปทุก shard',
-      'hashed key ช้ากว่าเสมอสำหรับทุก operation',
-      'ranged key ใช้เป็น shard key ไม่ได้',
-      'ทั้งสองแบบไม่ต่างกันเลย',
-    ],
-    answer: 0,
+    answer: 1,
+    explain: 'manual: ระยะเวลาขั้นต่ำของการ resharding คือ 5 นาทีเสมอ; การรันจริง reshard collection 10 000 document',
   },
 ]
 
