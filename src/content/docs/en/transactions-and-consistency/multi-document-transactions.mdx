@@ -1,6 +1,6 @@
 ---
 title: Multi-document transactions
-description: Run several operations across documents and collections as one ACID unit using a session, withTransaction, commit and abort, shown with the classic transfer between accounts.
+description: Run several operations across documents and collections as one ACID unit using a session and withTransaction — with the replica-set precondition, rollback, write conflicts, the 60 s lifetime and the real cost, all measured.
 sidebar:
   order: 3
 ---
@@ -9,15 +9,36 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 Sometimes a single operation genuinely has to change several documents, and either all of them must succeed or none of them may. The textbook case is moving money: debit one account and credit another. If the debit lands but the credit fails, money has vanished. When the documents involved cannot be merged into one — because they are separate accounts, or live in separate collections — MongoDB offers a real **multi-document transaction**. It gives you the full ACID guarantee across every operation inside it: they all commit together or they all roll back together.
 
-The price of that guarantee is that a transaction needs a **session** to run in, requires a **replica set** (a standalone server cannot run one), and costs more than an ordinary write. So this is a deliberate tool, not a default.
+The price is that a transaction needs a **session**, needs a **replica set** (or a sharded cluster) and costs more than an ordinary write. So this is a deliberate tool, not a default. Every output below was captured on this Mac against mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0; the Python, Go and Rust tabs mirror the verified shell/Node call but are not executed by the course's automated checker.
+
+## Precondition: a replica set
+
+The `mongo:8` container from the setup lesson started **without** `--replSet` is a standalone server, and a transaction on it fails at the first write. Real output from a throwaway standalone `mongo:8.3.11` container (Node driver, and mongosh gives the same text):
+
+```text
+MongoServerError: This MongoDB deployment does not support retryable writes. Please add retryWrites=false to your connection string.
+```
+
+A change stream on the same standalone fails too (`MongoServerError 40573: The $changeStream stage is only supported on replica sets or mongos`). Start a one-node replica set instead — `--replSet` plus one `rs.initiate()` is all it takes, and it is what the course's own harness runs:
+
+```bash
+# scripts/replset-one-node.sh
+docker run -d --name mongo-rs --memory 1g -p 27017:27017 mongo:8 \
+  mongod --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB 0.5
+docker exec mongo-rs mongosh --quiet --eval 'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
+docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary'   # true
+```
+
+Connect with `mongodb://localhost:27017/?replicaSet=rs0` (or `directConnection=true`) from the host.
 
 ## A transaction lives in a session
 
-The flow is always the same. You start a **session**, then run your operations inside a transaction tied to that session. The driver helpers called `withTransaction` wrap the whole thing: they begin the transaction, run your callback, **commit** if it returns cleanly, and **abort** (rolling everything back) if it throws. They also retry the commit automatically on certain transient errors, which is why you should prefer them over starting and committing by hand.
+The flow is always the same. You start a **session**, then run your operations inside a transaction tied to that session. The driver helper `withTransaction` wraps the whole thing: it begins the transaction, runs your callback, **commits** if it returns cleanly, and **aborts** (rolling everything back) if it throws. It also retries the callback on `TransientTransactionError` and the commit on `UnknownTransactionCommitResult`, which is why you should prefer it over starting and committing by hand.
 
 export const txnFlow = `flowchart TD
   S["startSession"] --> B["Begin transaction"]
@@ -31,40 +52,53 @@ export const txnFlow = `flowchart TD
 
 ## Transferring between accounts
 
-Here we move three units of value from Ada to Linus across two documents in an `accounts` collection. Every operation passes the **session**, which is what binds it to the transaction. If either update fails — say the source has insufficient balance and we throw — the whole transfer is rolled back and neither balance changes:
+We seed two accounts, then move three units from Ada to Linus. Every operation passes the **session**, which is what binds it to the transaction:
+
+```js
+// mongosh/txn-seed.js
+db.accounts.insertMany([
+  { name: "Ada", balance: 10 },
+  { name: "Linus", balance: 4 },
+]);
+assert.strictEqual(db.accounts.countDocuments(), 2);
+```
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/txn-transfer.js
     const session = db.getMongo().startSession();
     session.withTransaction(() => {
-      const accounts = session.getDatabase("library").accounts;
+      const accounts = session.getDatabase(db.getName()).accounts;
       accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });
       accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } });
     });
     session.endSession();
+    const rows = db.accounts.find({}, { _id: 0 }).toArray();
+    console.log(rows);
+    assert.strictEqual(rows.reduce((s, r) => s + r.balance, 0), 14);
+    assert.strictEqual(rows.find((r) => r.name === "Ada").balance, 7);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/txn-transfer.mjs
+    const accounts = db.collection("accounts");
+    await accounts.insertMany([{ name: "Ada", balance: 10 }, { name: "Linus", balance: 4 }]);
+
     const session = client.startSession();
     try {
       await session.withTransaction(async () => {
-        const accounts = client.db("library").collection("accounts");
-        await accounts.updateOne(
-          { name: "Ada" },
-          { $inc: { balance: -3 } },
-          { session }
-        );
-        await accounts.updateOne(
-          { name: "Linus" },
-          { $inc: { balance: 3 } },
-          { session }
-        );
+        await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } }, { session });
+        await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session });
       });
     } finally {
       await session.endSession();
     }
+    const rows = await accounts.find({}, { projection: { _id: 0 } }).toArray();
+    console.log(rows);
+    if (rows.reduce((s, r) => s + r.balance, 0) !== 14) throw new Error("total not preserved");
+    if (rows.find((r) => r.name === "Ada").balance !== 7) throw new Error("debit missing");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -136,55 +170,250 @@ Here we move three units of value from Ada to Linus across two documents in an `
   </TabItem>
 </Tabs>
 
-Before the transfer, the two accounts stand like this:
-
-```json
-[
-  { "_id": 1, "name": "Ada", "balance": 10 },
-  { "_id": 2, "name": "Linus", "balance": 4 }
-]
+```text
+[ { name: 'Ada', balance: 7 }, { name: 'Linus', balance: 7 } ]
 ```
 
-After a successful commit, the three units have moved and the total is preserved. No reader ever saw a moment where Ada's three units had left her but not yet arrived for Linus:
-
-```json
-[
-  { "_id": 1, "name": "Ada", "balance": 7 },
-  { "_id": 2, "name": "Linus", "balance": 7 }
-]
+```text
+[ { name: 'Ada', balance: 7 }, { name: 'Linus', balance: 7 } ]
 ```
+
+Balances went 10/4 to 7/7 and the total stayed 14. No reader saw the moment where Ada's three units had left her but not yet arrived for Linus.
 
 **In Compass:** Compass does not drive transactions from its document editor, but you can open the **mongosh** tab embedded at the bottom of the window and run the session-based script there against the same connection.
 
+## Abort: a throw rolls everything back
+
+If the callback throws, `withTransaction` aborts and nothing in the transaction survives. Here the debit succeeds inside the transaction, then the balance check fails:
+
+```js
+// app/txn-abort.mjs
+const accounts = db.collection("accounts");
+await accounts.deleteMany({});   // fresh start
+await accounts.insertMany([{ name: "Ada", balance: 10 }, { name: "Linus", balance: 4 }]);
+
+const session = client.startSession();
+let message = null;
+try {
+  await session.withTransaction(async () => {
+    await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -30 } }, { session });
+    const ada = await accounts.findOne({ name: "Ada" }, { session });
+    console.log("inside the transaction, Ada sees:", ada.balance);
+    if (ada.balance < 0) throw new Error("insufficient funds");
+    await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 30 } }, { session });
+  });
+} catch (e) { message = e.message; }
+finally { await session.endSession(); }
+
+const rows = await accounts.find({}, { projection: { _id: 0 } }).toArray();
+console.log("error:", message, "| after:", rows);
+if (message !== "insufficient funds") throw new Error("expected the callback error");
+if (rows.find((r) => r.name === "Ada").balance !== 10) throw new Error("debit should have been rolled back");
+```
+
+```text
+inside the transaction, Ada sees: -20
+error: insufficient funds | after: [ { name: 'Ada', balance: 10 }, { name: 'Linus', balance: 4 } ]
+```
+
+Inside the transaction Ada already saw −20 (the transaction reads its own writes); outside, and afterwards, nothing changed.
+
+## Two transactions on one document: a write conflict
+
+A second transaction that touches a document another open transaction already wrote does not wait — it fails immediately with a `WriteConflict` (code 112) carrying the error label `TransientTransactionError`, which means "safe to retry the whole transaction". `withTransaction` does that retry for you; a hand-written `startTransaction` loop must do it itself:
+
+```js
+// app/txn-conflict.mjs
+const accounts = db.collection("accounts");
+await accounts.deleteMany({});   // fresh start
+await accounts.insertOne({ name: "Ada", balance: 10 });
+
+const s1 = client.startSession(), s2 = client.startSession();
+s1.startTransaction(); s2.startTransaction();
+await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -1 } }, { session: s1 });
+let err = null;
+try { await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -2 } }, { session: s2 }); }
+catch (e) { err = e; }
+console.log(err.codeName, err.code, [...err.errorLabelSet]);
+await s1.commitTransaction();
+await s2.abortTransaction();
+await s1.endSession(); await s2.endSession();
+console.log(await accounts.findOne({ name: "Ada" }, { projection: { _id: 0 } }));
+if (!err.hasErrorLabel("TransientTransactionError")) throw new Error("expected the retry label");
+```
+
+```text
+WriteConflict 112 [ 'TransientTransactionError' ]
+{ name: 'Ada', balance: 9 }
+```
+
+## Limits and cost
+
+A transaction must finish within `transactionLifetimeLimitSeconds`, 60 s by default ([Production considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/)). Read it, then see what expiry looks like:
+
+```js
+// mongosh/txn-limit.js
+const p = db.adminCommand({ getParameter: 1, transactionLifetimeLimitSeconds: 1 });
+console.log(p.transactionLifetimeLimitSeconds);
+assert.strictEqual(p.transactionLifetimeLimitSeconds, 60);
+```
+
+```text
+60
+```
+
+To watch an expiry without waiting a minute, a throwaway single-node replica set was started with `--setParameter transactionLifetimeLimitSeconds=2`; a transaction that slept 3.5 s between two writes got (real output, not run by the checker):
+
+```js
+// app/txn-expired.mjs @skip-verify needs a mongod started with transactionLifetimeLimitSeconds=2
+const s = client.startSession();
+s.startTransaction();
+await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } }, { session: s });
+await new Promise((r) => setTimeout(r, 3500));
+await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session: s });   // throws
+```
+
+```text
+MongoServerError 251 NoSuchTransaction Transaction with { txnNumber: 2 } has been aborted. [ 'TransientTransactionError' ]
+```
+
+Ada's debit was rolled back with it (balances stayed 10 / 4). Now the cost, measured: 1 000 transfers done as (a) two plain updates, (b) one `withTransaction` with two updates, (c) one update on a single document that holds both balances:
+
+```js
+// app/txn-cost.mjs
+const accounts = db.collection("accounts"), pair = db.collection("pair");
+await accounts.deleteMany({}); await pair.deleteMany({});   // fresh start
+await accounts.insertMany([{ name: "Ada", balance: 1e6 }, { name: "Linus", balance: 0 }]);
+await pair.insertOne({ _id: 1, ada: 1e6, linus: 0 });
+const N = 1000, time = async (f) => { const t = Date.now(); for (let i = 0; i < N; i++) await f(); return Date.now() - t; };
+
+const plain = await time(async () => {
+  await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -1 } });
+  await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 1 } });
+});
+const session = client.startSession();
+const txn = await time(() => session.withTransaction(async () => {
+  await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -1 } }, { session });
+  await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 1 } }, { session });
+}));
+await session.endSession();
+const single = await time(() => pair.updateOne({ _id: 1 }, { $inc: { ada: -1, linus: 1 } }));
+
+console.log({ plainTwoUpdatesMs: plain, transactionMs: txn, singleDocumentMs: single, perTxnMs: txn / N });
+if (!(single < plain && single < txn)) throw new Error("expected the single-document write to be cheapest");
+```
+
+```text
+{
+  plainTwoUpdatesMs: 2357,
+  transactionMs: 2121,
+  singleDocumentMs: 1086,
+  perTxnMs: 2.121
+}
+```
+
+Numbers are from one run on this Mac: single-node replica set, no network latency, no contention. Two things stand out. The single-document write is about twice as fast as either alternative — it is one write and one acknowledgement. And, contrary to the folklore that a transaction is always slower than the same writes, here the transaction was *not* slower than two plain updates: with the default `w: "majority"` every plain update waits for its own acknowledgement, while the transaction pays once at commit (I did not isolate that reason further). What a transaction adds on top is what these numbers cannot show — snapshot pinned in the cache, `WriteConflict` retries under contention, the 60 s limit, and a multi-node commit — so measure with your own topology.
+
+`withTransaction` also takes the transaction options. The docs' recommended pair is snapshot reads and majority writes ([Production considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/)):
+
+```js
+// app/txn-options.mjs
+const session = client.startSession();
+try {
+  await session.withTransaction(async () => {
+    await db.collection("accounts").insertOne({ name: "Grace", balance: 1 }, { session });
+  }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" }, maxCommitTimeMS: 5000 });
+} finally { await session.endSession(); }
+console.log(await db.collection("accounts").countDocuments({ name: "Grace" }));
+```
+
+```text
+1
+```
+
 ## Tips and gotchas
 
-- **Transactions require a replica set.** A single standalone `mongod` cannot run one. The local Docker setups in this course already run a one-node replica set so you can try these examples.
-- **Keep transactions short.** A transaction holds resources for its whole lifetime and has a default time limit. Do only the writes that must be atomic inside it, and do slow work — network calls, heavy computation — outside.
-- **There is a real performance cost.** Transactions are slower than the equivalent single-document writes, and they can abort under write conflicts and need retrying. Use them where correctness demands it, not as a comfort blanket.
-- **Pass the session everywhere.** An operation inside the callback that forgets to pass the session runs *outside* the transaction and will not be rolled back.
+- **Transactions require a replica set** (or sharded cluster). The standalone error above is what you get otherwise.
+- **Keep transactions short.** Under 60 s is a hard limit; the shorter the transaction the less it holds a snapshot and the fewer write conflicts it can hit. Do slow work — network calls, heavy computation — outside.
+- **Pass the session everywhere** — the next section shows what happens when you do not.
+- On abort or error, retry the whole transaction (the docs: "When you encounter an error during individual operation in the transaction, abort and retry the transaction").
 
 <Callout title="Prefer single-document design first">
-Before writing a transaction, ask whether the documents could be reshaped so the change fits in one of them. A single-document write is simpler, faster, and atomic for free. Transactions are the answer only when the data truly cannot be brought together.
+The measured cost above is the argument: the single-document write was about twice as fast and needs no session, no retry loop. Before writing a transaction, ask whether the documents could be reshaped so the change fits in one of them.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant writes a transfer with `withTransaction` and a comment promising all-or-nothing:
+
+<SpotTheBug lang="js" code={`// AI comment: "wrapped in withTransaction, so a failure rolls both updates back"
+await session.withTransaction(async () => {
+  await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });              // debit
+  await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session }); // credit
+  throw new Error("audit log unavailable");
+});`}>
+
+The debit forgot `{ session }`, so it ran *outside* the transaction as an ordinary write. When the callback throws, only the credit is rolled back — the debit stays committed and three units disappear. In the run below Ada ends at 7 and Linus at 4 instead of 10 and 4. Pass the session to every operation:
+
+```js
+// app/txn-forgot-session.mjs
+const accounts = db.collection("accounts");
+await accounts.deleteMany({});   // fresh start
+await accounts.insertMany([{ name: "Ada", balance: 10 }, { name: "Linus", balance: 4 }]);
+const balances = async () => Object.fromEntries((await accounts.find().toArray()).map((r) => [r.name, r.balance]));
+
+const session = client.startSession();
+try {
+  await session.withTransaction(async () => {
+    await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });                // BUG: no session
+    await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session });
+    throw new Error("audit log unavailable");
+  });
+} catch {}
+const buggy = await balances();
+
+await accounts.updateOne({ name: "Ada" }, { $set: { balance: 10 } });
+try {
+  await session.withTransaction(async () => {
+    await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } }, { session });   // FIX
+    await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session });
+    throw new Error("audit log unavailable");
+  });
+} catch {}
+const fixed = await balances();
+await session.endSession();
+
+console.log({ buggy, fixed });
+if (buggy.Ada !== 7 || buggy.Linus !== 4) throw new Error("expected the debit to survive");
+if (fixed.Ada !== 10 || fixed.Linus !== 4) throw new Error("expected a full rollback");
+```
+
+```text
+{ buggy: { Ada: 7, Linus: 4 }, fixed: { Ada: 10, Linus: 4 } }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A transaction is a **snapshot plus a buffered set of writes** that belong to a session. Reads inside see one point in time (plus the transaction's own writes); writes are invisible to everyone else until commit and are discarded on abort. Any operation without the session is simply a normal operation on the side. Conflicts are detected optimistically — the loser gets an error label and is expected to run again.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Use a multi-document transaction | Full ACID across documents and collections, guarantees they commit or abort together | Locks resources for the transaction's lifetime, adds latency, and consumes more WiredTiger cache holding a snapshot until commit |
-| Avoid a transaction by redesigning the documents | Faster, no long-lived locks, no extra cache pressure | You accept the data model's limits, such as duplication or eventual consistency between collections |
+| Use a multi-document transaction | Full ACID across documents and collections, guarantees they commit or abort together | Measured above: about 2.1 ms per transfer against 1.1 ms for a single-document write (single-node set); holds a snapshot in the WiredTiger cache until commit; aborts on write conflicts and after 60 s |
+| Avoid a transaction by redesigning the documents | Fastest (single-document row above), no session, no retries | You accept the data model's limits, such as duplication or eventual consistency between collections |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Not handling transient transaction errors with your own retry** — believing `withTransaction` handles every retry case, but a manually written transaction that does not catch error labels like `TransientTransactionError` or `UnknownTransactionCommitResult` and retry will silently fail on an ordinary write conflict that should have succeeded on retry.
-- **Letting a transaction run past the default time limit (60 seconds)** — putting logic that calls an external API or does heavy computation inside the transaction, so it stays open too long, hits `transactionLifetimeLimitSeconds`, and gets aborted automatically. That heavy work should finish first, then a short transaction opens.
-- **Reaching for a transaction before checking whether embedding already solves it** — seeing an operation touch two documents and immediately opening a transaction, when those two pieces of data could be redesigned to live in one document, paying lock and latency cost for nothing.
+- **"`withTransaction` makes any code inside it transactional."** — only operations that receive the session; the buggy debit above was committed.
+- **"A failed transaction is a bug to surface."** — a `TransientTransactionError` is a normal outcome under contention; the whole transaction should be retried, which `withTransaction` does.
+- **"Transactions work anywhere."** — not on a standalone server (real error above).
+- **"Long transactions are fine, they just take longer."** — they are aborted at 60 s by default and pin cache until then.
+- **"A transaction is always much slower than the same writes."** — not on a quiet single-node set (about the same as two plain updates above: 2.1 ms vs 2.4 ms per transfer). Its cost is retries, pinned snapshots and the 60 s limit; the cheapest option is still the single-document write.
 
-> 💡 Real-world example
->
-> **A typical bank or fintech system** — uses a multi-document transaction for transfers between accounts, debiting the source account and crediting the destination account so they always commit together, so money can never "disappear" or "appear" in between.
->
-> **A typical digital asset exchange platform** — uses a session-bound transaction to maintain correctness of digital balances across several ledger documents, because a consistency error in a financial system costs far more than the added latency from a transaction.
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; they are not executed by the course's automated checker._
 
 export const quizMulti = [
   {
@@ -196,36 +425,51 @@ export const quizMulti = [
       'Running it inside a stored procedure',
     ],
     answer: 1,
+    explain: 'The forgot-session run: the debit without { session } was committed on its own even though the callback threw.',
   },
   {
-    q: 'What does withTransaction do when the callback throws?',
+    q: 'What does withTransaction do when the callback throws a plain Error?',
     options: [
       'Commits the work done so far',
-      'Aborts the transaction and rolls back every change',
+      'Aborts the transaction and rolls back every change made with the session',
       'Retries forever until it succeeds',
       'Ignores the error and continues',
     ],
     answer: 1,
+    explain: 'In the abort run Ada saw -20 inside the transaction and 10 afterwards. (It retries only on TransientTransactionError.)',
   },
   {
-    q: 'What deployment is required to run a transaction?',
+    q: 'You start mongo:8 without --replSet and call session.withTransaction. What happens?',
     options: [
-      'A standalone server',
-      'A replica set',
-      'A sharded cluster only',
-      'Any deployment, including standalone',
+      'It works; every mongod supports transactions',
+      'MongoServerError: This MongoDB deployment does not support retryable writes',
+      'It silently runs without atomicity',
+      'It works only in mongosh',
     ],
     answer: 1,
+    explain: 'Real output from a standalone mongo:8.3.11 container. A one-node replica set (--replSet rs0 + rs.initiate) is enough.',
   },
   {
-    q: 'What is good advice for the body of a transaction?',
+    q: 'A second transaction updates a document an open transaction already wrote. What do you get?',
+    options: [
+      'It waits until the first commits',
+      'WriteConflict (112) labelled TransientTransactionError; retry the whole transaction',
+      'The write is silently dropped',
+      'The first transaction is aborted',
+    ],
+    answer: 1,
+    explain: 'The real run printed WriteConflict 112 with the TransientTransactionError label; the first transaction committed.',
+  },
+  {
+    q: 'What is a good rule for the body of a transaction?',
     options: [
       'Do as much work as possible inside it',
-      'Keep it short and move slow work outside it',
+      'Keep it short and do slow work outside; it is aborted after transactionLifetimeLimitSeconds (60 s default)',
       'Always include a network call inside it',
       'Never pass the session to operations',
     ],
     answer: 1,
+    explain: 'A transaction that slept past the (lowered) limit was aborted with NoSuchTransaction 251 and Ada\'s debit was rolled back.',
   },
 ]
 

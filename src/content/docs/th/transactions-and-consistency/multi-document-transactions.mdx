@@ -1,6 +1,6 @@
 ---
 title: Multi-document transactions
-description: รันหลาย operation ข้าม document และ collection เป็นหน่วย ACID เดียวด้วย session, withTransaction, commit และ abort แสดงด้วยตัวอย่างคลาสสิกการโอนเงินระหว่างบัญชี
+description: รันหลาย operation ข้าม document และ collection เป็นหน่วย ACID เดียวด้วย session และ withTransaction — พร้อมเงื่อนไขว่าต้องมี replica set, rollback, write conflict, อายุ 60 วินาที และต้นทุนจริงที่วัดมา
 sidebar:
   order: 3
 ---
@@ -9,15 +9,36 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-บางครั้ง operation ครั้งเดียวจำเป็นต้องเปลี่ยนแปลงหลาย document จริง ๆ และต้องสำเร็จทั้งหมดหรือไม่สำเร็จเลยสักอย่าง กรณีในตำราเรียนคือการย้ายเงิน: หักจากบัญชีหนึ่งและเพิ่มให้อีกบัญชีหนึ่ง ถ้าการหักลงแต่การเพิ่มล้มเหลว เงินก็หายไป เมื่อ document ที่เกี่ยวข้องยุบรวมเป็นก้อนเดียวไม่ได้ เพราะเป็นคนละบัญชีหรืออยู่คนละ collection MongoDB ก็มี **multi-document transaction** ของจริงให้ใช้ พร้อมการรับประกัน ACID เต็มรูปแบบครอบทุก operation ข้างใน คือ commit พร้อมกันทั้งหมด หรือไม่ก็ roll back พร้อมกันทั้งหมด
+บางครั้ง operation เดียวต้องเปลี่ยนหลาย document จริง ๆ และต้องสำเร็จทั้งหมดหรือไม่สำเร็จเลย ตัวอย่างตำราคือการโอนเงิน: หักบัญชีหนึ่งและเพิ่มอีกบัญชีหนึ่ง ถ้าการหักสำเร็จแต่การเพิ่มล้มเหลว เงินก็หายไป เมื่อ document ที่เกี่ยวข้องรวมเป็นอันเดียวไม่ได้ — เพราะเป็นบัญชีคนละบัญชี หรืออยู่คนละ collection — MongoDB มี **multi-document transaction** จริง ๆ ให้ มันรับประกัน ACID เต็มรูปแบบข้ามทุก operation ข้างใน: commit พร้อมกันหมด หรือ roll back พร้อมกันหมด
 
-ราคาของการรับประกันนั้นคือ transaction ต้องใช้ **session** เพื่อรัน ต้องมี **replica set** (standalone server รันไม่ได้) และมีต้นทุนสูงกว่าการเขียนธรรมดา ดังนั้นนี่จึงเป็นเครื่องมือที่ใช้อย่างจงใจ ไม่ใช่ค่าเริ่มต้น
+ราคาที่ต้องจ่ายคือ transaction ต้องมี **session** ต้องมี **replica set** (หรือ sharded cluster) และแพงกว่าการเขียนธรรมดา จึงเป็นเครื่องมือที่ใช้อย่างตั้งใจ ไม่ใช่ค่าเริ่มต้น ทุก output ด้านล่างจับจากเครื่อง Mac นี้ บน mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 แท็บ Python, Go และ Rust สะท้อนการเรียกที่ตรวจแล้วใน shell/Node แต่ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส
+
+## เงื่อนไขก่อน: ต้องมี replica set
+
+container `mongo:8` จากบทเรียน setup ที่สตาร์ท **โดยไม่มี** `--replSet` คือ standalone server และ transaction บนมันล้มตั้งแต่การเขียนครั้งแรก output จริงจาก container `mongo:8.3.11` standalone ชั่วคราว (Node driver; mongosh ให้ข้อความเดียวกัน):
+
+```text
+MongoServerError: This MongoDB deployment does not support retryable writes. Please add retryWrites=false to your connection string.
+```
+
+change stream บน standalone ตัวเดียวกันก็ล้มเหมือนกัน (`MongoServerError 40573: The $changeStream stage is only supported on replica sets or mongos`) ให้สตาร์ท replica set โหนดเดียวแทน — แค่ `--replSet` กับ `rs.initiate()` หนึ่งครั้ง และเป็นสิ่งที่ harness ของคอร์สนี้รันจริง:
+
+```bash
+# scripts/replset-one-node.sh
+docker run -d --name mongo-rs --memory 1g -p 27017:27017 mongo:8 \
+  mongod --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB 0.5
+docker exec mongo-rs mongosh --quiet --eval 'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
+docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary'   # true
+```
+
+เชื่อมต่อด้วย `mongodb://localhost:27017/?replicaSet=rs0` (หรือ `directConnection=true`) จากเครื่อง host
 
 ## transaction อยู่ใน session
 
-ขั้นตอนเป็นแบบเดิมเสมอ คุณเริ่ม **session** จากนั้นรัน operation ของคุณภายใน transaction ที่ผูกกับ session นั้น helper ของ driver ชื่อ `withTransaction` ห่อทุกอย่างให้: เริ่ม transaction รัน callback ของคุณ แล้ว **commit** ถ้า callback จบโดยไม่มี error หรือ **abort** (roll back ทั้งหมด) ถ้ามีการ throw นอกจากนี้ยัง retry commit ให้อัตโนมัติเมื่อเจอ transient error บางประเภท เพราะแบบนี้จึงควรใช้ helper ตัวนี้แทนการ start และ commit เอง
+ลำดับเป็นแบบเดียวกันเสมอ คุณเริ่ม **session** แล้วรัน operation ภายใน transaction ที่ผูกกับ session นั้น helper `withTransaction` ของ driver ห่อทั้งหมด: เริ่ม transaction, รัน callback, **commit** ถ้า return ปกติ และ **abort** (roll back ทุกอย่าง) ถ้า throw มัน retry callback เมื่อเจอ `TransientTransactionError` และ retry commit เมื่อเจอ `UnknownTransactionCommitResult` ด้วย จึงควรใช้แทนการ start และ commit เอง
 
 export const txnFlow = `flowchart TD
   S["startSession"] --> B["Begin transaction"]
@@ -27,44 +48,57 @@ export const txnFlow = `flowchart TD
   C -->|"Yes"| COMMIT["Commit — both changes become visible together"]
   C -->|"No"| ABORT["Abort — every change is rolled back"]`
 
-<Mermaid code={txnFlow} title="transaction เริ่มใน session รัน operation ทั้งชุด แล้ว commit การเปลี่ยนแปลงพร้อมกัน หรือไม่ก็ abort แล้ว roll back กลับทั้งหมด" />
+<Mermaid code={txnFlow} title="transaction เริ่มใน session รัน operation แล้ว commit ทุกการเปลี่ยนแปลงพร้อมกัน หรือ abort และ roll back ทั้งหมด" />
 
-## การโอนเงินระหว่างบัญชี
+## การโอนระหว่างบัญชี
 
-ตรงนี้เราย้ายค่าสามหน่วยจาก Ada ไปยัง Linus ข้ามสอง document ใน collection `accounts` ทุก operation ต้องส่ง **session** เข้าไปด้วย เพราะนั่นคือสิ่งที่ผูก operation เข้ากับ transaction ถ้าการอัปเดตใดล้มเหลว — สมมติว่าต้นทางมียอดคงเหลือไม่พอแล้วเรา throw — การโอนทั้งหมดจะถูก roll back และยอดคงเหลือทั้งสองไม่เปลี่ยนแปลง:
+เรา seed สองบัญชี แล้วย้ายสามหน่วยจาก Ada ไป Linus ทุก operation ส่ง **session** ซึ่งเป็นสิ่งที่ผูกมันเข้ากับ transaction:
+
+```js
+// mongosh/txn-seed.js
+db.accounts.insertMany([
+  { name: "Ada", balance: 10 },
+  { name: "Linus", balance: 4 },
+]);
+assert.strictEqual(db.accounts.countDocuments(), 2);
+```
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/txn-transfer.js
     const session = db.getMongo().startSession();
     session.withTransaction(() => {
-      const accounts = session.getDatabase("library").accounts;
+      const accounts = session.getDatabase(db.getName()).accounts;
       accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });
       accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } });
     });
     session.endSession();
+    const rows = db.accounts.find({}, { _id: 0 }).toArray();
+    console.log(rows);
+    assert.strictEqual(rows.reduce((s, r) => s + r.balance, 0), 14);
+    assert.strictEqual(rows.find((r) => r.name === "Ada").balance, 7);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/txn-transfer.mjs
+    const accounts = db.collection("accounts");
+    await accounts.insertMany([{ name: "Ada", balance: 10 }, { name: "Linus", balance: 4 }]);
+
     const session = client.startSession();
     try {
       await session.withTransaction(async () => {
-        const accounts = client.db("library").collection("accounts");
-        await accounts.updateOne(
-          { name: "Ada" },
-          { $inc: { balance: -3 } },
-          { session }
-        );
-        await accounts.updateOne(
-          { name: "Linus" },
-          { $inc: { balance: 3 } },
-          { session }
-        );
+        await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } }, { session });
+        await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session });
       });
     } finally {
       await session.endSession();
     }
+    const rows = await accounts.find({}, { projection: { _id: 0 } }).toArray();
+    console.log(rows);
+    if (rows.reduce((s, r) => s + r.balance, 0) !== 14) throw new Error("total not preserved");
+    if (rows.find((r) => r.name === "Ada").balance !== 7) throw new Error("debit missing");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -136,55 +170,250 @@ export const txnFlow = `flowchart TD
   </TabItem>
 </Tabs>
 
-ก่อนการโอน บัญชีทั้งสองมีสภาพดังนี้:
-
-```json
-[
-  { "_id": 1, "name": "Ada", "balance": 10 },
-  { "_id": 2, "name": "Linus", "balance": 4 }
-]
+```text
+[ { name: 'Ada', balance: 7 }, { name: 'Linus', balance: 7 } ]
 ```
 
-หลังจาก commit สำเร็จ ค่าสามหน่วยได้ย้ายไปแล้วและยอดรวมยังคงเดิม ไม่มี reader คนใดเคยเห็นช่วงเวลาที่ค่าสามหน่วยของ Ada ออกไปจากเธอแล้วแต่ยังมาไม่ถึง Linus:
-
-```json
-[
-  { "_id": 1, "name": "Ada", "balance": 7 },
-  { "_id": 2, "name": "Linus", "balance": 7 }
-]
+```text
+[ { name: 'Ada', balance: 7 }, { name: 'Linus', balance: 7 } ]
 ```
 
-**ใน Compass:** Compass สั่ง transaction จาก document editor ไม่ได้ แต่คุณสามารถเปิดแท็บ **mongosh** ที่ฝังอยู่ด้านล่างของหน้าต่าง แล้วรันสคริปต์ที่อิง session ตรงนั้นกับ connection เดียวกันได้
+ยอดเปลี่ยนจาก 10/4 เป็น 7/7 และผลรวมคงที่ที่ 14 ไม่มี reader คนไหนเห็นช่วงที่สามหน่วยของ Ada ออกไปแล้วแต่ยังไม่ถึง Linus
+
+**ใน Compass:** Compass ไม่ได้ขับ transaction จาก document editor แต่คุณเปิดแท็บ **mongosh** ที่ฝังอยู่ด้านล่างของหน้าต่าง แล้วรันสคริปต์แบบ session บน connection เดียวกันได้
+
+## Abort: throw แล้ว roll back ทุกอย่าง
+
+ถ้า callback throw, `withTransaction` จะ abort และไม่มีอะไรใน transaction เหลือรอด ในตัวอย่างนี้การหักสำเร็จภายใน transaction แล้วการเช็คยอดล้มเหลว:
+
+```js
+// app/txn-abort.mjs
+const accounts = db.collection("accounts");
+await accounts.deleteMany({});   // fresh start
+await accounts.insertMany([{ name: "Ada", balance: 10 }, { name: "Linus", balance: 4 }]);
+
+const session = client.startSession();
+let message = null;
+try {
+  await session.withTransaction(async () => {
+    await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -30 } }, { session });
+    const ada = await accounts.findOne({ name: "Ada" }, { session });
+    console.log("inside the transaction, Ada sees:", ada.balance);
+    if (ada.balance < 0) throw new Error("insufficient funds");
+    await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 30 } }, { session });
+  });
+} catch (e) { message = e.message; }
+finally { await session.endSession(); }
+
+const rows = await accounts.find({}, { projection: { _id: 0 } }).toArray();
+console.log("error:", message, "| after:", rows);
+if (message !== "insufficient funds") throw new Error("expected the callback error");
+if (rows.find((r) => r.name === "Ada").balance !== 10) throw new Error("debit should have been rolled back");
+```
+
+```text
+inside the transaction, Ada sees: -20
+error: insufficient funds | after: [ { name: 'Ada', balance: 10 }, { name: 'Linus', balance: 4 } ]
+```
+
+ภายใน transaction Ada เห็น −20 แล้ว (transaction อ่านสิ่งที่ตัวเองเขียนได้); ข้างนอกและหลังจากนั้น ไม่มีอะไรเปลี่ยน
+
+## สอง transaction บน document เดียว: write conflict
+
+transaction ที่สองที่แตะ document ซึ่ง transaction อื่นที่ยังเปิดอยู่เขียนไว้แล้ว จะไม่รอ — มันล้มทันทีด้วย `WriteConflict` (code 112) พร้อม error label `TransientTransactionError` ซึ่งหมายความว่า "retry ทั้ง transaction ได้อย่างปลอดภัย" `withTransaction` retry ให้เอง ส่วนลูป `startTransaction` ที่เขียนเองต้องทำเอง:
+
+```js
+// app/txn-conflict.mjs
+const accounts = db.collection("accounts");
+await accounts.deleteMany({});   // fresh start
+await accounts.insertOne({ name: "Ada", balance: 10 });
+
+const s1 = client.startSession(), s2 = client.startSession();
+s1.startTransaction(); s2.startTransaction();
+await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -1 } }, { session: s1 });
+let err = null;
+try { await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -2 } }, { session: s2 }); }
+catch (e) { err = e; }
+console.log(err.codeName, err.code, [...err.errorLabelSet]);
+await s1.commitTransaction();
+await s2.abortTransaction();
+await s1.endSession(); await s2.endSession();
+console.log(await accounts.findOne({ name: "Ada" }, { projection: { _id: 0 } }));
+if (!err.hasErrorLabel("TransientTransactionError")) throw new Error("expected the retry label");
+```
+
+```text
+WriteConflict 112 [ 'TransientTransactionError' ]
+{ name: 'Ada', balance: 9 }
+```
+
+## ขีดจำกัดและต้นทุน
+
+transaction ต้องเสร็จภายใน `transactionLifetimeLimitSeconds` ซึ่งค่าเริ่มต้นคือ 60 วินาที ([Production considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/)) อ่านค่านั้น แล้วดูว่าการหมดอายุหน้าตาเป็นอย่างไร:
+
+```js
+// mongosh/txn-limit.js
+const p = db.adminCommand({ getParameter: 1, transactionLifetimeLimitSeconds: 1 });
+console.log(p.transactionLifetimeLimitSeconds);
+assert.strictEqual(p.transactionLifetimeLimitSeconds, 60);
+```
+
+```text
+60
+```
+
+เพื่อดูการหมดอายุโดยไม่ต้องรอหนึ่งนาที เราสตาร์ท replica set โหนดเดียวชั่วคราวด้วย `--setParameter transactionLifetimeLimitSeconds=2` transaction ที่หลับ 3.5 วินาทีระหว่างสองการเขียนได้ผลนี้ (output จริง ไม่ได้รันโดยตัวตรวจ):
+
+```js
+// app/txn-expired.mjs @skip-verify needs a mongod started with transactionLifetimeLimitSeconds=2
+const s = client.startSession();
+s.startTransaction();
+await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } }, { session: s });
+await new Promise((r) => setTimeout(r, 3500));
+await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session: s });   // throws
+```
+
+```text
+MongoServerError 251 NoSuchTransaction Transaction with { txnNumber: 2 } has been aborted. [ 'TransientTransactionError' ]
+```
+
+การหักของ Ada ถูก roll back ไปด้วย (ยอดยังคงเป็น 10 / 4) ทีนี้ต้นทุนที่วัดจริง: โอน 1 000 ครั้งด้วย (a) สอง update ธรรมดา, (b) `withTransaction` หนึ่งครั้งกับสอง update, (c) หนึ่ง update บน document เดียวที่เก็บทั้งสองยอด:
+
+```js
+// app/txn-cost.mjs
+const accounts = db.collection("accounts"), pair = db.collection("pair");
+await accounts.deleteMany({}); await pair.deleteMany({});   // fresh start
+await accounts.insertMany([{ name: "Ada", balance: 1e6 }, { name: "Linus", balance: 0 }]);
+await pair.insertOne({ _id: 1, ada: 1e6, linus: 0 });
+const N = 1000, time = async (f) => { const t = Date.now(); for (let i = 0; i < N; i++) await f(); return Date.now() - t; };
+
+const plain = await time(async () => {
+  await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -1 } });
+  await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 1 } });
+});
+const session = client.startSession();
+const txn = await time(() => session.withTransaction(async () => {
+  await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -1 } }, { session });
+  await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 1 } }, { session });
+}));
+await session.endSession();
+const single = await time(() => pair.updateOne({ _id: 1 }, { $inc: { ada: -1, linus: 1 } }));
+
+console.log({ plainTwoUpdatesMs: plain, transactionMs: txn, singleDocumentMs: single, perTxnMs: txn / N });
+if (!(single < plain && single < txn)) throw new Error("expected the single-document write to be cheapest");
+```
+
+```text
+{
+  plainTwoUpdatesMs: 2357,
+  transactionMs: 2121,
+  singleDocumentMs: 1086,
+  perTxnMs: 2.121
+}
+```
+
+ตัวเลขมาจากการรันหนึ่งครั้งบนเครื่อง Mac นี้: replica set โหนดเดียว ไม่มี network latency ไม่มี contention มีสองข้อที่เด่น การเขียน document เดียวเร็วกว่าทางเลือกอื่นประมาณสองเท่า — เพราะเป็นการเขียนหนึ่งครั้งกับ acknowledgement หนึ่งครั้ง และตรงข้ามกับความเชื่อที่ว่า transaction ช้ากว่าการเขียนแบบเดียวกันเสมอ ที่นี่ transaction *ไม่ได้* ช้ากว่าสอง update ธรรมดา: ด้วย `w: "majority"` ค่าเริ่มต้น update ธรรมดาแต่ละตัวรอ acknowledgement ของตัวเอง ส่วน transaction จ่ายครั้งเดียวตอน commit (ผมไม่ได้แยกพิสูจน์เหตุผลนี้ต่อ) สิ่งที่ transaction เพิ่มเข้ามาคือสิ่งที่ตัวเลขนี้มองไม่เห็น — snapshot ที่ค้างใน cache, การ retry `WriteConflict` ภายใต้ contention, ขีดจำกัด 60 วินาที และ commit ข้ามหลายโหนด — จึงควรวัดบน topology ของคุณเอง
+
+`withTransaction` รับ transaction options ด้วย คู่ที่เอกสารแนะนำคือ snapshot read กับ majority write ([Production considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/)):
+
+```js
+// app/txn-options.mjs
+const session = client.startSession();
+try {
+  await session.withTransaction(async () => {
+    await db.collection("accounts").insertOne({ name: "Grace", balance: 1 }, { session });
+  }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" }, maxCommitTimeMS: 5000 });
+} finally { await session.endSession(); }
+console.log(await db.collection("accounts").countDocuments({ name: "Grace" }));
+```
+
+```text
+1
+```
 
 ## เคล็ดลับและข้อควรระวัง
 
-- **transaction ต้องใช้ replica set** `mongod` แบบ standalone ตัวเดียวรันไม่ได้ การตั้งค่า Docker บนเครื่องในคอร์สนี้รัน replica set แบบหนึ่ง node อยู่แล้ว เพื่อให้คุณลองตัวอย่างเหล่านี้ได้
-- **ทำให้ transaction สั้น** transaction จองทรัพยากรไว้ตลอดอายุ และมีลิมิตเวลาตั้งไว้เป็นค่า default ให้เก็บเฉพาะการเขียนที่ต้อง atomic ไว้ข้างใน ส่วนงานช้า ๆ อย่างการเรียกผ่านเครือข่ายหรือคำนวณหนัก ให้ย้ายออกไปทำข้างนอก
-- **มีต้นทุนด้านประสิทธิภาพจริง** transaction ช้ากว่าการเขียน single-document ที่ให้ผลเท่ากัน แถม abort ได้เมื่อเจอ write conflict แล้วต้อง retry ใช้เฉพาะตอนที่ความถูกต้องบังคับ ไม่ใช่ใช้เพื่อความสบายใจ
-- **ส่ง session ผ่านไปทุกที่** operation ภายใน callback ที่ลืมส่ง session จะรัน *นอก* transaction และจะไม่ถูก roll back
+- **transaction ต้องใช้ replica set** (หรือ sharded cluster) error ของ standalone ด้านบนคือสิ่งที่คุณจะได้ถ้าไม่มี
+- **ทำ transaction ให้สั้น** ต่ำกว่า 60 วินาทีเป็นขีดจำกัดตายตัว ยิ่งสั้นก็ยิ่งค้าง snapshot น้อยและเจอ write conflict น้อย งานช้า — เรียก network, คำนวณหนัก — ทำข้างนอก
+- **ส่ง session ให้ทุก operation** — ส่วนถัดไปแสดงว่าจะเกิดอะไรเมื่อลืม
+- เมื่อ abort หรือเกิด error ให้ retry ทั้ง transaction (เอกสาร: "When you encounter an error during individual operation in the transaction, abort and retry the transaction")
 
-<Callout title="ให้ความสำคัญกับการออกแบบ single-document ก่อน">
-ก่อนเขียน transaction ให้ถามว่า document สามารถปรับรูปร่างให้การเปลี่ยนแปลงพอดีกับ document ใด document หนึ่งได้หรือไม่ การเขียน single-document นั้นง่ายกว่า เร็วกว่า และเป็น atomic ฟรี ๆ transaction เป็นคำตอบเฉพาะเมื่อข้อมูลไม่สามารถนำมารวมกันได้จริง ๆ
+<Callout title="ออกแบบให้เป็น single-document ก่อน">
+ต้นทุนที่วัดมาข้างบนคือข้อโต้แย้ง: การเขียน document เดียวเร็วกว่าประมาณสองเท่าและไม่ต้องมี session ไม่ต้องมีลูป retry ก่อนเขียน transaction ให้ถามว่าจัดรูป document ใหม่ให้การเปลี่ยนแปลงอยู่ในอันเดียวได้ไหม
 </Callout>
 
-## ข้อแลกเปลี่ยน
+## Reading AI-generated code
 
-| ตัวเลือก | Benefit | Cost |
+ผู้ช่วย AI เขียนการโอนด้วย `withTransaction` พร้อมคอมเมนต์สัญญาว่า all-or-nothing:
+
+<SpotTheBug lang="js" code={`// AI comment: "wrapped in withTransaction, so a failure rolls both updates back"
+await session.withTransaction(async () => {
+  await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });              // debit
+  await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session }); // credit
+  throw new Error("audit log unavailable");
+});`}>
+
+การหักลืม `{ session }` มันจึงรัน *นอก* transaction เป็นการเขียนธรรมดา เมื่อ callback throw มีแค่การเพิ่มที่ถูก roll back — การหักยังคง commit อยู่และสามหน่วยหายไป ในการรันด้านล่าง Ada จบที่ 7 และ Linus ที่ 4 แทนที่จะเป็น 10 และ 4 ให้ส่ง session ให้ทุก operation:
+
+```js
+// app/txn-forgot-session.mjs
+const accounts = db.collection("accounts");
+await accounts.deleteMany({});   // fresh start
+await accounts.insertMany([{ name: "Ada", balance: 10 }, { name: "Linus", balance: 4 }]);
+const balances = async () => Object.fromEntries((await accounts.find().toArray()).map((r) => [r.name, r.balance]));
+
+const session = client.startSession();
+try {
+  await session.withTransaction(async () => {
+    await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } });                // BUG: no session
+    await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session });
+    throw new Error("audit log unavailable");
+  });
+} catch {}
+const buggy = await balances();
+
+await accounts.updateOne({ name: "Ada" }, { $set: { balance: 10 } });
+try {
+  await session.withTransaction(async () => {
+    await accounts.updateOne({ name: "Ada" }, { $inc: { balance: -3 } }, { session });   // FIX
+    await accounts.updateOne({ name: "Linus" }, { $inc: { balance: 3 } }, { session });
+    throw new Error("audit log unavailable");
+  });
+} catch {}
+const fixed = await balances();
+await session.endSession();
+
+console.log({ buggy, fixed });
+if (buggy.Ada !== 7 || buggy.Linus !== 4) throw new Error("expected the debit to survive");
+if (fixed.Ada !== 10 || fixed.Linus !== 4) throw new Error("expected a full rollback");
+```
+
+```text
+{ buggy: { Ada: 7, Linus: 4 }, fixed: { Ada: 10, Linus: 4 } }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+transaction คือ **snapshot บวกชุดการเขียนที่ถูก buffer ไว้** ซึ่งเป็นของ session หนึ่ง การอ่านข้างในเห็น ณ เวลาเดียว (บวกสิ่งที่ transaction เขียนเอง); การเขียนมองไม่เห็นจากคนอื่นจนกว่าจะ commit และถูกทิ้งเมื่อ abort operation ใดที่ไม่มี session ก็เป็น operation ธรรมดาที่ทำอยู่ข้างเคียง การชนกันถูกตรวจแบบ optimistic — ฝ่ายแพ้ได้ error label และถูกคาดหวังให้รันใหม่
+
+## Trade-offs
+
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| ใช้ multi-document transaction | ACID เต็มรูปแบบข้าม document และ collection รับประกันว่า commit หรือ abort พร้อมกันทั้งหมด | ต้อง lock resource ไว้ตลอดอายุ transaction เพิ่ม latency และกิน WiredTiger cache มากขึ้นเพราะต้องเก็บ snapshot ไว้จนกว่าจะ commit |
-| หลีกเลี่ยง transaction ด้วยการออกแบบ document ใหม่ | เร็วกว่า ไม่มี lock ยืดยาว ไม่กิน cache เพิ่ม | ต้องยอมรับข้อจำกัดของโมเดลข้อมูล เช่น duplication หรือ eventual consistency ระหว่าง collection |
+| ใช้ multi-document transaction | ACID เต็มข้าม document และ collection รับประกันว่า commit หรือ abort ด้วยกัน | วัดข้างบน: ราว 2.1 ms ต่อการโอน เทียบกับ 1.1 ms สำหรับการเขียน document เดียว (โหนดเดียว); ถือ snapshot ใน WiredTiger cache จนกว่าจะ commit; abort เมื่อ write conflict และหลัง 60 วินาที |
+| หลีกเลี่ยง transaction โดยออกแบบ document ใหม่ | เร็วที่สุด (แถว document เดียวข้างบน) ไม่มี session ไม่ต้อง retry | ยอมรับข้อจำกัดของโมเดลข้อมูล เช่นการซ้ำซ้อนหรือ eventual consistency ระหว่าง collection |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ไม่ handle transient transaction error ด้วยการ retry เอง** — เชื่อว่า `withTransaction` จัดการ retry ให้ทุกกรณี แต่ถ้าเขียน transaction แบบ manual โดยไม่ดักจับ error label อย่าง `TransientTransactionError` หรือ `UnknownTransactionCommitResult` แล้วลองใหม่ transaction จะล้มเหลวเงียบ ๆ ภายใต้ write conflict ปกติที่ควรลองใหม่ได้สำเร็จ
-- **ปล่อยให้ transaction รันนานเกินขีดจำกัดเวลาเริ่มต้น (60 วินาที)** — ใส่ logic ที่ต้องเรียก API ภายนอกหรือคำนวณหนักไว้ในตัว transaction ทำให้ transaction ค้างนาน ชน `transactionLifetimeLimitSeconds` แล้วโดน abort อัตโนมัติ ทั้งที่งานหนักนั้นควรทำให้เสร็จก่อนแล้วค่อยเปิด transaction สั้น ๆ
-- **คว้า transaction ก่อนตรวจว่า embedding แก้ปัญหาได้อยู่แล้วหรือไม่** — เห็น operation ที่แตะสอง document ก็เปิด transaction ทันที ทั้งที่ข้อมูลสองก้อนนั้น redesign ให้อยู่ document เดียวได้ ทำให้เสียต้นทุนเรื่อง lock และ latency ไปฟรี ๆ
+- **"`withTransaction` ทำให้โค้ดข้างในทั้งหมดเป็น transactional"** — เฉพาะ operation ที่ได้รับ session เท่านั้น การหักที่มีบั๊กข้างบนถูก commit ไปแล้ว
+- **"transaction ที่ล้มเหลวคือบั๊กที่ต้องโยนออกไป"** — `TransientTransactionError` เป็นผลลัพธ์ปกติภายใต้ contention ควร retry ทั้ง transaction ซึ่ง `withTransaction` ทำให้
+- **"transaction ใช้ได้ทุกที่"** — ไม่ใช่บน standalone server (error จริงข้างบน)
+- **"transaction ยาว ๆ ไม่เป็นไร แค่ใช้เวลานานขึ้น"** — มันถูก abort ที่ 60 วินาทีโดยค่าเริ่มต้น และค้าง cache ไว้จนถึงตอนนั้น
+- **"transaction ช้ากว่าการเขียนแบบเดียวกันมากเสมอ"** — ไม่ใช่บน replica set โหนดเดียวที่ว่าง (พอ ๆ กับสอง update ธรรมดาข้างบน: 2.1 ms เทียบ 2.4 ms ต่อการโอน) ต้นทุนของมันคือการ retry, snapshot ที่ค้าง และขีดจำกัด 60 วินาที; ตัวเลือกที่ถูกที่สุดก็ยังคือการเขียน document เดียว
 
-> 💡 ตัวอย่างจากของจริง
->
-> **ธนาคาร/fintech ทั่วไป** — ใช้ multi-document transaction สำหรับการโอนเงินระหว่างบัญชี หัก balance จากบัญชีต้นทางและเพิ่มให้บัญชีปลายทางต้อง commit พร้อมกันเสมอ เพื่อไม่ให้เงิน "หาย" หรือ "งอก" ระหว่างทาง
->
-> **แพลตฟอร์มแลกเปลี่ยนสินทรัพย์ดิจิทัลทั่วไป** — ใช้ transaction ที่ผูกกับ session เพื่อรักษาความถูกต้องของยอดเงินดิจิทัลข้าม ledger document หลายฉบับ เพราะข้อผิดพลาดด้าน consistency ในระบบการเงินมีต้นทุนสูงกว่าการแลก latency ที่เพิ่มขึ้นจาก transaction มาก
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่ตรวจแล้วใน shell/Node; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizMulti = [
   {
@@ -193,39 +422,54 @@ export const quizMulti = [
       'ชื่อ collection พิเศษ',
       'การส่ง session ให้ทุก operation ใน transaction',
       'การตั้ง write concern เป็น majority',
-      'รันไว้ข้างใน stored procedure',
+      'การรันภายใน stored procedure',
     ],
     answer: 1,
+    explain: 'การรัน forgot-session: การหักที่ไม่มี { session } ถูก commit ด้วยตัวเองแม้ callback จะ throw',
   },
   {
-    q: 'withTransaction ทำอะไรเมื่อ callback throw?',
+    q: 'withTransaction ทำอะไรเมื่อ callback throw Error ธรรมดา?',
     options: [
-      'commit งานที่ทำมาจนถึงตอนนั้น',
-      'abort transaction และ roll back การเปลี่ยนแปลงทุกอย่าง',
-      'ลองใหม่ตลอดไปจนกว่าจะสำเร็จ',
-      'เพิกเฉยต่อ error และทำต่อ',
+      'commit งานที่ทำไปแล้ว',
+      'abort transaction และ roll back ทุกการเปลี่ยนแปลงที่ทำด้วย session',
+      'retry ไปเรื่อย ๆ จนกว่าจะสำเร็จ',
+      'ไม่สนใจ error แล้วทำต่อ',
     ],
     answer: 1,
+    explain: 'ในการรัน abort Ada เห็น -20 ภายใน transaction และ 10 หลังจากนั้น (มัน retry เฉพาะเมื่อเจอ TransientTransactionError)',
   },
   {
-    q: 'ต้องใช้การ deploy แบบใดในการรัน transaction?',
+    q: 'คุณสตาร์ท mongo:8 โดยไม่มี --replSet แล้วเรียก session.withTransaction เกิดอะไรขึ้น?',
     options: [
-      'standalone server',
-      'replica set',
-      'sharded cluster เท่านั้น',
-      'การ deploy แบบใดก็ได้ รวมถึง standalone',
+      'ทำงานได้ ทุก mongod รองรับ transaction',
+      'MongoServerError: This MongoDB deployment does not support retryable writes',
+      'รันเงียบ ๆ โดยไม่มี atomicity',
+      'ใช้ได้เฉพาะใน mongosh',
     ],
     answer: 1,
+    explain: 'output จริงจาก container mongo:8.3.11 แบบ standalone replica set โหนดเดียว (--replSet rs0 + rs.initiate) ก็เพียงพอ',
   },
   {
-    q: 'คำแนะนำที่ดีสำหรับเนื้อตัวของ transaction คืออะไร?',
+    q: 'transaction ที่สองอัปเดต document ที่ transaction ที่เปิดอยู่เขียนไว้แล้ว คุณจะได้อะไร?',
     options: [
-      'ยัดงานให้มากที่สุดเท่าที่ทำได้ไว้ข้างใน',
-      'ทำให้สั้นที่สุด แล้วย้ายงานช้าออกไปข้างนอก',
-      'ใส่การเรียกผ่านเครือข่ายไว้ข้างในเสมอ',
-      'ห้ามส่ง session ให้ operation',
+      'รอจนกว่าอันแรก commit',
+      'WriteConflict (112) พร้อม label TransientTransactionError; retry ทั้ง transaction',
+      'การเขียนถูกทิ้งเงียบ ๆ',
+      'transaction แรกถูก abort',
     ],
     answer: 1,
+    explain: 'การรันจริงพิมพ์ WriteConflict 112 พร้อม label TransientTransactionError; transaction แรก commit สำเร็จ',
+  },
+  {
+    q: 'กฎที่ดีสำหรับเนื้อหาของ transaction คืออะไร?',
+    options: [
+      'ทำงานให้มากที่สุดข้างใน',
+      'ทำให้สั้นและทำงานช้าข้างนอก; มันถูก abort หลัง transactionLifetimeLimitSeconds (ค่าเริ่มต้น 60 วินาที)',
+      'ใส่การเรียก network เสมอ',
+      'ไม่ต้องส่ง session ให้ operation',
+    ],
+    answer: 1,
+    explain: 'transaction ที่หลับเกินขีดจำกัด (ที่ลดไว้) ถูก abort ด้วย NoSuchTransaction 251 และการหักของ Ada ถูก roll back',
   },
 ]
 
