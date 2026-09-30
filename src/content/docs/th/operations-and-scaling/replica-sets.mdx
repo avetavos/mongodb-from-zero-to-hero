@@ -29,7 +29,7 @@ export const replicaFlow = `flowchart TB
 
 <Mermaid code={replicaFlow} title="primary รับทุก write แล้วบันทึกลง oplog ส่วน secondaries คอยอ่าน oplog ต่อท้ายและเล่นซ้ำเพื่อให้ซิงค์กัน" />
 
-สมาชิกยังแลกเปลี่ยนข้อความ **heartbeat** เล็ก ๆ กันสองสามครั้งต่อนาที heartbeat เหล่านี้คือวิธีที่ set สังเกตเห็นปัญหา: ถ้า secondaries ไม่ได้ยินเสียงจาก primary ก็จะสรุปว่า primary ล้มแล้ว และเริ่ม election
+สมาชิกยังแลกเปลี่ยนข้อความ **heartbeat** เล็ก ๆ กันทุก 2 วินาทีโดยค่าเริ่มต้น (`heartbeatIntervalMillis`) heartbeat เหล่านี้คือวิธีที่ set สังเกตเห็นปัญหา: ถ้า secondaries ไม่ได้ยินเสียงจาก primary ก็จะสรุปว่า primary ล้มแล้ว และเริ่ม election
 
 ## Election อัตโนมัติ
 

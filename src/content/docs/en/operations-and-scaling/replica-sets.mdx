@@ -27,7 +27,7 @@ export const replicaFlow = `flowchart TB
 
 <Mermaid code={replicaFlow} title="The primary takes all writes and logs them; secondaries tail the oplog and replay it to stay in sync" />
 
-The members also exchange small **heartbeat** messages a few times per minute. Those heartbeats are how the set notices trouble: if the secondaries stop hearing from the primary, they conclude it has failed and start an election.
+The members also exchange small **heartbeat** messages every 2 seconds by default (`heartbeatIntervalMillis`). Those heartbeats are how the set notices trouble: if the secondaries stop hearing from the primary, they conclude it has failed and start an election.
 
 ## Automatic elections
 

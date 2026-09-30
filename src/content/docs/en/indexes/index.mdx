@@ -82,7 +82,7 @@ Creating an index is a single call. You name the field and a direction — `1` f
 The call returns the name MongoDB gave the new index — it derives the name from the field and direction unless you supply your own:
 
 ```json
-{ "createdIndexes": ["joined_1"], "ok": 1 }
+"joined_1"
 ```
 
 **In Compass:** open a collection and choose the **Indexes** tab. You will always see the built-in `_id_` index there, and you can add a new one with the **Create Index** button by typing the field name and picking a direction.

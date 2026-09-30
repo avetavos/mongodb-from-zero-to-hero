@@ -305,7 +305,7 @@ server ใช้การอ่านในลำดับเดิมเสม�
 ## ข้อผิดพลาดที่พบบ่อย
 
 - **ใช้ exclusion projection สำหรับ response สาธารณะแล้วลืมว่าวิธีนี้จะ "รั่ว" field ใหม่ออกไปให้อัตโนมัติ** — เมื่อทีม backend เพิ่ม field ภายใน (เช่น cost หรือ flag ภายใน) เข้า schema ทีหลัง exclusion projection ที่เขียนไว้เดิมจะส่ง field นั้นออกไปทันทีโดยไม่มีใครตั้งใจ สำหรับ API สาธารณะควรใช้ inclusion projection เพื่อควบคุมชัดเจนกว่า
-- **sort บน field ที่ไม่มี index กับ collection ขนาดใหญ่** — server ต้องทำ in-memory sort ซึ่งมีเพดานหน่วยความจำจำกัด ถ้าข้อมูลที่ต้อง sort เกินเพดานนั้น query จะ error ตรง ๆ ต้องมี index รองรับ sort key เมื่อ collection โตขึ้น
+- **sort บน field ที่ไม่มี index กับ collection ขนาดใหญ่** — server ต้องทำ in-memory sort ซึ่งมีเพดานหน่วยความจำ 100 MB ต่อการ sort ตั้งแต่ MongoDB 6.0 ถ้าเกินจะ spill ลง disk แทนที่จะ fail (`allowDiskUseByDefault`) แต่ช้าลงมาก ต้องมี index รองรับ sort key เมื่อ collection โตขึ้น
 - **คิดว่า `limit()` เพียงอย่างเดียวทำให้ query เร็วเสมอ** — ถ้าไม่มี filter หรือ index ที่ดี server ยังต้องสแกนและ sort document จำนวนมากก่อนจะตัดเหลือแค่จำนวนที่ `limit` ขอ `limit` ไม่ได้ลดงานสแกน แค่ตัดจำนวนที่ส่งกลับมาเท่านั้น
 
 > 💡 ตัวอย่างจากของจริง

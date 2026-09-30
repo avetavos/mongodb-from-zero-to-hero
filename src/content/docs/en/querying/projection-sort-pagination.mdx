@@ -305,7 +305,7 @@ The server always applies a read in the same sequence: pick the matches, order t
 ## Common mistakes
 
 - **Using an exclusion projection for a public response and forgetting it automatically "leaks" new fields** — when the backend team later adds an internal field (like cost or an internal flag) to the schema, an existing exclusion projection sends it out immediately, unintentionally. Public APIs should use an inclusion projection for clearer control.
-- **Sorting on a field with no index on a large collection** — the server must do an in-memory sort, which has a fixed memory ceiling. If the data to sort exceeds that ceiling, the query errors outright. Back the sort key with an index as the collection grows.
+- **Sorting on a field with no index on a large collection** — the server must do an in-memory sort, which has a 100 MB memory ceiling per sort; since MongoDB 6.0 it spills to disk instead of failing (`allowDiskUseByDefault`), but a spilled sort is much slower. Back the sort key with an index as the collection grows.
 - **Assuming `limit()` alone always makes a query fast** — without a good filter or index, the server still has to scan and sort a large number of documents before trimming down to what `limit` asked for. `limit` does not reduce the scan work, only how many results come back.
 
 > 💡 Real-world example
