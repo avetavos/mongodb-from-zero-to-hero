@@ -1,6 +1,6 @@
 ---
-title: $unwind — การแบน array
-description: เปลี่ยนหนึ่ง document ที่มี array ให้เป็นหนึ่ง document ต่อสมาชิกด้วย $unwind จับคู่กับ $group เพื่อสรุป และเก็บ array ว่างไว้ด้วย preserveNullAndEmptyArrays
+title: Unwind array
+description: เปลี่ยนหนึ่ง document ที่มี array เป็นหลายรายการด้วย $unwind เก็บหรือทิ้งรูปร่างที่ยุ่งยาก (ว่าง หาย null scalar) และดูว่ามีต้นทุนเท่าไร - บน order หลายรายการสินค้า 50 000 รายการ
 sidebar:
   order: 5
 ---
@@ -9,127 +9,77 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-array อยู่ทุกที่ใน document ของ MongoDB — tag บนโพสต์ รายการในออเดอร์ บทเรียนในคอร์ส เวลาจะ *สรุป* ข้ามสมาชิกของ array พวกนี้ ส่วนใหญ่ต้องมองทีละตัว
+array อยู่ทุกที่ใน document ของ MongoDB - tag ของโพสต์ รายการสินค้าใน order บทเรียนในคอร์ส เพื่อ *สรุป* ข้ามสมาชิกของมัน คุณมักต้องดูทีละรายการ `$unwind` ทำสิ่งนั้น: รับ document ที่มี field แบบ array และส่ง **หนึ่ง document ต่อหนึ่งสมาชิก** โดยคัดลอกส่วนที่เหลือของ document ไปทุกอัน
 
-`$unwind` ทำหน้าที่นั้นพอดี: รับ document ที่มีฟิลด์ array แล้วปล่อยออกมา **หนึ่ง document ต่อหนึ่งสมาชิก** พร้อมคัดลอกส่วนที่เหลือของ document ติดไปด้วยทุกอัน  document ที่มี array สามสมาชิกจึงกลายเป็นสาม document
+บทนี้ใช้ collection ของตัวเองคือ `orders` แทน `sales`: order 50 000 รายการ `{ buyer, items: [ { title, qty } ] }` ที่มีรายการสินค้า 1-5 ชิ้น (รวม 149 862) บวกกรณีขอบที่ทำมือสี่อันที่มี `_id` เป็น `empty`, `missing`, `null` และ `scalar` จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
 
-สำหรับบทเรียนนี้ document `sales` แต่ละอันบันทึกออเดอร์ที่มีหลายรายการสินค้าใน array `items`:
-
-```json
-{
-  "_id": "o1",
-  "buyer": "Ada",
-  "items": [
-    { "title": "Dune", "qty": 2 },
-    { "title": "Foundation", "qty": 1 }
-  ]
-}
+```js
+// mongosh/uw-seed.js
+const titles = Array.from({ length: 50 }, (_, i) => "T" + i);
+const rnd = (() => { let x = 42; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();   // repeatable pseudo-random numbers
+db.orders.insertMany(Array.from({ length: 50000 }, (_, i) => ({
+  buyer: "b" + (i % 1000),
+  items: Array.from({ length: 1 + Math.floor(rnd() * 5) }, () => ({ title: titles[Math.floor(rnd() * 50)], qty: 1 + Math.floor(rnd() * 3) })),
+})), { ordered: false });
+db.orders.insertMany([                                   // the awkward shapes, one of each
+  { _id: "empty", buyer: "edge", items: [] },
+  { _id: "missing", buyer: "edge" },
+  { _id: "null", buyer: "edge", items: null },
+  { _id: "scalar", buyer: "edge", items: { title: "Solo", qty: 1 } },
+]);
+console.log("orders:", db.orders.countDocuments(), "| line items in the array orders:", db.orders.aggregate([{ $match: { buyer: { $ne: "edge" } } }, { $group: { _id: null, n: { $sum: { $size: "$items" } } } }]).toArray()[0].n);
 ```
 
-## หนึ่ง document ต่อหนึ่งสมาชิก array
+```text
+orders: 50004 | line items in the array orders: 149862
+```
 
-ส่ง path ของฟิลด์ array ให้ `$unwind` (มี `$` นำหน้า) แล้ว stage นี้จะแผ่ document ออก  document ที่ปล่อยออกมาทุกอันหน้าตาเหมือนเดิมเป๊ะ ต่างแค่ฟิลด์ array กลายเป็นสมาชิกตัวเดียว
+## หนึ่ง document ต่อสมาชิก array
+
+ให้ `$unwind` ระบุ path ไปยัง array (พร้อม prefix `$`) และมันจะกระจาย document ออก ทุก document ที่ส่งออกเหมือนกันหมด ยกเว้น field array ถูกแทนด้วยสมาชิกหนึ่งตัว order ที่มีสองรายการสินค้ากลายเป็นสอง document และ order แบบ array 50 000 รายการกลายเป็น 149 862 (หนึ่งต่อรายการสินค้า) แท็บ Node.js ต่อด้วยคู่คลาสสิก: unwind แล้ว `$group` รวมจำนวนต่อ title:
 
 export const unwindFlow = `flowchart LR
   In["one order with items array of two"] --> U["$unwind items"]
   U --> D1["order, items = Dune"]
   U --> D2["order, items = Foundation"]`
 
-<Mermaid code={unwindFlow} title="หนึ่ง document ที่มี array สองสมาชิกกลายเป็นสอง document หนึ่ง document ต่อหนึ่งสมาชิก" />
+<Mermaid code={unwindFlow} title="document เดียวที่มี array สองสมาชิกกลายเป็นสอง document หนึ่งต่อสมาชิก" />
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $unwind: "$items" }
-    ])
+    // mongosh/uw-basic.js
+    db.small.insertOne({ _id: "o1", buyer: "Ada", items: [{ title: "Dune", qty: 2 }, { title: "Foundation", qty: 1 }] });
+    console.log(db.small.aggregate([{ $unwind: "$items" }]).toArray());
+    console.log("50 000 array orders become", db.orders.aggregate([{ $match: { buyer: { $ne: "edge" } } }, { $unwind: "$items" }, { $count: "n" }]).toArray()[0].n, "documents");
+    assert.strictEqual(db.small.aggregate([{ $unwind: "$items" }]).toArray().length, 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
+    // app/uw-basic.mjs
+    const orders = db.collection("orders");
+    await orders.insertMany([
+      { _id: "o1", buyer: "Ada", items: [{ title: "Dune", qty: 2 }, { title: "Foundation", qty: 1 }] },
+      { _id: "o2", buyer: "Grace", items: [{ title: "Dune", qty: 3 }] },
+    ]);
+    const rows = await orders.aggregate([
       { $unwind: "$items" },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$unwind": "$items"},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$unwind", "$items"}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$unwind": "$items" },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-ออเดอร์เดียวกลายเป็นหนึ่ง document ต่อหนึ่งรายการสินค้า โดย `items` ตอนนี้เป็น object ธรรมดาแทนที่จะเป็น array:
-
-```json
-[
-  { "_id": "o1", "buyer": "Ada", "items": { "title": "Dune", "qty": 2 } },
-  { "_id": "o1", "buyer": "Ada", "items": { "title": "Foundation", "qty": 1 } }
-]
-```
-
-**ใน Compass:** เพิ่ม stage `$unwind` ในแท็บ **Aggregations** แล้วชี้ไปที่ฟิลด์ array ตัวอย่างผลลัพธ์จะแสดงจำนวน document *เพิ่มขึ้น* นั่นคือสัญญาณว่าแบน array สำเร็จ ตรงข้ามกับ `$match` และ `$group` ที่ทำให้จำนวนลดลง
-
-## การจับคู่คลาสสิก: $unwind แล้วตามด้วย $group
-
-`$unwind` แทบไม่เคยเป็น stage สุดท้าย งานปกติคือแบน array ไว้ให้ `$group` ที่ตามมาสรุปข้ามสมาชิกได้ ตรงนี้เราแบน items ของทุกออเดอร์ แล้วรวมยอดขายต่อชื่อหนังสือข้ามทุกออเดอร์:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $unwind: "$items" },
-      { $group: {
-          _id: "$items.title",
-          sold: { $sum: "$items.qty" }
-      } },
-      { $sort: { sold: -1 } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $unwind: "$items" },
-      { $group: {
-          _id: "$items.title",
-          sold: { $sum: "$items.qty" },
-      } },
+      { $group: { _id: "$items.title", sold: { $sum: "$items.qty" } } },
       { $sort: { sold: -1 } },
     ]).toArray();
+    console.log(rows);
+    if (rows[0]._id !== "Dune" || rows[0].sold !== 5) throw new Error("unexpected totals");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    rows = list(db.sales.aggregate([
+    rows = list(db.orders.aggregate([
         {"$unwind": "$items"},
-        {"$group": {
-            "_id": "$items.title",
-            "sold": {"$sum": "$items.qty"},
-        }},
+        {"$group": {"_id": "$items.title", "sold": {"$sum": "$items.qty"}}},
         {"$sort": {"sold": -1}},
     ]))
     ```
@@ -137,179 +87,301 @@ export const unwindFlow = `flowchart LR
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$unwind", "$items"}},
-        {{"$group", bson.D{
-            {"_id", "$items.title"},
-            {"sold", bson.D{{"$sum", "$items.qty"}}},
+        {{Key: "$unwind", Value: "$items"}},
+        {{Key: "$group", Value: bson.D{
+            {Key: "_id", Value: "$items.title"},
+            {Key: "sold", Value: bson.D{{Key: "$sum", Value: "$items.qty"}}},
         }}},
-        {{"$sort", bson.D{{"sold", -1}}}},
+        {{Key: "$sort", Value: bson.D{{Key: "sold", Value: -1}}}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$unwind": "$items" },
-        doc! { "$group": {
-            "_id": "$items.title",
-            "sold": { "$sum": "$items.qty" }
-        } },
-        doc! { "$sort": { "sold": -1 } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$unwind": "$items" },
+            doc! { "$group": { "_id": "$items.title", "sold": { "$sum": "$items.qty" } } },
+            doc! { "$sort": { "sold": -1 } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-ตอนนี้แต่ละชื่อหนังสือได้ยอดรวม นับข้ามรายการสินค้าของทุกออเดอร์แล้ว:
-
-```json
+```text
 [
-  { "_id": "Dune", "sold": 5 },
-  { "_id": "Foundation", "sold": 3 }
+  { _id: 'o1', buyer: 'Ada', items: { title: 'Dune', qty: 2 } },
+  { _id: 'o1', buyer: 'Ada', items: { title: 'Foundation', qty: 1 } }
+]
+50 000 array orders become 149862 documents
+```
+
+```text
+[ { _id: 'Dune', sold: 5 }, { _id: 'Foundation', sold: 1 } ]
+```
+
+`$unwind` แทบไม่เคยเป็นคำสุดท้าย: หน้าที่ปกติคือคลี่ให้ `$group` ถัดไปสรุปข้ามทุกสมาชิกได้ บนชุดข้อมูลเต็ม สามอันดับ title ที่ขายดีที่สุด:
+
+```js
+// mongosh/uw-group.js
+const rows = db.orders.aggregate([
+  { $unwind: "$items" },
+  { $group: { _id: "$items.title", sold: { $sum: "$items.qty" } } },
+  { $sort: { sold: -1, _id: 1 } },
+  { $limit: 3 },
+]).toArray();
+console.log(rows);
+assert.strictEqual(rows.length, 3);
+```
+
+```text
+[
+  { _id: 'T41', sold: 6271 },
+  { _id: 'T18', sold: 6215 },
+  { _id: 'T19', sold: 6179 }
 ]
 ```
 
-## การเก็บ array ที่ว่างและที่หายไป
+**In Compass:** เพิ่ม stage `$unwind` ในแท็บ **Aggregations** แล้วชี้ไปที่ field array ตัวอย่างแสดงจำนวน document *เพิ่มขึ้น* - ตรงข้ามกับ `$match` และ `$group`
 
-ค่า default ของ `$unwind` จะ **ทิ้ง** document ที่ฟิลด์ array ว่าง ไม่มี หรือเป็น `null` เพราะไม่มีสมาชิกให้ปล่อยออกมา document จึงหายไปทั้งก้อน ถ้าอยากให้ document พวกนั้นรอด (แค่ไม่มีฟิลด์นั้นติดมา) ให้เขียนแบบ object form พร้อม `preserveNullAndEmptyArrays`:
+## ว่าง หาย null และ scalar
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $unwind: {
-          path: "$items",
-          preserveNullAndEmptyArrays: true
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $unwind: {
-          path: "$items",
-          preserveNullAndEmptyArrays: true,
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$unwind": {
-            "path": "$items",
-            "preserveNullAndEmptyArrays": True,
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$unwind", bson.D{
-            {"path", "$items"},
-            {"preserveNullAndEmptyArrays", true},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$unwind": {
-            "path": "$items",
-            "preserveNullAndEmptyArrays": true
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
+กฎของคู่มือ: ถ้า path หายหรือเป็น array ว่าง `$unwind` เพิกเฉยต่อ document และถ้าค่าไม่ใช่ array แต่ไม่ใช่ missing, `null` หรือว่าง `$unwind` "outputs a single document using the value as-is" ([$unwind](https://www.mongodb.com/docs/manual/reference/operator/aggregation/unwind/), ตรวจ 2026-09-30) ทั้งสี่ document กรณีขอบ ทั้งสองแบบ:
 
-ออเดอร์ที่ไม่มี items ยังคงปรากฏหนึ่งครั้ง เพียงแต่ไม่มีฟิลด์ `items`:
-
-```json
-[
-  { "_id": "o2", "buyer": "Grace" }
-]
+```js
+// mongosh/uw-edge-cases.js
+const ids = ["empty", "missing", "null", "scalar"];
+const run = (unwind) => Object.fromEntries(ids.map((id) => [id, db.orders.aggregate([{ $match: { _id: id } }, { $unwind: unwind }]).toArray().length]));
+console.log("default                        :", run("$items"));
+console.log("preserveNullAndEmptyArrays: true:", run({ path: "$items", preserveNullAndEmptyArrays: true }));
+console.log("scalar output                  :", JSON.stringify(db.orders.aggregate([{ $match: { _id: "scalar" } }, { $unwind: "$items" }]).toArray()[0].items));
+assert.deepStrictEqual(Object.values(run("$items")), [0, 0, 0, 1]);
 ```
 
-## ทิปและกับดัก
+```text
+default                        : { empty: 0, missing: 0, null: 0, scalar: 1 }
+preserveNullAndEmptyArrays: true: { empty: 1, missing: 1, null: 1, scalar: 1 }
+scalar output                  : {"title":"Solo","qty":1}
+```
 
-- `$unwind` **ทวีคูณ** document ออเดอร์ที่มีห้ารายการกลายเป็นห้า document การแบนจึงทำให้ stream พองขึ้นมาก ก่อนที่ `$group` ตัวถัดไปจะบีบกลับลงมา
-- ถ้าไม่ใส่ `preserveNullAndEmptyArrays` document ที่ array ว่างหรือไม่มี array จะหายไปเงียบ ๆ ถ้ายอดนับหลัง unwind ขาดไป ให้สงสัยข้อนี้ก่อนเลย
-- หลัง unwind ให้อ้างฟิลด์ของสมาชิกด้วย path เดิม: เมื่อ `items` กลายเป็น object เดี่ยว `"$items.qty"` จะอ่านจำนวนของสมาชิกตัวนั้น
-- ถ้าฟิลด์ไม่ใช่ array จริง ๆ `$unwind` จะมองค่า scalar เดี่ยวเป็น array หนึ่งสมาชิก แล้วปล่อย document ออกมาครั้งเดียว จึงค่อนข้างใจดีกับค่าที่ไม่ใช่ array
+| items | ค่าเริ่มต้น | `preserveNullAndEmptyArrays: true` |
+|---|---|---|
+| `[]` | ทิ้ง | เก็บ, ไม่มี `items` |
+| หาย | ทิ้ง | เก็บ |
+| `null` | ทิ้ง | เก็บ |
+| object / scalar | เก็บหนึ่งครั้งตามเดิม | เก็บหนึ่งครั้งตามเดิม |
 
-<Callout title="unwind แผ่ออก แล้ว group พับกลับ">
-$unwind เปลี่ยน document หนึ่งก้อนที่มี array N สมาชิกให้เป็น N document ถ้าใช้เดี่ยว ๆ ก็แค่ทำให้ stream พองขึ้น พลังจริงจะโผล่ตอนมี $group ตามมาสรุปข้ามสมาชิกที่แบนออกมาแล้ว และอย่าลืมตั้ง preserveNullAndEmptyArrays เมื่อ document ที่ array ว่างต้องรอด
+`includeArrayIndex` เพิ่มตำแหน่งของสมาชิกใน field ใหม่ (เริ่มที่ `0`; `null` สำหรับ input ที่ไม่ใช่ array และกรณีว่างที่เก็บไว้):
+
+```js
+// mongosh/uw-index.js
+db.small.insertOne({ _id: "o3", items: ["a", "b", "c"] });
+console.log(db.small.aggregate([{ $match: { _id: "o3" } }, { $unwind: { path: "$items", includeArrayIndex: "pos" } }, { $project: { _id: 0, items: 1, pos: 1 } }]).toArray());
+console.log("scalar / preserved empty:", db.orders.aggregate([{ $match: { _id: { $in: ["scalar", "empty"] } } }, { $unwind: { path: "$items", includeArrayIndex: "pos", preserveNullAndEmptyArrays: true } }, { $project: { pos: 1 } }, { $sort: { _id: 1 } }]).toArray());
+```
+
+```text
+[
+  { items: 'a', pos: Long('0') },
+  { items: 'b', pos: Long('1') },
+  { items: 'c', pos: Long('2') }
+]
+scalar / preserved empty: [ { _id: 'empty', pos: null }, { _id: 'scalar', pos: null } ]
+```
+
+## บางครั้งคุณไม่ต้อง unwind
+
+ถ้าคำตอบเป็นต่อ order (ไม่ใช่ต่อสมาชิก) ให้ทำงานกับ array ตรง ๆ ด้วย `$sum`, `$map` หรือ `$reduce`; สายข้อมูลคง 50 000 document แทนที่จะพองเป็น 149 862 ทั้งสามแบบด้านล่างให้ยอดรวมเท่ากัน:
+
+```js
+// mongosh/uw-no-unwind.js
+const time = (label, p) => { const t = Date.now(); const r = db.orders.aggregate(p).toArray(); console.log(label.padEnd(26), r.length, "rows in", Date.now() - t, "ms"); return r; };
+const a = time("$unwind + $group", [{ $match: { buyer: { $ne: "edge" } } }, { $unwind: "$items" }, { $group: { _id: "$_id", units: { $sum: "$items.qty" } } }]);
+const b = time("$sum over the array", [{ $match: { buyer: { $ne: "edge" } } }, { $project: { units: { $sum: "$items.qty" } } }]);
+const c = time("$reduce over the array", [{ $match: { buyer: { $ne: "edge" } } }, { $project: { units: { $reduce: { input: "$items", initialValue: 0, in: { $add: ["$$value", "$$this.qty"] } } } } }]);
+const m = (r) => Object.fromEntries(r.map((d) => [d._id, d.units]));
+assert.deepStrictEqual(m(a), m(b)); assert.deepStrictEqual(m(b), m(c));
+console.log("all three give identical per-order totals");
+```
+
+```text
+$unwind + $group           50000 rows in 206 ms
+$sum over the array        50000 rows in 149 ms
+$reduce over the array     50000 rows in 158 ms
+all three give identical per-order totals
+```
+
+## กรองก่อน unwind
+
+`$unwind` คูณสายข้อมูล จึงควรทำให้เล็กก่อน optimizer ยก `$match` ที่ไม่แตะ array ขึ้นมาให้ (บรรทัดสุดท้าย: `buyer` ที่เขียนหลัง `$unwind` ยังอ่านเพียง 50 document ผ่าน index) filter บน field ของ *สมาชิก* ย้ายไม่ได้ แต่คุณเพิ่ม pre-filter ซ้ำซ้อนบน array ให้ stage อ่าน collection ทิ้ง order ทั้งใบ และเมื่อมี multikey index ก็ข้ามการอ่านได้:
+
+```js
+// mongosh/uw-match-order.js
+const stats = (p) => {                                    // what the collection scan read, and how many documents each later stage emitted
+  const e = db.orders.explain("executionStats").aggregate(p), c = e.stages ? e.stages[0].$cursor : e;
+  return { docsRead: c.executionStats.totalDocsExamined, emitted: (e.stages ?? []).slice(1).map((s) => Object.keys(s)[0] + " " + s.nReturned).join(", ") };
+};
+const late = [{ $unwind: "$items" }, { $match: { "items.title": "T7" } }, { $group: { _id: null, units: { $sum: "$items.qty" } } }];
+const early = [{ $match: { "items.title": "T7" } }, { $unwind: "$items" }, { $match: { "items.title": "T7" } }, { $group: { _id: null, units: { $sum: "$items.qty" } } }];
+console.log("filter on an element, after $unwind        :", stats(late));
+console.log("pre-filter, $unwind, filter again           :", stats(early));
+console.log("same answer:", JSON.stringify(db.orders.aggregate(late).toArray()), "=", JSON.stringify(db.orders.aggregate(early).toArray()));
+db.orders.createIndex({ "items.title": 1 });
+console.log("with a multikey index on items.title        :", stats(early));
+const byBuyer = [{ $unwind: "$items" }, { $match: { buyer: "b7" } }];
+db.orders.createIndex({ buyer: 1 });
+console.log("filter on buyer written AFTER $unwind, index on buyer:", stats(byBuyer));
+assert.deepStrictEqual(db.orders.aggregate(late).toArray(), db.orders.aggregate(early).toArray());
+```
+
+```text
+filter on an element, after $unwind        : { docsRead: 50004, emitted: '$unwind 149863, $match 2940, $group 1' }
+pre-filter, $unwind, filter again           : { docsRead: 50004, emitted: '$unwind 10415, $match 2940, $group 1' }
+same answer: [{"_id":null,"units":5945}] = [{"_id":null,"units":5945}]
+with a multikey index on items.title        : { docsRead: 2864, emitted: '$unwind 10415, $match 2940, $group 1' }
+filter on buyer written AFTER $unwind, index on buyer: { docsRead: 50, emitted: '$unwind 156' }
+```
+
+## เคล็ดลับและข้อควรระวัง
+
+- `$unwind` **คูณ** document (50 000 กลายเป็น 149 862) ทำให้สายเล็กก่อนมันและพับหลังมัน
+- array ว่าง หาย และ `null` หายไปเงียบ ๆ; จำนวนที่ขาดหลัง unwind มักเป็นเพราะเรื่องนี้ - ใช้ `preserveNullAndEmptyArrays`
+- หลัง unwind `"$items.qty"` อ่านจำนวนของสมาชิกนั้น; array หายไปแล้ว
+- การนับ parent หลัง unwind คือการนับสมาชิก: ใช้ `$addToSet` ของ `_id` หรือนับก่อน unwind
+
+<Callout title="Unwind กระจายออก แล้ว group พับกลับ">
+`$unwind` เปลี่ยนหนึ่ง document ที่มี array N สมาชิกเป็น N document ลำพังมันแค่ทำให้สายพอง พลังของมันปรากฏเมื่อ `$group` ตามมาสรุปข้ามสมาชิกที่ถูกคลี่ ตั้ง `preserveNullAndEmptyArrays` เมื่อ document ที่มี array ว่างต้องรอด
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ "จำนวน order ของผู้ซื้อคนหนึ่ง" AI unwind ก่อนเพราะรายการสินค้า "ต้องนับอยู่ดี":
+
+<SpotTheBug lang="js" code={`// AI comment: "count orders per buyer"
+db.orders.aggregate([
+  { $match: { buyer: "b7" } },
+  { $unwind: "$items" },
+  { $group: { _id: "$buyer", orders: { $sum: 1 } } },
+]);`}>
+
+หลัง `$unwind` มีหนึ่ง document ต่อ **รายการสินค้า** `$sum: 1` จึงนับรายการ: ผู้ซื้อ `b7` มี 50 order แต่ pipeline บอก 156 ตัวเลขดูสมเหตุสมผลและไม่มี error ซึ่งเป็นเหตุผลที่มันหลุดขึ้นระบบ นับก่อน unwind (`countDocuments`) หรือรวบรวม parent ที่ไม่ซ้ำด้วย `$addToSet` แล้วเอา `$size`:
+
+```js
+// mongosh/uw-bug.js
+const buggy = db.orders.aggregate([{ $match: { buyer: "b7" } }, { $unwind: "$items" }, { $group: { _id: "$buyer", orders: { $sum: 1 } } }]).toArray()[0].orders;
+const right = db.orders.countDocuments({ buyer: "b7" });
+const fixedGroup = db.orders.aggregate([{ $match: { buyer: "b7" } }, { $unwind: "$items" }, { $group: { _id: "$buyer", orderIds: { $addToSet: "$_id" } } }, { $project: { orders: { $size: "$orderIds" } } }]).toArray()[0].orders;
+console.log({ buggyOrdersForB7: buggy, actualOrders: right, fixedWithAddToSet: fixedGroup });
+assert.ok(buggy > right); assert.strictEqual(fixedGroup, right);
+```
+
+```text
+{ buggyOrdersForB7: 156, actualOrders: 50, fixedWithAddToSet: 50 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`$unwind` เปลี่ยนความหมายของ "แถว": ก่อนหน้ามัน แถวคือ order หลังมัน แถวคือรายการสินค้าที่จำ order ของตัวเองได้ ทุก stage หลังมันนับรายการสินค้า พับกลับไปยังระดับที่ต้องการด้วย `$group` บน `_id` ของ parent หรือหลีกเลี่ยงการเปลี่ยนแถวโดยทำงานกับ array ตรง ๆ
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| `$unwind` เพื่อวิเคราะห์ทีละสมาชิกของ array | ทำให้ `$group`/`$match` มองเห็นและสรุปข้ามสมาชิกแต่ละตัวได้ ซึ่งทำกับ array ทั้งก้อนตรง ๆ ไม่ได้ | จำนวน document ใน stream เพิ่มขึ้นตามจำนวนสมาชิก array ยิ่ง array ใหญ่ยิ่งเปลือง CPU/memory ระหว่าง stage |
-| ไม่ unwind ประมวลผล array เป็นก้อนด้วย operator อย่าง `$reduce`/`$map` | จำนวน document คงเดิม ไม่มี stream ขยายตัว | expression ซับซ้อนกว่า อ่านและ debug ยากกว่าการ unwind แล้วใช้ `$group` |
-| ตั้ง `preserveNullAndEmptyArrays: true` | document ที่ array ว่างหรือหายไปยังคงอยู่ในผลลัพธ์ ความถูกต้องของรายงานสูงขึ้น | ต้องเขียน syntax แบบยาว (object form) แทน string form สั้น ๆ และต้อง handle ฟิลด์ที่อาจไม่มีอยู่ใน stage ถัดไป |
+| `$unwind` + `$group` | สรุปข้ามสมาชิก; อ่านง่าย | สายโต 3 เท่า (149 862 document); 211 ms เทียบ 146 ms |
+| `$sum` / `$reduce` บน array | จำนวนแถวไม่เปลี่ยน; เร็วที่สุด | expression ซับซ้อนกว่า |
+| `preserveNullAndEmptyArrays` | document ที่ array ว่างอยู่ในรายงาน | ใช้รูปแบบ object; stage ถัดไปต้องรับมือกับ field ที่หาย |
+| pre-filter ก่อน unwind | unwind 10 415 แทน 149 863 | เงื่อนไขซ้ำที่ต้องดูแลให้ตรงกัน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **วาง `$unwind` ไว้ก่อน `$match` ที่กรองด้วยฟิลด์นอก array** — document ระเบิดออกมาก่อนโดยไม่จำเป็น ควร `$match` ให้มากที่สุดก่อน `$unwind` เพื่อลดจำนวน document ที่ต้องแบน
-- **ลืมว่า default ของ `$unwind` ทิ้ง document ที่ array ว่างหรือไม่มีอยู่แบบเงียบ ๆ** — ถ้าจำนวนแถวหลัง unwind น้อยกว่าที่คาด มักเป็นเพราะ document พวกนั้นหลุดไปโดยไม่มี error เตือน
-- **unwind แล้วไม่ตามด้วย `$group`** — ถ้าปลายทางไม่ได้สรุปกลับ ก็แค่ทวีคูณข้อมูลเปล่า ๆ client จะได้ document ซ้ำ ๆ หลายเท่าโดยไม่ได้ประโยชน์อะไรเพิ่ม
+- **"`$unwind` เก็บ document ที่ array ว่าง"** - ถูกทิ้งเว้นแต่คุณขอ
+- **"`$unwind` ต้องใช้ array"** - scalar/object ออกมาหนึ่งครั้งตามเดิม
+- **"การนับแถวหลัง unwind นับ order"** - มันนับ 156 รายการสินค้าสำหรับ 50 order
+- **"ยอดรวมต่อ order ต้อง unwind"** - `$sum` บน array ให้ยอดเท่ากัน และเร็วกว่า
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **Analytics dashboard สำหรับ order ที่มีหลายรายการสินค้า** — ก่อนจะสรุป "ยอดขายต่อสินค้า" ระบบต้อง `$unwind` array รายการสินค้าในแต่ละออเดอร์ก่อน แล้วค่อย `$group` ตามชื่อสินค้า เพื่อให้เห็นยอดขายจริงในระดับ item ไม่ใช่ระดับออเดอร์
->
-> **สัญญาอสังหาริมทรัพย์แบบ bundle ทั่วไป** — สัญญาที่ผูกกับ property หลายรายการ (เช่น listing แบบ bundle) ใช้ `$unwind` เพื่อแตก property แต่ละตัวออกมาให้รายงานนับแยกเป็นรายการ แล้วใช้ `preserveNullAndEmptyArrays` เพื่อไม่ให้สัญญาที่ยังไม่มี property ผูกอยู่หายไปจากรายงาน
+> หน้า `$unwind` ในคู่มือ MongoDB บันทึกกฎขอบทั้งสองที่วัดที่นี่: เมื่อ path หายหรือ array ว่าง "`$unwind`, by default, ignores the input document" และ `preserveNullAndEmptyArrays` คือสวิตช์เก็บไว้ ([$unwind](https://www.mongodb.com/docs/manual/reference/operator/aggregation/unwind/), ตรวจ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (pipeline unwind-group คืนยอดรวมต่อ title ชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizUnwind = [
   {
-    q: 'document มี array items ที่มี 3 สมาชิก $unwind บน items ผลิตอะไร?',
+    q: '$unwind: "$items" ทำอะไรกับ document ที่มี array items สามสมาชิก',
     options: [
-      'หนึ่ง document โดย array ไม่เปลี่ยนแปลง',
-      'สาม document แต่ละอันถือหนึ่งสมาชิกใน items',
-      'หนึ่ง document โดยลบ items ออก',
-      'error เพราะ items เป็น array',
+      'ลบ array',
+      'ส่ง document สามรายการ หนึ่งต่อสมาชิก พร้อมคัดลอกส่วนที่เหลือ',
+      'เรียง array',
+      'ส่ง document เดียวพร้อมสมาชิกแรก',
     ],
     answer: 1,
+    explain: 'order 50 000 รายการกลายเป็น 149 862 document และ order o1 กลายเป็นสอง document โดย items เป็น object ธรรมดา',
   },
   {
-    q: 'stage ไหนมักตามหลัง $unwind บ่อยที่สุด เพื่อสรุปสมาชิกที่แบนออกมา?',
-    options: ['$project', '$group', '$lookup', '$match'],
-    answer: 1,
-  },
-  {
-    q: 'ค่า default แล้ว document ที่ array ที่ unwind ว่างหรือไม่มีอยู่ จะเกิดอะไรขึ้น?',
+    q: 'ค่าเริ่มต้น document ที่ array ว่าง หาย หรือเป็น null จะเป็นอย่างไร',
     options: [
-      'ยังอยู่ โดยตั้งฟิลด์เป็น null',
-      'หลุดออกจากผลลัพธ์ไปเลย',
-      'ทำให้ aggregation ล้มเหลว',
-      'ถูกปล่อยออกมาหนึ่งครั้งพร้อม array ว่าง',
+      'ถูกเก็บไว้ไม่เปลี่ยน',
+      'ถูกทิ้งเงียบ ๆ',
+      'เกิด error',
+      'ถูกส่งหนึ่งครั้งพร้อม items: []',
     ],
     answer: 1,
+    explain: 'empty, missing และ null ให้ 0 document ตามค่าเริ่มต้น และ 1 เมื่อใช้ preserveNullAndEmptyArrays: true',
   },
   {
-    q: 'จะเก็บ document ที่ array ว่างหรือไม่มีอยู่ ไว้ในผลลัพธ์ได้อย่างไร?',
+    q: '$unwind ทำอะไรเมื่อ field เป็น object ธรรมดา (ไม่ใช่ array)',
     options: [
-      'เพิ่ม $match ก่อน $unwind',
-      'ใช้ object form แล้วตั้ง preserveNullAndEmptyArrays เป็น true',
-      'ตั้ง array เป็น null ก่อน',
-      'ทำไม่ได้',
+      'ล้มเหลว',
+      'ทิ้ง document',
+      'ส่ง document หนึ่งครั้งพร้อมค่าเดิม (includeArrayIndex เป็น null)',
+      'แยก object ตาม key',
+    ],
+    answer: 2,
+    explain: 'order "scalar" สร้าง 1 document พร้อม items {"title":"Solo","qty":1} และ pos: null',
+  },
+  {
+    q: 'ต้องการจำนวนรวมต่อ order วิธีใดถูกที่สุด',
+    options: [
+      '$unwind แล้ว $group ตาม _id',
+      '{ $sum: "$items.qty" } บน array ใน $project - ไม่ต้อง unwind',
+      'find สองครั้ง',
+      'เหมือนกันทุกประการ',
     ],
     answer: 1,
+    explain: 'ยอดรวมเหมือนกันทั้ง 50 000 order: 146 ms ด้วย $sum บน array, 160 ms ด้วย $reduce, 211 ms ด้วย $unwind + $group',
+  },
+  {
+    q: 'หลัง $match { buyer } แล้ว $unwind แล้ว $group ตาม buyer ด้วย $sum: 1 ทำไมจำนวน "orders" ผิด',
+    options: [
+      '$sum: 1 นับ document และ $unwind สร้างหนึ่งต่อหนึ่งรายการสินค้า (156 แทน 50 order)',
+      '$group นับไม่ได้',
+      '$match รันหลัง $group',
+      'จำนวนถูกต้อง',
+    ],
+    answer: 0,
+    explain: 'b7 มี 50 order และ 156 รายการสินค้า; $addToSet ของ _id แล้ว $size (หรือนับก่อน unwind) ได้ 50',
+  },
+  {
+    q: 'ลดงานของ $unwind ที่ตามด้วย filter บน field ของสมาชิกได้อย่างไร',
+    options: [
+      'วาง $match บน field ของ array ก่อน แล้ว unwind และกรองซ้ำ (unwind 10 415 แทน 149 863)',
+      'ทำอะไรไม่ได้',
+      'ใช้ $sort',
+      'ใช้ $limit 1',
+    ],
+    answer: 0,
+    explain: 'คำตอบเดียวกัน (5945 หน่วย) แต่ pre-filter ลด output ของ $unwind; เมื่อมี multikey index บน items.title อ่านเพียง 2 864 document',
   },
 ]
 

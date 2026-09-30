@@ -1,6 +1,6 @@
 ---
-title: $unwind — flattening arrays
-description: Turn one array-bearing document into one document per element with $unwind, pair it with $group to summarise, and keep empty arrays with preserveNullAndEmptyArrays.
+title: Unwind arrays
+description: Turn one document with an array into many with $unwind, keep or drop the awkward shapes (empty, missing, null, scalar), and see what it costs - on 50 000 multi-item orders.
 sidebar:
   order: 5
 ---
@@ -9,26 +9,37 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Arrays are everywhere in MongoDB documents — tags on a post, items in an order, lessons in a course. To *summarise* across the elements of those arrays, you usually need to look at them one at a time. `$unwind` does exactly that: it takes a document with an array field and emits **one document per element**, copying the rest of the document onto each. A document with a three-element array becomes three documents.
+Arrays are everywhere in MongoDB documents - tags on a post, items in an order, lessons in a course. To *summarise* across the elements you usually need to look at them one at a time. `$unwind` does exactly that: it takes a document with an array field and emits **one document per element**, copying the rest of the document onto each.
 
-For this lesson each `sales` document records an order with several line items in an `items` array:
+This lesson uses its own collection, `orders`, instead of `sales`: 50 000 orders `{ buyer, items: [ { title, qty } ] }` with 1-5 line items each (149 862 in total), plus four hand-made edge cases with `_id` `empty`, `missing`, `null` and `scalar`. Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program.
 
-```json
-{
-  "_id": "o1",
-  "buyer": "Ada",
-  "items": [
-    { "title": "Dune", "qty": 2 },
-    { "title": "Foundation", "qty": 1 }
-  ]
-}
+```js
+// mongosh/uw-seed.js
+const titles = Array.from({ length: 50 }, (_, i) => "T" + i);
+const rnd = (() => { let x = 42; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();   // repeatable pseudo-random numbers
+db.orders.insertMany(Array.from({ length: 50000 }, (_, i) => ({
+  buyer: "b" + (i % 1000),
+  items: Array.from({ length: 1 + Math.floor(rnd() * 5) }, () => ({ title: titles[Math.floor(rnd() * 50)], qty: 1 + Math.floor(rnd() * 3) })),
+})), { ordered: false });
+db.orders.insertMany([                                   // the awkward shapes, one of each
+  { _id: "empty", buyer: "edge", items: [] },
+  { _id: "missing", buyer: "edge" },
+  { _id: "null", buyer: "edge", items: null },
+  { _id: "scalar", buyer: "edge", items: { title: "Solo", qty: 1 } },
+]);
+console.log("orders:", db.orders.countDocuments(), "| line items in the array orders:", db.orders.aggregate([{ $match: { buyer: { $ne: "edge" } } }, { $group: { _id: null, n: { $sum: { $size: "$items" } } } }]).toArray()[0].n);
+```
+
+```text
+orders: 50004 | line items in the array orders: 149862
 ```
 
 ## One document per array element
 
-Give `$unwind` the path to an array field (with the `$` prefix), and it fans the document out. Every emitted document is identical except that the array field is replaced by a single one of its elements.
+Give `$unwind` the path to an array (with the `$` prefix) and it fans the document out. Every emitted document is identical except that the array field is replaced by one element. An order with two line items becomes two documents, and the 50 000 array orders become 149 862 (one per line item). The Node.js tab finishes the classic pairing: unwind, then `$group` to total the quantity per title:
 
 export const unwindFlow = `flowchart LR
   In["one order with items array of two"] --> U["$unwind items"]
@@ -40,94 +51,35 @@ export const unwindFlow = `flowchart LR
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $unwind: "$items" }
-    ])
+    // mongosh/uw-basic.js
+    db.small.insertOne({ _id: "o1", buyer: "Ada", items: [{ title: "Dune", qty: 2 }, { title: "Foundation", qty: 1 }] });
+    console.log(db.small.aggregate([{ $unwind: "$items" }]).toArray());
+    console.log("50 000 array orders become", db.orders.aggregate([{ $match: { buyer: { $ne: "edge" } } }, { $unwind: "$items" }, { $count: "n" }]).toArray()[0].n, "documents");
+    assert.strictEqual(db.small.aggregate([{ $unwind: "$items" }]).toArray().length, 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
+    // app/uw-basic.mjs
+    const orders = db.collection("orders");
+    await orders.insertMany([
+      { _id: "o1", buyer: "Ada", items: [{ title: "Dune", qty: 2 }, { title: "Foundation", qty: 1 }] },
+      { _id: "o2", buyer: "Grace", items: [{ title: "Dune", qty: 3 }] },
+    ]);
+    const rows = await orders.aggregate([
       { $unwind: "$items" },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$unwind": "$items"},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$unwind", "$items"}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$unwind": "$items" },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-The single order becomes one document per line item, with `items` now a plain object rather than an array:
-
-```json
-[
-  { "_id": "o1", "buyer": "Ada", "items": { "title": "Dune", "qty": 2 } },
-  { "_id": "o1", "buyer": "Ada", "items": { "title": "Foundation", "qty": 1 } }
-]
-```
-
-**In Compass:** add an `$unwind` stage in the **Aggregations** tab and point it at the array field. The preview shows the document count *grow* — a sign you have flattened an array — which is the opposite of what `$match` and `$group` do.
-
-## The classic pairing: $unwind then $group
-
-`$unwind` is rarely the last word. Its usual job is to flatten an array so a later `$group` can summarise across the elements. Here we flatten every order's items, then total the quantity sold per title across all orders:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $unwind: "$items" },
-      { $group: {
-          _id: "$items.title",
-          sold: { $sum: "$items.qty" }
-      } },
-      { $sort: { sold: -1 } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $unwind: "$items" },
-      { $group: {
-          _id: "$items.title",
-          sold: { $sum: "$items.qty" },
-      } },
+      { $group: { _id: "$items.title", sold: { $sum: "$items.qty" } } },
       { $sort: { sold: -1 } },
     ]).toArray();
+    console.log(rows);
+    if (rows[0]._id !== "Dune" || rows[0].sold !== 5) throw new Error("unexpected totals");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    rows = list(db.sales.aggregate([
+    rows = list(db.orders.aggregate([
         {"$unwind": "$items"},
-        {"$group": {
-            "_id": "$items.title",
-            "sold": {"$sum": "$items.qty"},
-        }},
+        {"$group": {"_id": "$items.title", "sold": {"$sum": "$items.qty"}}},
         {"$sort": {"sold": -1}},
     ]))
     ```
@@ -135,179 +87,301 @@ The single order becomes one document per line item, with `items` now a plain ob
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$unwind", "$items"}},
-        {{"$group", bson.D{
-            {"_id", "$items.title"},
-            {"sold", bson.D{{"$sum", "$items.qty"}}},
+        {{Key: "$unwind", Value: "$items"}},
+        {{Key: "$group", Value: bson.D{
+            {Key: "_id", Value: "$items.title"},
+            {Key: "sold", Value: bson.D{{Key: "$sum", Value: "$items.qty"}}},
         }}},
-        {{"$sort", bson.D{{"sold", -1}}}},
+        {{Key: "$sort", Value: bson.D{{Key: "sold", Value: -1}}}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$unwind": "$items" },
-        doc! { "$group": {
-            "_id": "$items.title",
-            "sold": { "$sum": "$items.qty" }
-        } },
-        doc! { "$sort": { "sold": -1 } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$unwind": "$items" },
+            doc! { "$group": { "_id": "$items.title", "sold": { "$sum": "$items.qty" } } },
+            doc! { "$sort": { "sold": -1 } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-Now each title has its total quantity, summed across every order's line items:
-
-```json
+```text
 [
-  { "_id": "Dune", "sold": 5 },
-  { "_id": "Foundation", "sold": 3 }
+  { _id: 'o1', buyer: 'Ada', items: { title: 'Dune', qty: 2 } },
+  { _id: 'o1', buyer: 'Ada', items: { title: 'Foundation', qty: 1 } }
+]
+50 000 array orders become 149862 documents
+```
+
+```text
+[ { _id: 'Dune', sold: 5 }, { _id: 'Foundation', sold: 1 } ]
+```
+
+`$unwind` is rarely the last word: the usual job is to flatten so a later `$group` can summarise across all elements. On the full dataset, the three best-selling titles:
+
+```js
+// mongosh/uw-group.js
+const rows = db.orders.aggregate([
+  { $unwind: "$items" },
+  { $group: { _id: "$items.title", sold: { $sum: "$items.qty" } } },
+  { $sort: { sold: -1, _id: 1 } },
+  { $limit: 3 },
+]).toArray();
+console.log(rows);
+assert.strictEqual(rows.length, 3);
+```
+
+```text
+[
+  { _id: 'T41', sold: 6271 },
+  { _id: 'T18', sold: 6215 },
+  { _id: 'T19', sold: 6179 }
 ]
 ```
 
-## Keeping empty and missing arrays
+**In Compass:** add an `$unwind` stage in the **Aggregations** tab and point it at the array field. The preview shows the document count *grow* - the opposite of `$match` and `$group`.
 
-By default, `$unwind` **drops** a document whose array field is empty, missing, or `null` — there is no element to emit, so the document vanishes. When you want those documents to survive (with the field absent), pass the long form with `preserveNullAndEmptyArrays`:
+## Empty, missing, null and scalar
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $unwind: {
-          path: "$items",
-          preserveNullAndEmptyArrays: true
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $unwind: {
-          path: "$items",
-          preserveNullAndEmptyArrays: true,
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$unwind": {
-            "path": "$items",
-            "preserveNullAndEmptyArrays": True,
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$unwind", bson.D{
-            {"path", "$items"},
-            {"preserveNullAndEmptyArrays", true},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$unwind": {
-            "path": "$items",
-            "preserveNullAndEmptyArrays": true
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
+The manual's rule: if the path is missing or an empty array `$unwind` ignores the document, and if the value is not an array but is not missing, `null` or empty, `$unwind` "outputs a single document using the value as-is" ([$unwind](https://www.mongodb.com/docs/manual/reference/operator/aggregation/unwind/), consulted 2026-09-30). All four edge-case documents, both ways:
 
-An order with no items still appears once, simply without an `items` field:
+```js
+// mongosh/uw-edge-cases.js
+const ids = ["empty", "missing", "null", "scalar"];
+const run = (unwind) => Object.fromEntries(ids.map((id) => [id, db.orders.aggregate([{ $match: { _id: id } }, { $unwind: unwind }]).toArray().length]));
+console.log("default                        :", run("$items"));
+console.log("preserveNullAndEmptyArrays: true:", run({ path: "$items", preserveNullAndEmptyArrays: true }));
+console.log("scalar output                  :", JSON.stringify(db.orders.aggregate([{ $match: { _id: "scalar" } }, { $unwind: "$items" }]).toArray()[0].items));
+assert.deepStrictEqual(Object.values(run("$items")), [0, 0, 0, 1]);
+```
 
-```json
+```text
+default                        : { empty: 0, missing: 0, null: 0, scalar: 1 }
+preserveNullAndEmptyArrays: true: { empty: 1, missing: 1, null: 1, scalar: 1 }
+scalar output                  : {"title":"Solo","qty":1}
+```
+
+| items | default | `preserveNullAndEmptyArrays: true` |
+|---|---|---|
+| `[]` | dropped | kept, `items` absent |
+| missing | dropped | kept |
+| `null` | dropped | kept |
+| object / scalar | kept once, as-is | kept once, as-is |
+
+`includeArrayIndex` adds the element's position in a new field (`0`-based; `null` for non-array input and for preserved empties):
+
+```js
+// mongosh/uw-index.js
+db.small.insertOne({ _id: "o3", items: ["a", "b", "c"] });
+console.log(db.small.aggregate([{ $match: { _id: "o3" } }, { $unwind: { path: "$items", includeArrayIndex: "pos" } }, { $project: { _id: 0, items: 1, pos: 1 } }]).toArray());
+console.log("scalar / preserved empty:", db.orders.aggregate([{ $match: { _id: { $in: ["scalar", "empty"] } } }, { $unwind: { path: "$items", includeArrayIndex: "pos", preserveNullAndEmptyArrays: true } }, { $project: { pos: 1 } }, { $sort: { _id: 1 } }]).toArray());
+```
+
+```text
 [
-  { "_id": "o2", "buyer": "Grace" }
+  { items: 'a', pos: Long('0') },
+  { items: 'b', pos: Long('1') },
+  { items: 'c', pos: Long('2') }
 ]
+scalar / preserved empty: [ { _id: 'empty', pos: null }, { _id: 'scalar', pos: null } ]
+```
+
+## You may not need to unwind
+
+If the answer is per order (not per element), operate on the array directly with `$sum`, `$map` or `$reduce`; the stream keeps 50 000 documents instead of inflating to 149 862. All three below produced identical totals:
+
+```js
+// mongosh/uw-no-unwind.js
+const time = (label, p) => { const t = Date.now(); const r = db.orders.aggregate(p).toArray(); console.log(label.padEnd(26), r.length, "rows in", Date.now() - t, "ms"); return r; };
+const a = time("$unwind + $group", [{ $match: { buyer: { $ne: "edge" } } }, { $unwind: "$items" }, { $group: { _id: "$_id", units: { $sum: "$items.qty" } } }]);
+const b = time("$sum over the array", [{ $match: { buyer: { $ne: "edge" } } }, { $project: { units: { $sum: "$items.qty" } } }]);
+const c = time("$reduce over the array", [{ $match: { buyer: { $ne: "edge" } } }, { $project: { units: { $reduce: { input: "$items", initialValue: 0, in: { $add: ["$$value", "$$this.qty"] } } } } }]);
+const m = (r) => Object.fromEntries(r.map((d) => [d._id, d.units]));
+assert.deepStrictEqual(m(a), m(b)); assert.deepStrictEqual(m(b), m(c));
+console.log("all three give identical per-order totals");
+```
+
+```text
+$unwind + $group           50000 rows in 206 ms
+$sum over the array        50000 rows in 149 ms
+$reduce over the array     50000 rows in 158 ms
+all three give identical per-order totals
+```
+
+## Filter before you unwind
+
+`$unwind` multiplies the stream, so shrink it first. The optimizer hoists a `$match` that does not touch the array (the last line: `buyer` written after `$unwind` still read only 50 documents through its index). A filter on an *element* field cannot move, but you can add a redundant pre-filter on the array that lets the collection stage discard whole orders and, with a multikey index, skip reading them:
+
+```js
+// mongosh/uw-match-order.js
+const stats = (p) => {                                    // what the collection scan read, and how many documents each later stage emitted
+  const e = db.orders.explain("executionStats").aggregate(p), c = e.stages ? e.stages[0].$cursor : e;
+  return { docsRead: c.executionStats.totalDocsExamined, emitted: (e.stages ?? []).slice(1).map((s) => Object.keys(s)[0] + " " + s.nReturned).join(", ") };
+};
+const late = [{ $unwind: "$items" }, { $match: { "items.title": "T7" } }, { $group: { _id: null, units: { $sum: "$items.qty" } } }];
+const early = [{ $match: { "items.title": "T7" } }, { $unwind: "$items" }, { $match: { "items.title": "T7" } }, { $group: { _id: null, units: { $sum: "$items.qty" } } }];
+console.log("filter on an element, after $unwind        :", stats(late));
+console.log("pre-filter, $unwind, filter again           :", stats(early));
+console.log("same answer:", JSON.stringify(db.orders.aggregate(late).toArray()), "=", JSON.stringify(db.orders.aggregate(early).toArray()));
+db.orders.createIndex({ "items.title": 1 });
+console.log("with a multikey index on items.title        :", stats(early));
+const byBuyer = [{ $unwind: "$items" }, { $match: { buyer: "b7" } }];
+db.orders.createIndex({ buyer: 1 });
+console.log("filter on buyer written AFTER $unwind, index on buyer:", stats(byBuyer));
+assert.deepStrictEqual(db.orders.aggregate(late).toArray(), db.orders.aggregate(early).toArray());
+```
+
+```text
+filter on an element, after $unwind        : { docsRead: 50004, emitted: '$unwind 149863, $match 2940, $group 1' }
+pre-filter, $unwind, filter again           : { docsRead: 50004, emitted: '$unwind 10415, $match 2940, $group 1' }
+same answer: [{"_id":null,"units":5945}] = [{"_id":null,"units":5945}]
+with a multikey index on items.title        : { docsRead: 2864, emitted: '$unwind 10415, $match 2940, $group 1' }
+filter on buyer written AFTER $unwind, index on buyer: { docsRead: 50, emitted: '$unwind 156' }
 ```
 
 ## Tips and gotchas
 
-- `$unwind` **multiplies** documents. An order with five items becomes five documents — flattening can grow the stream a lot before a later `$group` shrinks it again.
-- Without `preserveNullAndEmptyArrays`, documents with an empty or missing array are silently dropped. If your counts come up short after an unwind, this is the usual culprit.
-- After unwinding, reference the element's fields through the original path: once `items` is a single object, `"$items.qty"` reads that element's quantity.
-- If the field is not actually an array, `$unwind` treats a single scalar as a one-element array and emits the document once — so it is forgiving of non-array values.
+- `$unwind` **multiplies** documents (50 000 became 149 862). Shrink the stream before it and fold it after.
+- Empty, missing and `null` arrays vanish silently; short counts after an unwind usually mean this - use `preserveNullAndEmptyArrays`.
+- After unwinding, `"$items.qty"` reads that element's quantity; the array is gone.
+- Counting parents after an unwind counts elements: use `$addToSet` of `_id` or count before unwinding.
 
 <Callout title="Unwind fans out, then group folds back">
-$unwind turns one document with an N-element array into N documents. On its own it just inflates the stream. Its real power shows when a $group follows to summarise across all those flattened elements. Set preserveNullAndEmptyArrays when documents with empty arrays must survive.
+`$unwind` turns one document with an N-element array into N documents. On its own it just inflates the stream; its power shows when a `$group` follows to summarise across the flattened elements. Set `preserveNullAndEmptyArrays` when documents with empty arrays must survive.
 </Callout>
+
+## Reading AI-generated code
+
+Asked for "the number of orders for a buyer", an assistant unwinds first because the items "have to be counted anyway":
+
+<SpotTheBug lang="js" code={`// AI comment: "count orders per buyer"
+db.orders.aggregate([
+  { $match: { buyer: "b7" } },
+  { $unwind: "$items" },
+  { $group: { _id: "$buyer", orders: { $sum: 1 } } },
+]);`}>
+
+After `$unwind` there is one document per **line item**, so `$sum: 1` counts items: buyer `b7` has 50 orders but the pipeline says 156. The number looks plausible and nothing errors, which is why it ships. Count before unwinding (`countDocuments`), or collect the distinct parents with `$addToSet` and take the `$size`:
+
+```js
+// mongosh/uw-bug.js
+const buggy = db.orders.aggregate([{ $match: { buyer: "b7" } }, { $unwind: "$items" }, { $group: { _id: "$buyer", orders: { $sum: 1 } } }]).toArray()[0].orders;
+const right = db.orders.countDocuments({ buyer: "b7" });
+const fixedGroup = db.orders.aggregate([{ $match: { buyer: "b7" } }, { $unwind: "$items" }, { $group: { _id: "$buyer", orderIds: { $addToSet: "$_id" } } }, { $project: { orders: { $size: "$orderIds" } } }]).toArray()[0].orders;
+console.log({ buggyOrdersForB7: buggy, actualOrders: right, fixedWithAddToSet: fixedGroup });
+assert.ok(buggy > right); assert.strictEqual(fixedGroup, right);
+```
+
+```text
+{ buggyOrdersForB7: 156, actualOrders: 50, fixedWithAddToSet: 50 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`$unwind` changes what one "row" means: before it a row is an order, after it a row is a line item that remembers its order. Every stage after it counts line items. Fold back to the level you want with `$group` on the parent `_id`, or avoid changing the row at all by working on the array in place.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `$unwind` to analyse array elements one at a time | Lets `$group`/`$match` see and summarise across individual elements, which is not possible directly on the whole array | The number of documents in the stream grows with the array size — the bigger the array, the more CPU/memory between stages |
-| Skip unwinding; process the array as a whole with operators like `$reduce`/`$map` | Document count stays the same, no stream inflation | More complex expressions, harder to read and debug than unwind-then-`$group` |
-| Set `preserveNullAndEmptyArrays: true` | Documents with an empty or missing array stay in the results, improving report accuracy | Requires the longer object-form syntax instead of the short string form, and you must handle a field that may be absent in later stages |
+| `$unwind` + `$group` | Summarise across elements; simple to read | Stream grows 3x (149 862 documents); 211 ms vs 146 ms |
+| `$sum` / `$reduce` on the array | Row count unchanged; fastest | More complex expressions |
+| `preserveNullAndEmptyArrays` | Empty-array documents stay in the report | Object form; later stages must handle a missing field |
+| Pre-filter before unwind | 10 415 unwound instead of 149 863 | Redundant condition to keep in sync |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Placing `$unwind` before a `$match` that filters on a field outside the array** — documents explode unnecessarily early. `$match` as much as possible before `$unwind` to reduce how many documents need flattening.
-- **Forgetting that `$unwind`'s default silently drops documents with an empty or missing array** — if your row count after an unwind comes up short, suspect this first, since nothing raises an error.
-- **Unwinding without a following `$group`** — if nothing summarises the result back down, you have simply multiplied the data for nothing; the client receives many duplicate-looking documents with no added benefit.
+- **"`$unwind` keeps documents with empty arrays."** - they are dropped unless you ask.
+- **"`$unwind` needs an array."** - a scalar/object comes out once, as-is.
+- **"Counting rows after an unwind counts orders."** - it counted 156 line items for 50 orders.
+- **"Per-order totals need an unwind."** - `$sum` over the array gave identical totals, faster.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An analytics dashboard for multi-item orders** — before summarising "sales per product," the system must `$unwind` the line-items array in each order, then `$group` by product name, to see true sales at the item level rather than the order level.
->
-> **A typical real estate bundle contract** — a contract tied to multiple properties (a bundle listing) uses `$unwind` to break out each property so the report can count them as separate line items, then uses `preserveNullAndEmptyArrays` so contracts with no properties attached yet do not disappear from the report.
+> The MongoDB manual's `$unwind` page documents both edge rules measured here: with a missing path or empty array "`$unwind`, by default, ignores the input document", and `preserveNullAndEmptyArrays` is the switch to keep them ([$unwind](https://www.mongodb.com/docs/manual/reference/operator/aggregation/unwind/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the unwind-group pipeline returned the same per-title totals) but they are not executed by the course's automated checker._
 
 export const quizUnwind = [
   {
-    q: 'A document has an items array with 3 elements. What does $unwind on items produce?',
+    q: 'What does $unwind: "$items" do to a document with a three-element items array?',
     options: [
-      'One document with the array unchanged',
-      'Three documents, each carrying one element in items',
-      'One document with items removed',
-      'An error, because items is an array',
+      'Removes the array',
+      'Emits three documents, one per element, with the rest of the document copied',
+      'Sorts the array',
+      'Emits one document with the first element',
     ],
     answer: 1,
+    explain: '50 000 orders became 149 862 documents, and order o1 became two documents with items as a plain object.',
   },
   {
-    q: 'Which stage most commonly follows $unwind to summarise the flattened elements?',
-    options: ['$project', '$group', '$lookup', '$match'],
-    answer: 1,
-  },
-  {
-    q: 'By default, what happens to a document whose unwound array is empty or missing?',
+    q: 'By default, what happens to a document whose array is empty, missing or null?',
     options: [
-      'It is kept with the field set to null',
-      'It is dropped from the output',
-      'It causes the aggregation to fail',
-      'It is emitted once with an empty array',
+      'It is kept unchanged',
+      'It is silently dropped',
+      'It raises an error',
+      'It is emitted once with items: []',
     ],
     answer: 1,
+    explain: 'empty, missing and null each gave 0 documents by default and 1 with preserveNullAndEmptyArrays: true.',
   },
   {
-    q: 'How do you keep documents with empty or missing arrays in the output?',
+    q: 'What does $unwind do when the field is a plain object (not an array)?',
     options: [
-      'Add a $match before $unwind',
-      'Use the long form with preserveNullAndEmptyArrays set to true',
-      'Set the array to null first',
-      'It is not possible',
+      'Fails',
+      'Drops the document',
+      'Emits the document once with the value as-is (includeArrayIndex is null)',
+      'Splits the object into its keys',
+    ],
+    answer: 2,
+    explain: 'The "scalar" order produced 1 document with items {"title":"Solo","qty":1} and pos: null.',
+  },
+  {
+    q: 'You need the total quantity per order. Which is cheapest?',
+    options: [
+      '$unwind then $group by _id',
+      '{ $sum: "$items.qty" } over the array in $project - no unwind',
+      'Two separate finds',
+      'They are identical',
     ],
     answer: 1,
+    explain: 'Same totals for all 50 000 orders: 146 ms with $sum over the array, 160 ms with $reduce, 211 ms with $unwind + $group.',
+  },
+  {
+    q: 'After $match { buyer } then $unwind then $group by buyer with $sum: 1, why is the "orders" count wrong?',
+    options: [
+      '$sum: 1 counts documents, and $unwind made one per line item (156 instead of 50 orders)',
+      '$group cannot count',
+      '$match runs after $group',
+      'The count is right',
+    ],
+    answer: 0,
+    explain: 'b7 has 50 orders and 156 line items; $addToSet of _id then $size (or counting before the unwind) gave 50.',
+  },
+  {
+    q: 'How can you cut the work of an $unwind followed by a filter on an element field?',
+    options: [
+      'Put a $match on the array field first, then unwind and re-filter (10 415 unwound instead of 149 863)',
+      'Nothing can be done',
+      'Use $sort',
+      'Use $limit 1',
+    ],
+    answer: 0,
+    explain: 'Same answer (5945 units) but the pre-filter shrank the $unwind output; with a multikey index on items.title only 2 864 documents were read.',
   },
 ]
 
