@@ -273,7 +273,7 @@ manual พูดไว้เหมือนกันว่า "the modification 
 transaction ที่ถูกที่สุดคือตัวที่คุณไม่ต้องใช้ ออกแบบให้ข้อมูลที่เปลี่ยนพร้อมกันอยู่ใน document เดียว แล้ว update ธรรมดาครั้งเดียวก็รักษาความสอดคล้องได้ โดยไม่ต้องมี session, commit หรือต้นทุนเพิ่ม
 </Callout>
 
-## Reading AI-generated code
+## อ่านโค้ดที่ AI สร้าง
 
 ผู้ช่วย AI ที่ถูกขอ "ลด stock อย่างปลอดภัย" เขียนโค้ดนี้ มันดูเหมือน guard และคอมเมนต์ฟังดูมั่นใจ:
 
@@ -319,7 +319,7 @@ if (rows.find((r) => r._id === "guard").left !== 0 || sold !== 10) throw new Err
 
 document คือหน่วยของ "all or nothing": server ใช้ update document กับ record หนึ่งภายใต้ write lock ของ record นั้น และ reader ได้เวอร์ชันก่อนหรือหลัง ไม่เคยได้ตรงกลาง อะไรก็ตามที่ใหญ่กว่าหนึ่ง document (batch, read-then-write, สอง collection) คือ *ลำดับ* ของขั้นตอน atomic ที่ client อื่นแทรกได้ — เว้นแต่คุณฝังการเช็คไว้ใน filter หรือใช้ transaction
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|

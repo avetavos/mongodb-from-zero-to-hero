@@ -342,7 +342,7 @@ console.log(await db.collection("accounts").countDocuments({ name: "Grace" }));
 ต้นทุนที่วัดมาข้างบนคือข้อโต้แย้ง: การเขียน document เดียวเร็วกว่าประมาณสองเท่าและไม่ต้องมี session ไม่ต้องมีลูป retry ก่อนเขียน transaction ให้ถามว่าจัดรูป document ใหม่ให้การเปลี่ยนแปลงอยู่ในอันเดียวได้ไหม
 </Callout>
 
-## Reading AI-generated code
+## อ่านโค้ดที่ AI สร้าง
 
 ผู้ช่วย AI เขียนการโอนด้วย `withTransaction` พร้อมคอมเมนต์สัญญาว่า all-or-nothing:
 
@@ -398,7 +398,7 @@ if (fixed.Ada !== 10 || fixed.Linus !== 4) throw new Error("expected a full roll
 
 transaction คือ **snapshot บวกชุดการเขียนที่ถูก buffer ไว้** ซึ่งเป็นของ session หนึ่ง การอ่านข้างในเห็น ณ เวลาเดียว (บวกสิ่งที่ transaction เขียนเอง); การเขียนมองไม่เห็นจากคนอื่นจนกว่าจะ commit และถูกทิ้งเมื่อ abort operation ใดที่ไม่มี session ก็เป็น operation ธรรมดาที่ทำอยู่ข้างเคียง การชนกันถูกตรวจแบบ optimistic — ฝ่ายแพ้ได้ error label และถูกคาดหวังให้รันใหม่
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
