@@ -1,6 +1,6 @@
 ---
-title: การ update document
-description: เปลี่ยน document ด้วย updateOne และ updateMany โดยใช้ $set, $inc, $unset, $push และ $pull และอ่านจำนวนที่ตรงกัน (match count) ที่การเขียนคืนกลับมา
+title: การอัปเดต document
+description: เปลี่ยน document ด้วย updateOne และ updateMany โดยใช้ $set, $inc, $unset, $push และ $pull แทนที่ทั้ง document ด้วย replaceOne อัปเดตสมาชิกใน array ใช้ findOneAndUpdate และอ่าน acknowledgement จริง
 sidebar:
   order: 4
 ---
@@ -8,32 +8,72 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การ update คือ operation ที่ผู้คนมักทำผิดแบบแนบเนียนบ่อยที่สุด เพราะแบบจำลองทางความคิดที่ดูเหมือนจะถูก — "ค้นหา document แล้วเขียนทับ field" — ไม่ใช่วิธีที่ MongoDB ทำงานโดยปริยาย การ update คือ document สองตัว นั่นคือ **filter** ที่เลือกว่าจะเปลี่ยน document ใด และ **update document** ที่สร้างขึ้นจาก **operator** ที่อธิบายการเปลี่ยนแปลง operator นั่นแหละคือหัวใจทั้งหมด เพราะทำให้คุณบวกตัวเลข ตั้งค่า field ลบ field หรือ push เข้า array ได้ โดยไม่ไปแตะอย่างอื่นใน document เลย
+การอัปเดตคือ operation ที่คนมักทำผิดแบบแนบเนียนที่สุด เพราะภาพในหัวที่ดูเป็นธรรมชาติ — "หา document แล้วเขียนทับ field" — ไม่ใช่วิธีที่ MongoDB ทำงาน การอัปเดตประกอบด้วยสอง document: **filter** ที่เลือก document ที่จะเปลี่ยน และ **update document** ที่สร้างจาก **operator** ซึ่งอธิบายการเปลี่ยนแปลง operator คือหัวใจทั้งหมด มันให้คุณบวกเลข ตั้งค่า field ลบ field หรือ push เข้า array โดยไม่แตะส่วนอื่นของ document ส่วนการแทนที่ document ทั้งก้อนใช้เมธอด *อีกตัว* คือ `replaceOne` และ driver จะไม่ยอมให้คุณสับสนสองอย่างนี้ (พิสูจน์ด้านล่าง)
 
-เราจะแก้ไข `members` ห้องสมุดของเราต่อไป ทุกตัวอย่างด้านล่างแสดง document ทั้ง **ก่อน** และ **หลัง** เพื่อให้คุณเห็นได้ชัดเจนว่าแต่ละ operator ทำอะไรไป
+เรายังคงแก้ไข `members` ของห้องสมุดต่อไป ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน) id บนเครื่องของคุณจะต่างออกไป
 
-## updateOne กับ $set
+## ข้อมูลที่เราอัปเดต
 
-`$set` เขียนค่าลงไปใน field ถ้า field มีอยู่แล้วก็เขียนทับ ถ้ายังไม่มีก็สร้างให้ใหม่ `updateOne` ใช้การเปลี่ยนแปลงกับ document **แรก** ที่ตรงกับ filter แล้วหยุดที่นั่น ในที่นี้เราบันทึกว่า Edsger จ่ายค่าปรับครบแล้ว:
+แต่ละบทเรียน seed ข้อมูลของตัวเอง:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.updateOne(
-      { name: "Edsger" },
-      { $set: { fines: 0 } }
-    )
+    // mongosh/update-seed.js
+    db.members.insertMany([
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Linus",    joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Grace",    joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers"] },
+    ]);
+    assert.strictEqual(db.members.countDocuments(), 4);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/update-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Linus",    joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Grace",    joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers"] },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 4) throw new Error("expected 4");
+    ```
+  </TabItem>
+</Tabs>
+
+## updateOne กับ $set
+
+`$set` เขียนค่าลงใน field ถ้า field มีอยู่จะถูกเขียนทับ ถ้าไม่มีจะถูกสร้าง `updateOne` ใช้การเปลี่ยนแปลงกับ document **แรก** ที่ตรงกับ filter แล้วหยุด ที่นี่เราบันทึกว่า Edsger จ่ายค่าปรับครบแล้ว:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/update-set.js
+    const res = db.members.updateOne(
+      { name: "Edsger" },
+      { $set: { fines: 0 } }
+    );
+    console.log(res);
+    console.log(db.members.updateOne({ name: "Edsger" }, { $set: { fines: 0 } }));    // the very same update again
+    console.log(db.members.updateOne({ name: "Nobody" }, { $set: { fines: 0 } }));   // no match
+    assert.strictEqual(res.modifiedCount, 1);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/update-set.mjs
     const res = await db.collection("members").updateOne(
       { name: "Edsger" },
       { $set: { fines: 0 } }
     );
+    console.log(res);
     console.log(res.matchedCount, res.modifiedCount);
+    if (res.modifiedCount !== 1) throw new Error("expected 1 modified");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -71,45 +111,42 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-ก่อนการ update Edsger ติดหนี้อยู่ห้า:
+ก่อนอัปเดต Edsger ค้างห้า (`{ name: 'Edsger', joined: 2022, fines: 5 }`); หลังอัปเดตเปลี่ยนเฉพาะ `fines` (`fines: 0`) acknowledgement บอกว่า operation เป็นอย่างไร `matchedCount` คือจำนวน document ที่ filter พบ; `modifiedCount` คือจำนวนที่เปลี่ยนจริง สามการเรียกใน shell ด้านบนพิมพ์ (รูปร่าง ack เหมือนกันทั้งสามครั้ง ต่างที่ตัวเลข):
 
-```json
-{ "_id": "65f0b3d4e4b0a1c2e4b0a1d3", "name": "Edsger", "joined": 2022, "fines": 5 }
+```text
+{ acknowledged: true, insertedId: null, matchedCount: 1, modifiedCount: 1, upsertedCount: 0 }   <- first run
+{ acknowledged: true, insertedId: null, matchedCount: 1, modifiedCount: 0, upsertedCount: 0 }   <- same update again
+{ acknowledged: true, insertedId: null, matchedCount: 0, modifiedCount: 0, upsertedCount: 0 }   <- no such member
 ```
 
-หลังจากนั้น เปลี่ยนแปลงเฉพาะ field `fines` เท่านั้น:
-
-```json
-{ "_id": "65f0b3d4e4b0a1c2e4b0a1d3", "name": "Edsger", "joined": 2022, "fines": 0 }
-```
-
-acknowledgement บอกคุณว่า operation เป็นอย่างไร `matchedCount` คือจำนวน document ที่ filter พบ ส่วน `modifiedCount` คือจำนวนที่เปลี่ยนแปลงไปจริง ๆ:
-
-```json
-{ "acknowledged": true, "matchedCount": 1, "modifiedCount": 1 }
-```
-
-ถ้าคุณรันการ update เดียวกันเป๊ะ ๆ อีกครั้ง ค่าก็เป็น `0` อยู่แล้ว ดังนั้น `matchedCount` ยังคงเป็น `1` แต่ `modifiedCount` เป็น `0` — document ตรงกันแต่ไม่มีอะไรที่ต้องเปลี่ยน
+ใน Node driver ผลลัพธ์คือ `{ acknowledged: true, modifiedCount: 1, upsertedId: null, upsertedCount: 0, matchedCount: 1 }` และแท็บอื่นเปิดเผยสองตัวเลขเดียวกัน (`matched_count`, `MatchedCount`, `matched_count`) สังเกตบรรทัดที่สอง: รันอัปเดตเดิมซ้ำ `matchedCount` ยังเป็น `1` แต่ `modifiedCount` เป็น `0` — document ตรงแต่ไม่มีอะไรต้องเปลี่ยน บรรทัดที่สาม: filter ที่ไม่ตรงอะไรเลย **ไม่ใช่ error** แค่ `matchedCount: 0` ส่วน `insertedId: null` ใน shell เป็นฟิลด์ตกค้างของ ack การอัปเดต ไม่ต้องสนใจ
 
 ## $inc และการเพิ่ม field ใหม่
 
-`$inc` บวกตัวเลขเข้าไปใน field (ใส่เลขติดลบเพื่อหักออก) และเป็น atomic จึงเป็นเครื่องมือที่ถูกต้องสำหรับตัวนับและยอดคงเหลือ `$set` ยังทำหน้าที่เป็นวิธี **เพิ่ม** field ที่ไม่เคยมีอยู่อีกด้วย — ในที่นี้เราทั้งคิดค่าปรับล่าช้าและประทับปี `lastSeen` ให้สมาชิกในการเรียกครั้งเดียว:
+`$inc` บวกตัวเลขเข้ากับ field (ใช้เลขลบเพื่อลบ) มันเป็น atomic ซึ่งเป็นเครื่องมือที่ถูกต้องสำหรับตัวนับและยอดเงิน `$set` ยังใช้ **เพิ่ม** field ที่ไม่เคยมีได้ — ที่นี่เราทั้งคิดค่าปรับล่าช้าและประทับปี `lastSeen` ให้สมาชิกในการเรียกเดียว:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/update-inc.js
     db.members.updateOne(
       { name: "Linus" },
       { $inc: { fines: 3 }, $set: { lastSeen: 2026 } }
-    )
+    );
+    console.log(db.members.findOne({ name: "Linus" }, { _id: 0 }));
+    assert.strictEqual(db.members.findOne({ name: "Linus" }).fines, 5);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/update-inc.mjs
     await db.collection("members").updateOne(
       { name: "Linus" },
       { $inc: { fines: 3 }, $set: { lastSeen: 2026 } }
     );
+    const linus = await db.collection("members").findOne({ name: "Linus" }, { projection: { _id: 0 } });
+    console.log(linus);
+    if (linus.fines !== 5 || linus.lastSeen !== 2026) throw new Error("unexpected Linus");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -146,43 +183,45 @@ acknowledgement บอกคุณว่า operation เป็นอย่า�
   </TabItem>
 </Tabs>
 
-ก่อนหน้านี้ Linus มีค่าปรับสองและไม่มี field `lastSeen`:
+ก่อนหน้านี้ Linus มีค่าปรับสองและไม่มี field `lastSeen`; หลังจากนั้นค่าปรับเพิ่มขึ้นสาม และมี field ใหม่ปรากฏ:
 
-```json
-{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 2 }
+```text
+{ name: 'Linus', joined: 2023, fines: 5, lastSeen: 2026 }
 ```
 
-หลังจากนั้น จำนวนเพิ่มขึ้นสามและ field ใหม่เอี่ยมปรากฏขึ้น:
+พฤติกรรมสองข้อที่ควรรู้ พิสูจน์ทั้งคู่: `$inc` บน field ที่ไม่มีเริ่มจากศูนย์ (`{ _id: 1 }` -> `{ _id: 1, visits: 1 }`) และ `$inc` บน field ที่ไม่ใช่ตัวเลขล้มเหลวเสียงดัง:
 
-```json
-{
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Linus",
-  "joined": 2023,
-  "fines": 5,
-  "lastSeen": 2026
-}
+```text
+MongoServerError: Plan executor error during update :: caused by :: Cannot apply $inc to a value of non-numeric type. {_id: ObjectId('...')} has the field 'name' of non-numeric type string
 ```
 
-## การลบ field ด้วย $unset
+## ลบ field ด้วย $unset
 
-ในการลบ field ทิ้งไปทั้งหมด — ไม่ใช่กำหนดให้เป็น `null` แต่ทำให้ field นั้นหายไปเลย — ให้ใช้ `$unset` ค่าที่ใส่เข้าไปไม่มีผล มีแค่ชื่อ field เท่านั้นที่สำคัญ ในที่นี้เราถอด field `lastSeen` ออกจาก Linus กลับไป:
+การลบ field ทั้งหมด — ไม่ใช่ตั้งเป็น `null` แต่ทำให้มันไม่มีอยู่ — ใช้ `$unset` ค่าที่ให้ถูกเมิน สำคัญแค่ชื่อ field ที่นี่เราถอด field `lastSeen` ออกจาก Linus:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/update-unset.js
+    db.members.updateOne({ name: "Linus" }, { $set: { lastSeen: 2026 } });
     db.members.updateOne(
       { name: "Linus" },
       { $unset: { lastSeen: "" } }
-    )
+    );
+    console.log(db.members.findOne({ name: "Linus" }, { _id: 0 }));
+    assert.strictEqual("lastSeen" in db.members.findOne({ name: "Linus" }), false);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/update-unset.mjs
     await db.collection("members").updateOne(
       { name: "Linus" },
       { $unset: { lastSeen: "" } }
     );
+    const linus = await db.collection("members").findOne({ name: "Linus" }, { projection: { _id: 0 } });
+    console.log(linus);
+    if ("lastSeen" in linus) throw new Error("lastSeen should be gone");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -216,31 +255,49 @@ acknowledgement บอกคุณว่า operation เป็นอย่า�
   </TabItem>
 </Tabs>
 
-field `lastSeen` หายไปอีกครั้ง และไม่มีอะไรอย่างอื่นขยับ:
+field `lastSeen` หายไปอีกครั้ง และไม่มีอะไรอื่นขยับ:
 
-```json
-{ "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 }
+```text
+{ name: 'Linus', joined: 2023, fines: 5 }
 ```
 
-## การทำงานกับ array: $push และ $pull
+## ทำงานกับ array: $push และ $pull
 
-document มักเก็บ array ไว้ และคุณแทบไม่อยากแทนที่ array ทั้งก้อนเพื่อเพิ่มหรือลบ element เพียงตัวเดียว `$push` ต่อท้าย element หนึ่งตัว ส่วน `$pull` ลบทุก element ที่ตรงกับค่าหนึ่ง ลองนึกภาพว่าสมาชิกแต่ละคนถือ array `borrowed` ของชื่อหนังสือ ก่อนอื่นเราให้ Margaret ยืมหนังสือเล่มหนึ่ง:
+document มักมี array และคุณไม่ค่อยอยากแทนที่ทั้ง array เพียงเพื่อเพิ่มหรือลบหนึ่งสมาชิก `$push` ต่อท้ายสมาชิก; `$pull` ลบทุกสมาชิกที่ตรงกับค่า สมมติสมาชิกแต่ละคนมี array `borrowed` ของชื่อหนังสือ ก่อนอื่นเราให้ Margaret ยืมหนังสือ:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/update-push-pull.js
     db.members.updateOne(
       { name: "Margaret" },
       { $push: { borrowed: "Compilers" } }
-    )
+    );
+    console.log(db.members.findOne({ name: "Margaret" }, { _id: 0 }));
+    db.members.updateOne(
+      { name: "Margaret" },
+      { $pull: { borrowed: "Compilers" } }
+    );
+    console.log(db.members.findOne({ name: "Margaret" }, { _id: 0 }));
+    assert.deepStrictEqual(Array.from(db.members.findOne({ name: "Margaret" }).borrowed), []);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").updateOne(
+    // app/update-push-pull.mjs
+    const members = db.collection("members");
+    await members.updateOne(
       { name: "Margaret" },
       { $push: { borrowed: "Compilers" } }
     );
+    console.log((await members.findOne({ name: "Margaret" }, { projection: { _id: 0 } })));
+    await members.updateOne(
+      { name: "Margaret" },
+      { $pull: { borrowed: "Compilers" } }
+    );
+    const m = await members.findOne({ name: "Margaret" }, { projection: { _id: 0 } });
+    console.log(m);
+    if (m.borrowed.length !== 0) throw new Error("borrowed should be empty");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -248,6 +305,10 @@ document มักเก็บ array ไว้ และคุณแทบไม
     db.members.update_one(
         {"name": "Margaret"},
         {"$push": {"borrowed": "Compilers"}},
+    )
+    db.members.update_one(
+        {"name": "Margaret"},
+        {"$pull": {"borrowed": "Compilers"}},
     )
     ```
   </TabItem>
@@ -261,61 +322,7 @@ document มักเก็บ array ไว้ และคุณแทบไม
     if err != nil {
         return err
     }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    coll.update_one(
-        doc! { "name": "Margaret" },
-        doc! { "$push": { "borrowed": "Compilers" } },
-    )
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-ถ้า field `borrowed` ยังไม่มีอยู่ `$push` จะสร้างให้ใหม่เป็น array ที่มี element เดียว:
-
-```json
-{
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-  "name": "Margaret",
-  "joined": 2023,
-  "fines": 0,
-  "borrowed": ["Compilers"]
-}
-```
-
-เมื่อคืนหนังสือแล้ว `$pull` จะเอาออกจาก array ตามค่าที่ระบุ:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.updateOne(
-      { name: "Margaret" },
-      { $pull: { borrowed: "Compilers" } }
-    )
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").updateOne(
-      { name: "Margaret" },
-      { $pull: { borrowed: "Compilers" } }
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.update_one(
-        {"name": "Margaret"},
-        {"$pull": {"borrowed": "Compilers"}},
-    )
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.UpdateOne(
+    _, err = coll.UpdateOne(
         ctx,
         bson.M{"name": "Margaret"},
         bson.M{"$pull": bson.M{"borrowed": "Compilers"}},
@@ -329,6 +336,11 @@ document มักเก็บ array ไว้ และคุณแทบไม
     ```rust
     coll.update_one(
         doc! { "name": "Margaret" },
+        doc! { "$push": { "borrowed": "Compilers" } },
+    )
+    .await?;
+    coll.update_one(
+        doc! { "name": "Margaret" },
         doc! { "$pull": { "borrowed": "Compilers" } },
     )
     .await?;
@@ -336,38 +348,40 @@ document มักเก็บ array ไว้ และคุณแทบไม
   </TabItem>
 </Tabs>
 
-element หายไปและ array ว่างเปล่าอีกครั้ง:
+ถ้า field `borrowed` ยังไม่มี `$push` จะสร้างเป็น array หนึ่งสมาชิก และ `$pull` ลบสมาชิกตามค่า ทิ้ง array ว่าง (ไม่ใช่ field ที่หายไป):
 
-```json
-{
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d2",
-  "name": "Margaret",
-  "joined": 2023,
-  "fines": 0,
-  "borrowed": []
-}
+```text
+{ name: 'Margaret', joined: 2023, fines: 0, borrowed: [ 'Compilers' ] }
+{ name: 'Margaret', joined: 2023, fines: 0, borrowed: [] }
 ```
 
-## updateMany: เปลี่ยนทุกรายการที่ตรงกัน
+`$push` บน field ที่ไม่ใช่ array ล้มเหลว: `The field 'visits' must be an array but is of type int in document {_id: 1}` ญาติสนิทสองตัว: `$addToSet` ต่อท้ายเฉพาะเมื่อค่ายังไม่มี และ `$push` กับ `$each` + `$slice` เก็บหน้าต่างที่มีขอบเขต — `tags: ['a','b']` ที่ push ด้วย `{ $each: ['c','d','e'], $slice: -3 }` กลายเป็น `[ 'c', 'd', 'e' ]`
 
-`updateMany` คือการเรียกเดียวกันกับ `updateOne` แต่จะเปลี่ยน document **ทุก** รายการที่ filter เลือกไว้ ในที่นี้เรายกค่าปรับให้หนึ่งครั้งสำหรับทุกคนที่ติดหนี้อยู่ในตอนนี้ — สังเกต `$inc` ที่เป็นค่าติดลบ:
+## updateMany: เปลี่ยนทุกรายการที่ตรง
+
+`updateMany` คือการเรียกเดียวกับ `updateOne` แต่ใช้การเปลี่ยนแปลงกับ **ทุก** document ที่ filter เลือก ที่นี่เราลดค่าปรับหนึ่งให้ทุกคนที่ค้างชำระอยู่ — สังเกต `$inc` ค่าลบ:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.updateMany(
+    // mongosh/update-many.js
+    const res = db.members.updateMany(
       { fines: { $gt: 0 } },
       { $inc: { fines: -1 } }
-    )
+    );
+    console.log(res);
+    assert.strictEqual(res.matchedCount, res.modifiedCount);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/update-many.mjs
     const res = await db.collection("members").updateMany(
       { fines: { $gt: 0 } },
       { $inc: { fines: -1 } }
     );
     console.log(res.matchedCount, res.modifiedCount);
+    if (res.matchedCount !== res.modifiedCount) throw new Error("expected every match modified");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -405,75 +419,276 @@ element หายไปและ array ว่างเปล่าอีกค�
   </TabItem>
 </Tabs>
 
-ตอนนี้จำนวนนับสะท้อนทุกคนที่ถูกแตะต้องใน operation เดียวนี้:
+ตัวเลขสะท้อนทุกคนที่ถูกแตะใน operation เดียวนี้ หลังขั้นตอนก่อนหน้า มีเพียง Linus (ค่าปรับ 5) ที่ยังค้างอยู่ ดังนั้น ack คือ `matchedCount: 1, modifiedCount: 1` และค่าปรับของเขาลดเหลือ 4 เมื่อมีหลายรายการที่ตรง ทั้งสองตัวเลขคือจำนวน document ที่เปลี่ยน
 
-```json
-{ "acknowledged": true, "matchedCount": 2, "modifiedCount": 2 }
+**ใน Compass:** เอาเมาส์ชี้ document ใน tab Documents คลิกไอคอนดินสอ แก้ค่าแล้วคลิก **Update** ตามเอกสาร Compass ([modify documents](https://www.mongodb.com/docs/compass/current/documents/modify/), เรียกอ่านเมื่อ 2026-09-30) มุมมอง List/Table ส่ง `findOneAndUpdate` (เฉพาะ field ที่คุณเปลี่ยน) ส่วนมุมมอง JSON ส่ง `findOneAndReplace` (ทั้ง document) — ความต่างระหว่าง update กับ replace เดียวกับด้านล่าง Compass แก้ทีละ document; ถ้าต้องการหลายรายการให้ใช้ `updateMany` ใน shell ที่ฝังอยู่
+
+## แทนที่ทั้ง document: `replaceOne`
+
+กับดักใหญ่สำหรับคนที่มาจากระบบอื่น: ถ้าส่ง document ธรรมดาที่ *ไม่มี operator* ให้ `updateOne` ในรูปร่างเดียวกับที่ insert ล่ะ? คำตอบตำราคลาสสิก — "MongoDB ถือเป็นการแทนที่ทั้งก้อน" — **ไม่ใช่สิ่งที่ driver สมัยใหม่ทำ** ทั้ง mongosh 2.11.1 และ Node driver 7.7.0 ปฏิเสธ:
+
+```js
+// mongosh/update-bare-document.js
+db.people.insertOne({ name: "Grace", joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers"] });
+
+// 1. A bare document handed to updateOne: rejected before it reaches the server
+let err;
+try { db.people.updateOne({ name: "Grace" }, { name: "Grace H.", fines: 9 }); } catch (e) { err = e; }
+console.log(err.name + ": " + err.message);
+console.log(db.people.findOne({ name: "Grace" }, { _id: 0 }));   // untouched
+
+// 2. replaceOne is the method that replaces
+console.log(db.people.replaceOne({ name: "Grace" }, { name: "Grace H.", fines: 9 }));
+console.log(db.people.findOne({ name: "Grace H." }));
+
+// 3. ...and the two must not be mixed up
+let e2, e3;
+try { db.people.replaceOne({ name: "Grace H." }, { $set: { a: 1 } }); } catch (e) { e2 = e; }
+try { db.people.updateOne({ name: "Grace H." }, { $set: { _id: 5 } }); } catch (e) { e3 = e; }
+console.log(e2.name + ": " + e2.message);
+console.log(e3.name + ": " + e3.message);
+assert.strictEqual(err.message, "Update document requires atomic operators");
 ```
 
-**ใน Compass:** ดับเบิลคลิกค่าของ field ใด ๆ ในแท็บ Documents เพื่อแก้ค่าแบบ inline ได้เลย หรือใช้ปุ่ม **Update** หลังจากป้อน filter เพื่อใช้ update document กับหลายรายการที่ตรงกันในคราวเดียว
+```text
+MongoInvalidArgumentError: Update document requires atomic operators
+{
+  name: 'Grace',
+  joined: 2024,
+  fines: 0,
+  city: 'Arlington',
+  borrowed: [ 'Compilers' ]
+}
+{
+  acknowledged: true,
+  insertedId: null,
+  matchedCount: 1,
+  modifiedCount: 1,
+  upsertedCount: 0
+}
+{
+  _id: ObjectId('6abca92eacc4516d11798c60'),
+  name: 'Grace H.',
+  fines: 9
+}
+MongoInvalidArgumentError: Replacement document must not contain atomic operators
+MongoServerError: Plan executor error during update :: caused by :: Performing an update on the path '_id' would modify the immutable field '_id'
+```
 
-## เคล็ดลับและจุดที่ต้องระวัง
+ดังนั้น: `updateOne`/`updateMany` ต้องการ **operator** (หรือ aggregation pipeline ด้านล่าง) — document เปล่า ๆ โยน `Update document requires atomic operators` `replaceOne` แทนที่ทุกอย่างยกเว้น `_id`: `joined`, `city` และ `borrowed` **หายไป** หลังจากนั้น เหลือเพียง `name` และ `fines` ซึ่งเป็นเหตุผลที่ไม่ควรหยิบมัน "เพื่อแค่เปลี่ยนชื่อ" `_id` เปลี่ยนไม่ได้ทั้งสองแบบ ทุก driver ป้องกันแบบเดียวกัน แต่ละตัวด้วยถ้อยคำของตัวเอง — เรารัน `update_one`/`UpdateOne`/`update_one` ที่ส่ง document เปล่า ๆ ในแต่ละภาษา:
 
-- **จุดที่ต้องระวังที่สำคัญที่สุด:** ถ้าคุณส่ง update document ที่ *ไม่มี operator เลย* — document ธรรมดาแบบที่คุณจะใช้ insert — MongoDB จะถือว่าเป็น **การแทนที่ทั้งก้อน (full replacement)** และล้างทุก field ที่คุณไม่ได้ใส่ไว้ทิ้ง เกือบจะเสมอที่คุณต้องการ `$set` ไม่ใช่การแทนที่เปล่า ๆ
-- `matchedCount` และ `modifiedCount` สามารถต่างกันได้ document สามารถตรงกับ filter แต่ไม่ถูกแก้ไข เพราะค่าใหม่เท่ากับค่าเก่า การรัน update ที่เป็น idempotent ซ้ำคือกรณีคลาสสิก
-- `updateMany` ไม่มีลิมิตในตัว จะเปลี่ยน *ทุก* รายการที่ match ตรวจ filter ของคุณให้ดีก่อนรัน filter ที่กว้างเกินไปจะเขียนทับ document มากกว่าที่คุณตั้งใจไว้อย่างเงียบ ๆ
-- `$set` สร้าง field ที่ขาดหายไป `$unset` ลบ field ทิ้ง ส่วน `$inc` ทำงานได้แม้ field ยังไม่มี (เริ่มนับจากศูนย์) operator เหล่านี้ให้อภัยในเรื่องว่า field มีอยู่แล้วหรือยัง
+```text
+Node    MongoInvalidArgumentError: Update document requires atomic operators
+Python  ValueError: update only works with $ operators
+Go      update document must contain key beginning with '$'
+Rust    An invalid argument was provided: update document must only contain update modifiers
+```
 
-<Callout title="เอื้อมไปหา operator ไม่ใช่การแทนที่">
-กฎข้อเดียวที่ป้องกันบั๊ก update ที่เลวร้ายที่สุด นั่นคือ ในการเปลี่ยนส่วนหนึ่งของ document ให้ห่อการเปลี่ยนแปลงของคุณไว้ใน $set (หรือ $inc, $push, $unset, …) document เปล่า ๆ ที่ไม่มี operator จะแทนที่ทั้งก้อน
+ตัว server เองยังคงถือ document ที่ไม่มี operator เป็นการแทนที่: การส่งคำสั่งดิบ `db.runCommand({ update: "people", updates: [{ q: { name: "Grace" }, u: { name: "Grace H." } }] })` คืน `n: 1, nModified: 1, ok: 1` และ document ที่เก็บกลายเป็น `{ name: 'Grace H.' }` — `joined` และ `city` หายไป ดังนั้น *driver และ mongosh* คือสิ่งที่ปกป้องคุณ ถ้าคุณพูดโปรโตคอลเองหรือใช้ driver เก่า อาจยังเจอพฤติกรรมแทนที่โดยไม่ตั้งใจแบบเดิม
+
+## อัปเดตสมาชิกใน array: positional `$`, `$[]`, `$[id]`
+
+array ของ sub-document คือหัวใจของ schema จริง มีสามรูปแบบ positional เพื่อเข้าถึงสมาชิกโดยไม่ต้องรู้ดัชนี (ข้อมูล: Ada มีสองรายการยืม Grace หนึ่ง):
+
+```js
+// mongosh/update-array-elements.js
+db.loans.insertMany([
+  { member: "Ada", books: [{ title: "Compilers", renewed: 0 }, { title: "Algorithms", renewed: 1 }] },
+  { member: "Grace", books: [{ title: "Compilers", renewed: 2 }] },
+]);
+// $ : the first element matched by the FILTER
+db.loans.updateOne({ member: "Ada", "books.title": "Compilers" }, { $inc: { "books.$.renewed": 1 } });
+console.log(db.loans.findOne({ member: "Ada" }, { _id: 0 }).books);
+// $[id] with arrayFilters: every element matching a condition
+db.loans.updateOne({ member: "Ada" }, { $inc: { "books.$[b].renewed": 10 } }, { arrayFilters: [{ "b.renewed": { $gte: 1 } }] });
+console.log(db.loans.findOne({ member: "Ada" }, { _id: 0 }).books);
+// $[] : every element
+db.loans.updateMany({}, { $set: { "books.$[].seen": true } });
+console.log(db.loans.find({}, { _id: 0 }).toArray().map((d) => d.member + ":" + d.books.every((b) => b.seen)));
+// $ without an array match in the filter -> error
+let err;
+try { db.loans.updateOne({ member: "Ada" }, { $inc: { "books.$.renewed": 1 } }); } catch (e) { err = e; }
+console.log(err.message);
+assert.match(err.message, /positional operator did not find the match/);
+```
+
+```text
+[ { title: 'Compilers', renewed: 1 }, { title: 'Algorithms', renewed: 1 } ]
+[ { title: 'Compilers', renewed: 11 }, { title: 'Algorithms', renewed: 11 } ]
+[ 'Ada:true', 'Grace:true' ]
+Plan executor error during update :: caused by :: The positional operator did not find the match needed from the query.
+```
+
+`books.$` ต้องการให้ array ปรากฏใน **filter** (`"books.title": "Compilers"`); ถ้าไม่มี server ไม่รู้ว่าคุณหมายถึงสมาชิกไหน `$[id]` + `arrayFilters` คือรูปแบบทั่วไป; `$[]` แตะทุกตัว
+
+## findOneAndUpdate: เปลี่ยนแล้วอ่านในขั้นเดียว
+
+`updateOne` คืนจำนวน ไม่ใช่ document เมื่อต้องการ document (คิว หรือตัวนับที่คืนค่าใหม่) ใช้ `findOneAndUpdate` ซึ่งเป็น atomic — และสังเกตว่าค่าเริ่มต้นคืน document ตามที่เป็น **ก่อน** อัปเดต:
+
+```js
+// mongosh/update-find-one-and.js
+db.counters.insertOne({ _id: "orders", n: 41 });
+const before = db.counters.findOneAndUpdate({ _id: "orders" }, { $inc: { n: 1 } });
+const after = db.counters.findOneAndUpdate({ _id: "orders" }, { $inc: { n: 1 } }, { returnDocument: "after" });
+const miss = db.counters.findOneAndUpdate({ _id: "nope" }, { $inc: { n: 1 } });
+console.log(before, after, miss);
+assert.strictEqual(before.n, 41);
+assert.strictEqual(after.n, 43);
+assert.strictEqual(miss, null);
+```
+
+```text
+{ _id: 'orders', n: 41 } { _id: 'orders', n: 43 } null
+```
+
+(Node driver 7.7.0: `findOneAndUpdate(filter, update, { returnDocument: "after" })` คืน document เองเลย — `{ name: 'Grace', joined: 2025 }` — และ `null` เมื่อไม่พบ)
+
+สุดท้าย การอัปเดตยังเป็น **aggregation pipeline** (array ของ stage) ได้ ซึ่งให้คำนวณ field หนึ่งจากอีก field:
+
+```js
+// mongosh/update-pipeline.js
+db.loans.insertOne({ member: "Alan", books: [{ renewed: 2 }, { renewed: 3 }] });
+db.loans.updateOne({ member: "Alan" }, [{ $set: { totalRenewals: { $sum: "$books.renewed" } } }]);
+console.log(db.loans.findOne({ member: "Alan" }).totalRenewals);
+assert.strictEqual(db.loans.findOne({ member: "Alan" }).totalRenewals, 5);
+```
+
+```text
+5
+```
+
+## เคล็ดลับและข้อควรระวัง
+
+- **กับดัก document เปล่า ฉบับแก้ไข:** driver สมัยใหม่ *โยน* `Update document requires atomic operators` สำหรับ `updateOne(filter, { plain: "document" })` — ไม่ได้แทนที่เงียบ ๆ ถ้าคุณ *ต้องการ* แทนที่ ให้เรียก `replaceOne` และจำไว้ว่ามันทิ้งทุก field ที่คุณไม่ได้ใส่
+- `matchedCount` และ `modifiedCount` ต่างกันได้ document อาจตรงกับ filter แต่ไม่ถูกแก้ เพราะค่าใหม่เท่าค่าเก่า (`matchedCount: 1, modifiedCount: 0` ด้านบน)
+- filter ที่ไม่ตรงอะไรไม่ใช่ error: `matchedCount: 0` ตรวจตัวเลขถ้า "ไม่มีอะไรเกิดขึ้น" เป็น bug
+- `updateMany` ไม่มีขีดจำกัดในตัว — เปลี่ยน *ทุก* รายการที่ตรง ตรวจ filter ให้ดีก่อนรัน
+- `$set` สร้าง field ที่ขาด, `$unset` ลบ และ `$inc` ใช้ได้แม้ไม่มี field (เริ่มจากศูนย์) แต่ล้มเหลวบน field ที่ไม่ใช่ตัวเลข
+- สอง operator แตะ path เดียวกันในการอัปเดตเดียวไม่ได้: `{ $set: { fines: 1 }, $inc: { fines: 1 } }` ล้มเหลวด้วย `Updating the path 'fines' would create a conflict at 'fines'`
+
+<Callout title="ใช้ operator; ใช้ replaceOne เฉพาะเมื่อตั้งใจ">
+เพื่อเปลี่ยนบางส่วนของ document ให้ห่อการเปลี่ยนแปลงใน $set (หรือ $inc, $push, $unset, ...) เพื่อแทนที่ทั้งก้อนให้เรียก replaceOne driver กันไม่ให้คุณสับสนสองอย่างนี้
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วยที่ฝึกจากเอกสาร MongoDB เก่ายังอธิบายพฤติกรรมก่อนที่ driver จะมีตัวป้องกัน:
+
+<SpotTheBug lang="js" code={`// AI comment: "updateOne with a plain document sets those fields and keeps the rest"
+async function renameMember(db, id, newName) {
+  return db.collection("members").updateOne({ _id: id }, { name: newName });
+}`}>
+
+ไม่มีครึ่งไหนของ comment นั้นจริง บน mongosh 2.11.1 และ Node driver 7.7.0 การเรียกนี้ **โยน** `MongoInvalidArgumentError: Update document requires atomic operators` — request แรกใน production ตาย "การแก้" ที่ล่อใจคือ `replaceOne({ _id: id }, { name: newName })` ซึ่งรันได้ แต่แทนที่ทั้ง document: ในการรันด้านบน `joined`, `city` และ `borrowed` หายไป เหลือเฉพาะชื่อใหม่ (และ `_id`) วิธีแก้ที่ถูกคือห่อการเปลี่ยนใน `$set`:
+
+```js
+// app/update-rename-fix.mjs
+const members = db.collection("members");
+const { insertedId } = await members.insertOne({ name: "Grace", joined: 2024, fines: 0, city: "Arlington" });
+
+let threw = null;
+try { await members.updateOne({ _id: insertedId }, { name: "Grace H." }); } catch (e) { threw = e.message; }
+console.log("bare document:", threw);
+
+await members.updateOne({ _id: insertedId }, { $set: { name: "Grace H." } });
+const after = await members.findOne({ _id: insertedId }, { projection: { _id: 0 } });
+console.log("$set        :", after);
+if (threw !== "Update document requires atomic operators") throw new Error("expected the guard error");
+if (after.name !== "Grace H." || after.city !== "Arlington") throw new Error("$set should keep the other fields");
+```
+
+```text
+bare document: Update document requires atomic operators
+$set        : { name: 'Grace H.', joined: 2024, fines: 0, city: 'Arlington' }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+การอัปเดตคือ **โปรแกรมสำหรับ document หนึ่งใบ**: filter เลือกเป้าหมาย และ operator (`$set`, `$inc`, `$push`, ...) คือคำสั่งที่ server รันกับ document นั้น *แบบ atomic* `replaceOne` เป็นคำกริยา "สลับทั้งก้อน" เพียงตัวเดียว; อย่างอื่นคือการแก้เฉพาะจุด `updateMany` รันโปรแกรมนั้นหนึ่งครั้งต่อ document ที่ตรง — แต่ละครั้ง atomic ทั้ง batch ไม่ atomic (reference ของ `updateMany` บอกไว้ตรง ๆ)
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `updateOne` | กระทบ document เดียว เจาะจง เข้าใจง่ายว่าอะไรถูกแก้ | ต้องเรียกซ้ำถ้าต้องแก้หลาย document ทำให้เดินทางไปกลับหลายครั้ง |
-| `updateMany` | แก้หลาย document ในการเรียกเดียว เร็วกว่ามากเมื่อ scope ใหญ่ | atomic เฉพาะ "ต่อ document" เท่านั้น ไม่ atomic ข้าม document — document อื่นอาจอ่านเห็นสถานะที่แก้ไปแล้วบางส่วนระหว่างที่ operation ยังไม่จบ |
-| update ด้วย operator (`$set` บางส่วน) | แก้เฉพาะ field ที่ต้องการ ส่วนที่เหลือของ document ปลอดภัย | ต้องจำเสมอว่าใส่ operator ทุกครั้ง ไม่งั้นเสี่ยงโดนแทนที่ทั้งก้อน |
+| `updateOne` | กระทบ document เดียว แม่นยำและคิดตามได้ง่ายว่าเปลี่ยนอะไร | ต้องเรียกซ้ำหลายครั้งเพื่อเปลี่ยนหลาย document ซึ่งเสียหลาย round trip |
+| `updateMany` | เปลี่ยนหลาย document ในการเรียกเดียว เร็วกว่ามากเมื่อสเกล | atomic เฉพาะต่อ document ไม่ใช่ข้าม document — ผู้อ่านอื่นอาจเห็นสถานะที่อัปเดตไปบางส่วนระหว่างที่ทำงาน |
+| อัปเดตด้วย operator (`$set` บางส่วน) | เปลี่ยนเฉพาะ field ที่ต้องการ ส่วนที่เหลือปลอดภัย | ต้องใส่ operator เสมอ (driver ปฏิเสธ document เปล่า ๆ) |
+| `replaceOne` | สลับทั้ง document ในขั้นเดียว ดีสำหรับการเขียนที่ "document คือแหล่งความจริง" | ทิ้งทุก field ที่คุณละไว้ (`joined`, `city`, `borrowed` หายไปด้านบน) |
+| `findOneAndUpdate` | เปลี่ยนและอ่านแบบ atomic ใน round trip เดียว | คืน document *เก่า* เว้นแต่ `returnDocument: "after"`; ถือ write lock บน document นั้นเหมือนการอัปเดตทั่วไป |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ลืม await ผลลัพธ์ของ `updateOne`/`updateMany` แล้วไปทำ logic ถัดไปทันที** — โค้ดเดินหน้าต่อโดยสมมติว่า update สำเร็จแล้ว ทั้งที่ยังไม่รู้ `matchedCount`/`modifiedCount` เลย ทำให้ debug ยากเมื่อ update จริง ๆ ไม่ได้ผล
-- **ใช้ `updateOne` วนลูปเมื่อจริง ๆ ต้องการ `updateMany`** — ต้องการแก้ document หลายรายการที่ตรง filter เดียวกัน แต่ดัน loop เรียก `updateOne` ทีละตัว ทั้งที่ `updateMany` ทำงานเดียวกันในการเรียกครั้งเดียวและเร็วกว่ามาก
-- **เข้าใจว่า `updateMany` เป็น transaction เดียวที่ atomic ทั้งชุด** — ความจริงคือ atomic แค่ระดับ document แต่ละอันเท่านั้น ถ้าต้องการความ atomic ข้าม document จริง ๆ ต้องใช้ multi-document transaction ไม่ใช่แค่ `updateMany`
+- **"`updateOne(filter, { plain: 'doc' })` แทนที่ document"** — มันโยน `Update document requires atomic operators` ใน mongosh และ driver Node `replaceOne` ต่างหากที่แทนที่
+- **"`replaceOne` เป็นวิธีปลอดภัยในการเปลี่ยนหนึ่ง field"** — มันลบทุก field ที่คุณละ
+- **"อัปเดตที่ไม่เปลี่ยนอะไรคือ error"** — `matchedCount: 1, modifiedCount: 0` เป็นคำตอบปกติ เช่นเดียวกับ `matchedCount: 0`
+- **"`updateMany` เป็น transaction atomic เดียว"** — atomic เฉพาะการเขียนแต่ละ document; ใช้ multi-document transaction เมื่อต้องการ all-or-nothing
+- **"`findOneAndUpdate` คืน document ใหม่"** — โดยค่าเริ่มต้นคืนอันเก่า; ขอ `returnDocument: "after"`
+- **"วน `updateOne` กับ `updateMany` เดียวเหมือนกัน"** — `updateMany` ทำใน round trip เดียว
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบตัดสต็อกสินค้าตอนสั่งซื้อ** — เมื่อ order ถูกยืนยัน ระบบเรียก `updateOne` เพิ่ม field `status` ของ order เป็น `"confirmed"` ด้วย `$set` แล้วเรียก `updateMany` (`$inc: { stock: -qty }`) แยกกับสินค้าหลายรายการในตะกร้าเดียว โดยรู้ตัวว่าทั้งสอง operation ไม่ atomic ร่วมกัน จึงห่อด้วย transaction เมื่อความถูกต้องสำคัญมาก
->
-> **ระบบแจ้งเตือนแบบ batch** — ทำ flash sale แล้วต้องการติด flag `notified: true` ให้ผู้ใช้ที่สมัครรับข่าวหมวดนั้นทุกคนพร้อมกัน ใช้ `updateMany({ subscribedCategory: "electronics" }, { $set: { notified: true } })` ครั้งเดียวแทนการวนลูป update ทีละคน
+> reference ของ `updateMany` ระบุการรับประกันชัดเจน: "`updateMany()` modifies each document individually. Each document write is an atomic operation, but `updateMany()` as a whole is _not_ atomic" และใช้ภายใน distributed transaction ได้ ([db.collection.updateMany](https://www.mongodb.com/docs/manual/reference/method/db.collection.updateMany/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกันและให้ตัวเลขตามที่แสดง (ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส)_
 
 export const quizUpdate = [
   {
-    q: 'คุณเรียก updateOne ด้วย document ธรรมดาที่ไม่มี operator เลย จะเกิดอะไรขึ้น?',
+    q: 'คุณเรียก updateOne(filter, { name: "X" }) ด้วย document ธรรมดาที่ไม่มี operator ใน mongosh 2.11 หรือ Node driver 7.7 เกิดอะไรขึ้น?',
     options: [
-      'เปลี่ยนเฉพาะ field ที่ระบุไว้เท่านั้น ที่เหลือถูกเก็บไว้',
-      'document ทั้งก้อนที่ตรงกันถูกแทนที่ ทำให้ field ที่คุณไม่ได้ใส่ไว้หายไป',
-      'การเรียกถูกปฏิเสธว่าไม่ถูกต้อง',
-      'document ใหม่ถูก insert แทน',
+      'เปลี่ยนเฉพาะ field ที่ระบุ ส่วนที่เหลือคงไว้',
+      'document ที่ตรงถูกแทนที่ทั้งก้อน field ที่ไม่ได้ใส่หายไป',
+      'โยน MongoInvalidArgumentError: Update document requires atomic operators',
+      'insert document ใหม่แทน',
     ],
-    answer: 1,
+    answer: 2,
+    explain: 'การรันจริง: driver ปฏิเสธก่อนถึง server และ document ไม่ถูกแตะ มีแต่ replaceOne เท่านั้นที่แทนที่',
   },
   {
-    q: 'matchedCount เป็น 1 แต่ modifiedCount เป็น 0 หลังการ update เพราะอะไร?',
+    q: 'หลังอัปเดต matchedCount เป็น 1 แต่ modifiedCount เป็น 0 เพราะอะไร?',
     options: [
-      'filter ไม่ตรงกับอะไรเลย',
-      'update document ว่างเปล่า',
-      'document ตรงกัน แต่ค่าใหม่เท่ากับค่าที่มีอยู่',
+      'filter ไม่ตรงอะไรเลย',
+      'update document ว่าง',
+      'document ตรงกัน แต่ค่าใหม่เท่ากับค่าเดิม',
       'updateOne ไม่เคยรายงาน modifiedCount',
     ],
     answer: 2,
+    explain: 'การรัน { $set: { fines: 0 } } ซ้ำตรงกับ Edsger แต่ไม่เปลี่ยนอะไร: { matchedCount: 1, modifiedCount: 0 }',
   },
   {
     q: 'operator ใดลบ field ออกจาก document ทั้งหมด?',
     options: ['$set ด้วย null', '$pull', '$unset', '$inc ด้วย 0'],
     answer: 2,
+    explain: '$unset ลบ field; $set เป็น null ทิ้ง field ที่ยังมีอยู่ด้วยค่า null',
   },
   {
-    q: 'คุณต่อท้าย element หนึ่งตัวเข้าไปใน field ที่เป็น array โดยไม่แทนที่ array ได้อย่างไร?',
+    q: 'จะต่อท้ายสมาชิกหนึ่งตัวใน field array โดยไม่แทนที่ทั้ง array ได้อย่างไร?',
     options: ['$set ทั้ง array', '$push', '$inc', '$add'],
     answer: 1,
+    explain: '$push ต่อท้าย (และสร้าง array ถ้า field ไม่มี); $addToSet ต่อท้ายเฉพาะเมื่อยังไม่มี',
+  },
+  {
+    q: 'คุณ replaceOne({ name: "Grace" }, { name: "Grace H.", fines: 9 }) กับ document ที่เคยมี joined, city และ borrowed ด้วย เหลืออะไร?',
+    options: [
+      'field เดิมทั้งหมดบวก field ใหม่',
+      'เหลือเฉพาะ _id, name และ fines — field อื่นหายไป',
+      'ถูกปฏิเสธเพราะไม่มี operator',
+      'เหลือเฉพาะ field ที่เปลี่ยน',
+    ],
+    answer: 1,
+    explain: 'findOne จริงหลังจากนั้นแสดง { _id, name: "Grace H.", fines: 9 }: replaceOne สลับทุกอย่างยกเว้น _id',
+  },
+  {
+    q: 'findOneAndUpdate({ _id: "orders" }, { $inc: { n: 1 } }) โดยไม่มี option คืน document ไหน?',
+    options: [
+      'document หลังอัปเดต (n: 42)',
+      'document ก่อนอัปเดต (n: 41)',
+      'จำนวน document ที่ถูกแก้',
+      'null เว้นแต่ตั้ง returnDocument',
+    ],
+    answer: 1,
+    explain: 'ค่าเริ่มต้นคือ document ก่อนอัปเดต; ส่ง { returnDocument: "after" } เพื่อได้อันใหม่',
   },
 ]
 
