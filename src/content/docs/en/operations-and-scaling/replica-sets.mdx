@@ -1,6 +1,6 @@
 ---
 title: Replica sets
-description: How a primary and its secondaries stay in sync through the oplog, and how an automatic election keeps the database available when the primary fails.
+description: How a primary and its secondaries stay in sync through the oplog, and how an automatic election keeps the database available — with a real 3-node set, a killed primary timed to the second, a lost majority and a stale secondary read.
 sidebar:
   order: 2
 ---
@@ -9,13 +9,89 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-A replica set is the answer to one blunt question: what happens when the server holding your data stops responding? With a single `mongod`, the answer is that your application is down until someone fixes the machine. With a replica set, the answer is that another copy takes over in seconds, and most users never notice. A **replica set** is a group of `mongod` instances that all hold the same data — one **primary** that accepts every write, and one or more **secondaries** that keep their own copies in step with it.
+A replica set is the answer to one blunt question: what happens when the server holding your data stops responding? With a single `mongod`, the answer is that your application is down until someone fixes the machine. With a replica set, another copy takes over in seconds. A **replica set** is a group of `mongod` instances that all hold the same data — one **primary** that accepts every write, and one or more **secondaries** that keep their own copies in step with it.
+
+Everything marked *3-node* below was run on this Mac on a throwaway replica set of three `mongo:8.3.11` containers (`rs-1`, `rs-2`, `rs-3`, replica set name `rsb3`, mongosh 2.11.1, Node driver 7.7.0 in a fourth container), each capped at 512 MB, all removed afterwards. Fences with a path comment also ran against the course's one-node replica set. Python/Go/Rust tabs mirror the verified shell/Node call and are not executed by the course's automated checker.
+
+## The lab
+
+Three containers on a private Docker network, one `rs.initiate`:
+
+```bash
+# scripts/rs-lab.sh
+docker network create mongodb-lab
+for i in 1 2 3; do
+  docker run -d --name rs-$i --hostname rs-$i --network mongodb-lab --memory 512m \
+    mongo:8 mongod --replSet rsb3 --bind_ip_all --wiredTigerCacheSizeGB 0.25 --oplogSize 128
+done
+docker exec rs-1 mongosh --quiet --eval 'rs.initiate({ _id: "rsb3", members: [
+  { _id: 0, host: "rs-1:27017" }, { _id: 1, host: "rs-2:27017" }, { _id: 2, host: "rs-3:27017" } ] })'
+# clean up when done: docker rm -f rs-1 rs-2 rs-3 && docker network rm mongodb-lab
+```
 
 ## Primary, secondaries, and the oplog
 
-Only the primary takes writes. Each write it applies is also recorded in a special capped collection called the **oplog** — the operations log. Every secondary continuously reads the primary's oplog and replays those same operations against its own data, so the copies converge. This is why secondaries are *eventually* consistent: there is a small lag between a write landing on the primary and that same write being replayed everywhere else.
+Only the primary takes writes. Each write it applies is also recorded in a capped collection called the **oplog** (`local.oplog.rs`). Every secondary reads the primary's oplog and replays the same operations, so the copies converge. That makes secondaries *eventually* consistent: there is a lag between a write on the primary and the same write everywhere else. A real oplog entry for `insertOne({ name: "Ada" })`:
+
+```text
+{
+  op: 'i',
+  ns: 'lib.members',
+  o: { _id: ObjectId('6abccde57c8538514ddd8679'), name: 'Ada' },
+  ts: Timestamp({ t: 1790758373, i: 2 }),
+  t: Long('1')
+}
+
+```
+
+`op: "i"` is an insert, `o` is the document, `ts` orders it, `t` is the election term. And what the whole set looks like (*3-node*):
+
+```js
+// mongosh/rs-status.js @skip-verify needs the 3-node replica set (real output below)
+const st = rs.status();
+console.log(st.members.map((m) => ({ name: m.name, stateStr: m.stateStr, health: m.health })));
+const c = rs.conf();
+console.log({ heartbeatIntervalMillis: c.settings.heartbeatIntervalMillis, electionTimeoutMillis: c.settings.electionTimeoutMillis, writeConcernMajorityJournalDefault: c.writeConcernMajorityJournalDefault });
+const h = db.hello();
+console.log({ setName: h.setName, hosts: h.hosts, primary: h.primary, isWritablePrimary: h.isWritablePrimary });
+```
+
+```text
+[
+  { name: 'rs-1:27017', stateStr: 'PRIMARY', health: 1 },
+  { name: 'rs-2:27017', stateStr: 'SECONDARY', health: 1 },
+  { name: 'rs-3:27017', stateStr: 'SECONDARY', health: 1 }
+]
+{
+  heartbeatIntervalMillis: 2000,
+  electionTimeoutMillis: 10000,
+  writeConcernMajorityJournalDefault: true
+}
+{
+  setName: 'rsb3',
+  hosts: [ 'rs-1:27017', 'rs-2:27017', 'rs-3:27017' ],
+  primary: 'rs-1:27017',
+  isWritablePrimary: true
+}
+
+```
+
+The heartbeat interval (2 s) and election timeout (10 s) are the defaults; they are the same on any set, so this fence also runs on the course's one-node set:
+
+```js
+// mongosh/rs-settings.js
+const s = rs.conf().settings;
+console.log({ heartbeatIntervalMillis: s.heartbeatIntervalMillis, electionTimeoutMillis: s.electionTimeoutMillis });
+assert.strictEqual(s.heartbeatIntervalMillis, 2000);
+assert.strictEqual(s.electionTimeoutMillis, 10000);
+```
+
+```text
+{ heartbeatIntervalMillis: 2000, electionTimeoutMillis: 10000 }
+```
 
 export const replicaFlow = `flowchart TB
   Client["Application writes"] --> P["Primary"]
@@ -27,54 +103,131 @@ export const replicaFlow = `flowchart TB
 
 <Mermaid code={replicaFlow} title="The primary takes all writes and logs them; secondaries tail the oplog and replay it to stay in sync" />
 
-The members also exchange small **heartbeat** messages every 2 seconds by default (`heartbeatIntervalMillis`). Those heartbeats are how the set notices trouble: if the secondaries stop hearing from the primary, they conclude it has failed and start an election.
+The members exchange **heartbeats** every 2 seconds (`heartbeatIntervalMillis`); the MongoDB docs add that a member whose heartbeat does not return within 10 seconds is marked inaccessible ([Replica set elections](https://www.mongodb.com/docs/manual/core/replica-set-elections/), consulted 2026-09-30). Secondaries refuse writes (*3-node*, connected directly to `rs-2`):
 
-## Automatic elections
+```text
+MongoServerError | 10107 NotWritablePrimary | not primary
 
-When the primary disappears, the remaining members hold a vote. A secondary that is eligible nominates itself, the others vote, and whichever candidate gets a majority of the votes becomes the new primary. This is the heart of high availability — it happens automatically, usually within about ten to twelve seconds, with no human paged at three in the morning.
+```
 
-export const electionFlow = `flowchart TB
-  P["Primary fails — heartbeats stop"] --> Detect["Secondaries notice the silence"]
-  Detect --> Vote["Eligible members call an election"]
-  Vote --> Win["Candidate with a majority of votes wins"]
-  Win --> NewP["A secondary becomes the new primary"]
-  NewP --> Resume["Writes resume on the new primary"]`
+The size of the oplog decides how long a secondary (or a change-stream consumer) can be offline and still catch up; the lab set had 128 MB (`rs.printReplicationInfo()`):
 
-<Mermaid code={electionFlow} title="An election promotes a secondary to primary so writes can continue without manual intervention" />
+```text
+actual oplog size
+'128 MB'
+---
+configured oplog size
+'128 MB'
+---
+log length start to end
+'13 secs (0 hrs)'
+---
+oplog first event time
+'Wed Sep 30 2026 08:52:19 GMT+0000 (Coordinated Universal Time)'
+---
+oplog last event time
+'Wed Sep 30 2026 08:52:32 GMT+0000 (Coordinated Universal Time)'
+---
+now
+'Wed Sep 30 2026 08:52:50 GMT+0000 (Coordinated Universal Time)'
 
-The word **majority** is doing real work here. A candidate must collect votes from more than half the voting members. That requirement is the reason for the most repeated piece of replica-set advice: keep an **odd** number of voting members. With three votes a single failure still leaves a clear majority of two; with two votes a single failure leaves a tie, and no one can win.
+```
+
+## Automatic elections — timed
+
+When the primary disappears, the remaining members vote; a candidate that gets a majority becomes primary. How long does that take? The manual says: "The median time before a cluster elects a new primary should not typically exceed 12 seconds, assuming default replica configuration settings. This includes time required to mark the primary as unavailable and call and complete an election." ([Replica set elections](https://www.mongodb.com/docs/manual/core/replica-set-elections/)). While elections run, the set cannot process writes; reads on secondaries can continue.
+
+Measured, twice. A writer inside the set inserted with `w: "majority"` every 100 ms (`retryWrites` is on by default, so an interrupted write is retried once a primary exists), and the writer logged how long each insert took:
+
+```js
+// mongosh/rs-writer.js @skip-verify needs the 3-node replica set (run inside a member)
+const c = db.getSiblingDB("lib").ticks;
+const end = Date.now() + 40000;
+let i = 0;
+while (Date.now() < end) {
+  const t0 = Date.now();
+  let r = "ok";
+  try { c.insertOne({ i: i++, t: new Date() }, { writeConcern: { w: "majority" } }); } catch (e) { r = "ERR " + e.name + " " + e.code; }
+  print(JSON.stringify({ at: t0, ms: Date.now() - t0, r }));
+  sleep(100);
+}
+```
+
+Run 1 — the primary killed with `docker kill` (SIGKILL: a crash, no goodbye). Run 2 — the primary stopped with `docker stop` (SIGTERM: a clean shutdown). The only iterations slower than 300 ms:
+
+```text
+{"at":1790758407048,"ms":10773,"r":"ok"}
+rs-1:27017 SECONDARY | rs-2:27017 PRIMARY | rs-3:27017 SECONDARY
+
+```
+
+```text
+{"at":1790758473930,"ms":324,"r":"ok"}
+rs-1:27017 PRIMARY | rs-2:27017 (not reachable/healthy) | rs-3:27017 SECONDARY
+
+```
+
+A crash stalled one write for about 10.8 s — the 10 s election timeout plus the election itself, in line with the manual's "typically ... 12 seconds" — and then that write *succeeded*: the driver waited for the new primary and retried. A clean shutdown lets the primary hand over, and the stall was under half a second. Both leave you with the same lesson: application code must ride out a pause of about ten seconds during a crash, not fail fast. (Atlas documents a failover test button and says an election takes five seconds on average on its clusters — [Test Resilience](https://www.mongodb.com/docs/atlas/tutorial/test-resilience/), consulted 2026-09-30.)
+
+## Why an odd number of voters
+
+A candidate needs votes from more than half the voting members. Below, two of three members were stopped; the survivor could not win an election and stayed a secondary, so it refused writes:
+
+```text
+rs-1:27017 SECONDARY | rs-2:27017 (not reachable/healthy) | rs-3:27017 (not reachable/healthy)
+MongoServerError | 10107 NotWritablePrimary | not primary
+
+```
+
+After the two members were restarted the set healed by itself:
+
+```text
+rs-1:27017 PRIMARY | rs-2:27017 SECONDARY | rs-3:27017 SECONDARY
+
+```
+
+With three voters one failure leaves a majority of two. With two voters one failure leaves one of two — no majority, no primary.
 
 ## Connecting to a replica set
 
-A driver does not connect to one fixed server — it connects to the *set*. You list a few members as seeds and name the set with `replicaSet=`. The driver discovers the full topology from there, finds the current primary on its own, and follows the primary automatically across an election.
+A driver connects to the *set*: list a few seeds and name the set with `replicaSet=`. It discovers the rest of the topology, finds the primary, and follows it across an election. Node driver inside the lab network (*3-node* output — 20 reads with `secondaryPreferred` were served by the two secondaries):
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```bash
-    mongosh "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    # scripts/rs-connect.sh
+    mongosh "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/rs-connect.mjs @skip-verify needs the 3-node replica set (run inside the lab network)
     import { MongoClient } from "mongodb";
 
-    const uri =
-      "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0";
+    const uri = "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3";
     const client = new MongoClient(uri);
     await client.connect();
+    const hello = await client.db("admin").command({ hello: 1 });
+    console.log({ setName: hello.setName, primary: hello.primary, hosts: hello.hosts });
+
+    const members = client.db("lib").collection("members", { readPreference: "secondaryPreferred" });
+    const served = new Set();
+    for (let i = 0; i < 20; i++) served.add((await members.find({}).explain()).serverInfo.host);
+    console.log("reads served by:", [...served].sort());
+    await client.close();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     from pymongo import MongoClient
 
-    uri = "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    uri = "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3"
     client = MongoClient(uri)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    uri := "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    uri := "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3"
     client, err := mongo.Connect(options.Client().ApplyURI(uri))
     if err != nil {
         return err
@@ -83,68 +236,101 @@ A driver does not connect to one fixed server — it connects to the *set*. You 
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let uri = "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0";
+    let uri = "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3";
     let client = Client::with_uri_str(uri).await?;
     ```
   </TabItem>
 </Tabs>
 
-By default reads also go to the primary, which keeps them strongly consistent. If you can tolerate a little staleness — say, for analytics or a feed that does not need the absolute latest write — you can ask the driver to read from secondaries with a read preference such as `secondaryPreferred`, spreading read load off the primary.
+```text
+{
+  setName: 'rsb3',
+  primary: 'rs-1:27017',
+  hosts: [ 'rs-1:27017', 'rs-2:27017', 'rs-3:27017' ]
+}
+reads served by: [ 'rs-2', 'rs-3' ]
 
-## Inspecting the set
+```
 
-From `mongosh` connected to any member, `rs.status()` reports the live state of the whole set: who is primary, who is secondary, and how far behind each member is. This is the first command you run when something looks wrong.
+By default reads go to the primary, which keeps them strongly consistent. To spread read load you can choose a read preference such as `secondaryPreferred` — at a price, shown next.
+
+## A secondary can be behind
+
+One secondary (`rs-2`) was frozen with `db.fsyncLock()` — a stand-in for a lagging member — while an order was written to the primary and read straight back three ways (Node, *3-node*):
 
 ```js
-rs.status()
+// app/rs-stale-read.mjs @skip-verify needs the 3-node replica set and a frozen secondary (real output below)
+const orders = client.db("shop").collection("orders");
+const direct = new MongoClient("mongodb://rs-2:27017/?directConnection=true", { readPreference: "secondary" });
+await direct.connect();
+await orders.insertOne({ _id: "o-1", total: 42 });
+console.log("bug   (read the frozen secondary):", await direct.db("shop").collection("orders").findOne({ _id: "o-1" }));
+console.log("fix 1 (read the primary)         :", await orders.findOne({ _id: "o-1" }, { readPreference: "primary" }));
+// fix 2: causal consistency - the read waits for the secondary to reach the write
+const session = client.startSession({ causalConsistency: true });
+await orders.insertOne({ _id: "o-2", total: 7 }, { session, writeConcern: { w: "majority" } });
+await orders.findOne({ _id: "o-2" }, { session, readPreference: "secondary", readConcern: { level: "majority" }, maxTimeMS: 2000 });
 ```
 
-A trimmed reply shows each member with its role in the `stateStr` field:
+```text
+bug   (read the frozen secondary): null
+fix 1 (read the primary)         : { _id: 'o-1', total: 42 }
+fix 2 (causal session, secondary) : served by a caught-up secondary in 40 ms
 
-```json
-{
-  "set": "rs0",
-  "members": [
-    { "name": "host1:27017", "stateStr": "PRIMARY", "health": 1 },
-    { "name": "host2:27017", "stateStr": "SECONDARY", "health": 1 },
-    { "name": "host3:27017", "stateStr": "SECONDARY", "health": 1 }
-  ],
-  "ok": 1
-}
 ```
 
-**In Atlas:** every cluster is a replica set already — you never configure one by hand. The cluster view shows which node is primary and lets you watch replication lag on a chart, and a failover is a one-click test you can trigger to see the election happen.
+The write was acknowledged (`w: "majority"` by default — the other secondary and the primary had it) and yet the frozen secondary returned `null`. A causally consistent session gives a read-your-writes guarantee on secondaries: the read is served only by a member that has reached the write — here the healthy `rs-3`, in 40 ms — instead of the frozen `rs-2`.
+
+**In Atlas:** an Atlas cluster is a replica set (in a sharded cluster, each shard is one — [Manage clusters](https://www.mongodb.com/docs/atlas/manage-clusters/)), and *Test Failover* triggers the election for you.
 
 ## Tips and gotchas
 
-- Keep an **odd** number of voting members so a single failure always leaves a clear majority. Three is the common minimum for production.
-- An **arbiter** is a lightweight member that votes but holds no data. It can break a tie cheaply, but it cannot become primary and adds no durability, so prefer a real data-bearing secondary when you can afford the storage.
-- Secondaries lag. If your application reads its own writes immediately after writing, read from the primary or use a read concern that waits for the write to replicate, or you may not see your own change yet.
-- A replica set protects against a node failing, not against a bad query or a dropped collection — those replicate too. Replication is availability, not a backup.
+- Keep an **odd** number of voting members: three tolerate one failure, five tolerate two.
+- An **arbiter** votes but holds no data; it cannot become primary and adds no durability. It also changes the default write concern (see the read/write concerns lesson).
+- **Secondaries lag.** If your application reads its own writes right after writing, read from the primary or use a causally consistent session (proved above).
+- Replication is availability, not backup: a bad `deleteMany` replicates too.
+- **A crash is not a clean stop.** Budget about ten seconds of write pause for a hard failure.
 
 <Callout title="Availability through copies and votes">
-A replica set keeps many copies of your data in sync through the oplog and elects a new primary by majority vote when the old one fails. Use an odd number of voters so a single failure never produces a tie.
+A replica set keeps copies in sync through the oplog and elects a new primary by majority vote. A crashed primary cost one write about ten seconds; a stopped one under half a second; a lost majority cost every write.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant scales reads by sending them to secondaries and writes a confident comment:
+
+<SpotTheBug lang="js" code={`// AI comment: "the insert is acknowledged, so reading it back from a secondary is safe"
+await orders.insertOne({ _id: "o-1", total: 42 });
+const saved = await ordersOnSecondary.findOne({ _id: "o-1" });   // readPreference: "secondary"
+if (!saved) throw new Error("order lost");`}>
+
+An acknowledged write is on the primary and a majority — not necessarily on the *particular* secondary you read. In the lab a frozen secondary returned `null` for a write that had been acknowledged, and the code above would report a lost order that is not lost. Read your own writes from the primary, or use a causally consistent session (`causalConsistency: true`). The run above shows the bug, the primary read and the causal read side by side.
+
+</SpotTheBug>
+
+## Mental Model
+
+A replica set is **one authoritative log (the oplog) and several copies replaying it**, with a vote to decide who owns the log. Writes go to the log owner; the copies are always slightly behind; the vote needs a strict majority of all voters, alive or not. Failover is not instantaneous because the others must first decide the owner is really gone — that decision is what the ten-second timeout buys.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Replica set (vs. a single `mongod`) | Automatic failover, no long downtime when the primary fails | At least three nodes to run; writes are always still bottlenecked on one primary |
-| Reading from secondaries | Spreads read load off the primary | Data returned can be stale due to replication lag |
-| Reading from the primary only | Maximum consistency, always reads the latest write | No benefit from spreading load; the primary carries the full burden |
+| Replica set (vs. a single `mongod`) | Automatic failover; measured ~10.8 s pause on a crash, 0.3 s on a clean stop | At least three nodes to run; writes still bottleneck on one primary |
+| Reading from secondaries | Spreads read load off the primary | Proven above: an acknowledged write was invisible on a lagging secondary |
+| Reading from the primary only | Always the latest write | The primary carries all the load |
+| Even number of voters | Fewer machines than the next odd number | A single failure can leave no majority |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming writes scale by adding secondaries** — secondaries only help spread reads. Every write still goes to the single primary. Scaling writes means sharding, not adding secondaries.
-- **Placing every member in the same availability zone or data center** — a replica set protects against a node failing, but if every node is in one place, the whole set goes down when that AZ does. Spread members across real AZs or data centers.
-- **Assuming a write is safe the instant the primary accepts it** — since MongoDB 5.0 (2021), the default write concern is `w: "majority"`, which waits for most voting members to confirm, not just the primary. The mistake is believing a write is durable the moment the primary accepts it — the default already waits for the majority. If you explicitly set `w: 1` yourself, an unreplicated write can be lost in an election. Keep `{ w: "majority" }` for important data.
+- **"Adding secondaries scales writes."** — every write goes to the one primary; secondaries scale reads only. Scaling writes is sharding.
+- **"Failover takes a second or two."** — a crash paused one write for ~10.8 s (a clean stop 0.3 s); the manual says the median should not typically exceed 12 s.
+- **"An acknowledged write is visible everywhere."** — visible on the primary and a majority; a specific secondary may be behind (`null` above).
+- **"Two nodes are enough for HA."** — with two voters a single failure leaves one of two, and the survivor stays a secondary.
+- **"Replicas are backups."** — a dropped collection replicates too.
+- **"All members in one availability zone is fine."** — a replica set protects against a node failing, not against the zone failing; spread members across zones.
 
-> 💡 Real-world example
->
-> **A typical ride-hailing / booking system** — relies on a replica set with automatic failover so trip data can keep being written even if a node fails in the middle of the night, with no one needing to wake up and fix it.
->
-> **MongoDB Atlas** — every cluster is a replica set of at least three nodes, automatically spread across availability zones, with a button to test failover so you can see the real result without waiting for a real incident.
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; they are not executed by the course's automated checker._
 
 export const quizReplica = [
   {
@@ -156,36 +342,46 @@ export const quizReplica = [
       'They re-import the whole collection each minute',
     ],
     answer: 1,
+    explain: 'The oplog entry for insertOne showed op "i", the document in o, and ts/t for ordering; secondaries replay these.',
   },
   {
-    q: 'What happens when the primary fails?',
+    q: 'You docker kill (SIGKILL) the primary of a 3-node set while a writer inserts with w: "majority". What did the real run show?',
     options: [
-      'The database stops accepting writes until an admin intervenes',
-      'The remaining members hold an election and promote a secondary to primary',
-      'All secondaries become primaries at once',
-      'The oplog is deleted and rebuilt',
+      'The writer failed immediately with an error',
+      'One insert stalled about 10.8 s and then succeeded on the new primary',
+      'Nothing: failover is instantaneous',
+      'Writes were lost silently',
     ],
     answer: 1,
+    explain: 'The election timeout is 10 s by default; the driver retried the write once a primary existed. A clean docker stop stalled only ~0.3 s.',
   },
   {
     q: 'Why is an odd number of voting members recommended?',
     options: [
       'It makes the oplog smaller',
-      'So a single failure still leaves a clear majority and avoids a tied vote',
+      'A single failure still leaves a strict majority; with two voters one failure leaves no majority',
       'Drivers only connect to odd-numbered sets',
-      'Even numbers are not allowed by MongoDB',
+      'Even numbers are not allowed',
     ],
     answer: 1,
+    explain: 'With 2 of 3 members stopped, the survivor stayed SECONDARY and refused writes (NotWritablePrimary).',
   },
   {
-    q: 'Reading from a secondary can return slightly stale data because:',
+    q: 'An insert was acknowledged. You read it from a secondary and get null. Which explanation fits?',
     options: [
-      'Secondaries store a compressed copy of the data',
-      'There is replication lag between a write on the primary and its replay on secondaries',
+      'The write was lost',
+      'That secondary has not applied the write yet (replication lag)',
       'Secondaries only hold half the documents',
-      'Secondaries reject reads entirely',
+      'Secondaries reject reads',
     ],
     answer: 1,
+    explain: 'The frozen secondary returned null while the primary had the order; the causally consistent read was answered by the caught-up secondary in 40 ms.',
+  },
+  {
+    q: 'What are the default heartbeat interval and election timeout?',
+    options: ['2 s and 10 s', '10 s and 2 s', '30 s and 60 s', '1 s and 1 s'],
+    answer: 0,
+    explain: 'rs.conf().settings printed heartbeatIntervalMillis 2000 and electionTimeoutMillis 10000.',
   },
 ]
 

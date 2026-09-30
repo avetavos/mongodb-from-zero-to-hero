@@ -1,6 +1,6 @@
 ---
 title: Replica sets
-description: primary กับ secondaries ซิงค์กันผ่าน oplog อย่างไร และ election อัตโนมัติทำให้ฐานข้อมูลยังใช้งานได้เมื่อ primary ล้มเหลวอย่างไร
+description: primary และ secondary sync กันผ่าน oplog อย่างไร และ election อัตโนมัติรักษา availability ของฐานข้อมูลอย่างไร — พร้อมเซต 3 โหนดจริง primary ที่ถูก kill จับเวลาเป็นวินาที การเสียเสียงข้างมาก และการอ่านจาก secondary ที่ล้าหลัง
 sidebar:
   order: 2
 ---
@@ -9,15 +9,89 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-replica set คือคำตอบของคำถามตรง ๆ ข้อหนึ่ง: จะเกิดอะไรขึ้นเมื่อ server ที่ถือข้อมูลของคุณหยุดตอบสนอง? เมื่อมี `mongod` ตัวเดียว คำตอบคือแอปพลิเคชันของคุณจะล่มจนกว่าจะมีคนแก้เครื่องนั้น เมื่อมี replica set คำตอบคือสำเนาอีกชุดจะเข้ามาทำหน้าที่แทนภายในไม่กี่วินาที และผู้ใช้ส่วนใหญ่แทบไม่รู้สึกอะไรเลย
+replica set คือคำตอบของคำถามตรง ๆ ข้อเดียว: จะเกิดอะไรขึ้นเมื่อ server ที่เก็บข้อมูลของคุณหยุดตอบสนอง? ด้วย `mongod` ตัวเดียว คำตอบคือแอปของคุณล่มจนกว่าจะมีคนซ่อมเครื่อง ด้วย replica set สำเนาอีกตัวเข้ามาแทนภายในไม่กี่วินาที **replica set** คือกลุ่มของ `mongod` ที่ถือข้อมูลเดียวกันทั้งหมด — **primary** หนึ่งตัวที่รับทุกการเขียน และ **secondary** หนึ่งตัวหรือมากกว่าที่เก็บสำเนาของตัวเองให้ตามทัน
 
-**replica set** คือกลุ่มของ `mongod` instance ที่ถือข้อมูลชุดเดียวกันทั้งหมด — มี **primary** หนึ่งตัวรับทุก write และ **secondaries** อีกหนึ่งตัวขึ้นไปที่คอยไล่สำเนาของตัวเองให้ตามทัน
+ทุกอย่างที่ระบุ *3-node* ด้านล่างรันบนเครื่อง Mac นี้ บน replica set ชั่วคราวของ container `mongo:8.3.11` สามตัว (`rs-1`, `rs-2`, `rs-3` ชื่อเซต `rsb3` mongosh 2.11.1 และ Node driver 7.7.0 ใน container ตัวที่สี่) แต่ละตัวจำกัด 512 MB และลบทิ้งทั้งหมดหลังใช้งาน fence ที่มี path comment รันบน replica set โหนดเดียวของคอร์สด้วย แท็บ Python/Go/Rust สะท้อนการเรียกที่ตรวจแล้วใน shell/Node และไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส
 
-## Primary, secondaries และ oplog
+## Lab
 
-มีแต่ primary เท่านั้นที่รับ write ทุก write ที่ primary ทำจะถูกบันทึกลง capped collection พิเศษชื่อ **oplog** — operations log ทุก secondary อ่าน oplog ของ primary อย่างต่อเนื่องและเล่นซ้ำ operations เหล่านั้นกับข้อมูลของตัวเอง เพื่อให้สำเนาบรรจบกัน นี่คือเหตุผลที่ secondaries เป็นแบบ *eventually* consistent: มี lag เล็กน้อยระหว่างที่ write ลงบน primary กับตอนที่ write เดียวกันไปเล่นซ้ำครบทุกที่
+container สามตัวบน Docker network ส่วนตัว และ `rs.initiate` หนึ่งครั้ง:
+
+```bash
+# scripts/rs-lab.sh
+docker network create mongodb-lab
+for i in 1 2 3; do
+  docker run -d --name rs-$i --hostname rs-$i --network mongodb-lab --memory 512m \
+    mongo:8 mongod --replSet rsb3 --bind_ip_all --wiredTigerCacheSizeGB 0.25 --oplogSize 128
+done
+docker exec rs-1 mongosh --quiet --eval 'rs.initiate({ _id: "rsb3", members: [
+  { _id: 0, host: "rs-1:27017" }, { _id: 1, host: "rs-2:27017" }, { _id: 2, host: "rs-3:27017" } ] })'
+# clean up when done: docker rm -f rs-1 rs-2 rs-3 && docker network rm mongodb-lab
+```
+
+## Primary, secondary และ oplog
+
+มีเฉพาะ primary ที่รับการเขียน ทุกการเขียนที่มันทำถูกบันทึกลงใน capped collection ชื่อ **oplog** (`local.oplog.rs`) ด้วย secondary ทุกตัวอ่าน oplog ของ primary และเล่นการทำงานเดียวกันซ้ำ สำเนาทั้งหมดจึงลู่เข้าหากัน นั่นทำให้ secondary เป็น *eventually* consistent: มี lag ระหว่างการเขียนบน primary กับการเขียนเดียวกันที่อื่น ๆ oplog entry จริงของ `insertOne({ name: "Ada" })`:
+
+```text
+{
+  op: 'i',
+  ns: 'lib.members',
+  o: { _id: ObjectId('6abccde57c8538514ddd8679'), name: 'Ada' },
+  ts: Timestamp({ t: 1790758373, i: 2 }),
+  t: Long('1')
+}
+
+```
+
+`op: "i"` คือ insert, `o` คือ document, `ts` เรียงลำดับ, `t` คือ election term และหน้าตาของทั้งเซต (*3-node*):
+
+```js
+// mongosh/rs-status.js @skip-verify needs the 3-node replica set (real output below)
+const st = rs.status();
+console.log(st.members.map((m) => ({ name: m.name, stateStr: m.stateStr, health: m.health })));
+const c = rs.conf();
+console.log({ heartbeatIntervalMillis: c.settings.heartbeatIntervalMillis, electionTimeoutMillis: c.settings.electionTimeoutMillis, writeConcernMajorityJournalDefault: c.writeConcernMajorityJournalDefault });
+const h = db.hello();
+console.log({ setName: h.setName, hosts: h.hosts, primary: h.primary, isWritablePrimary: h.isWritablePrimary });
+```
+
+```text
+[
+  { name: 'rs-1:27017', stateStr: 'PRIMARY', health: 1 },
+  { name: 'rs-2:27017', stateStr: 'SECONDARY', health: 1 },
+  { name: 'rs-3:27017', stateStr: 'SECONDARY', health: 1 }
+]
+{
+  heartbeatIntervalMillis: 2000,
+  electionTimeoutMillis: 10000,
+  writeConcernMajorityJournalDefault: true
+}
+{
+  setName: 'rsb3',
+  hosts: [ 'rs-1:27017', 'rs-2:27017', 'rs-3:27017' ],
+  primary: 'rs-1:27017',
+  isWritablePrimary: true
+}
+
+```
+
+ค่า heartbeat interval (2 วินาที) และ election timeout (10 วินาที) เป็นค่าเริ่มต้นที่เหมือนกันในทุกเซต fence นี้จึงรันบนเซตโหนดเดียวของคอร์สได้ด้วย:
+
+```js
+// mongosh/rs-settings.js
+const s = rs.conf().settings;
+console.log({ heartbeatIntervalMillis: s.heartbeatIntervalMillis, electionTimeoutMillis: s.electionTimeoutMillis });
+assert.strictEqual(s.heartbeatIntervalMillis, 2000);
+assert.strictEqual(s.electionTimeoutMillis, 10000);
+```
+
+```text
+{ heartbeatIntervalMillis: 2000, electionTimeoutMillis: 10000 }
+```
 
 export const replicaFlow = `flowchart TB
   Client["Application writes"] --> P["Primary"]
@@ -27,56 +101,133 @@ export const replicaFlow = `flowchart TB
   P -. "heartbeats every 2s" .- S1
   P -. "heartbeats every 2s" .- S2`
 
-<Mermaid code={replicaFlow} title="primary รับทุก write แล้วบันทึกลง oplog ส่วน secondaries คอยอ่าน oplog ต่อท้ายและเล่นซ้ำเพื่อให้ซิงค์กัน" />
+<Mermaid code={replicaFlow} title="primary รับทุกการเขียนและบันทึก; secondary ตาม oplog และเล่นซ้ำเพื่อให้ sync กัน" />
 
-สมาชิกยังแลกเปลี่ยนข้อความ **heartbeat** เล็ก ๆ กันทุก 2 วินาทีโดยค่าเริ่มต้น (`heartbeatIntervalMillis`) heartbeat เหล่านี้คือวิธีที่ set สังเกตเห็นปัญหา: ถ้า secondaries ไม่ได้ยินเสียงจาก primary ก็จะสรุปว่า primary ล้มแล้ว และเริ่ม election
+สมาชิกแลก **heartbeat** ทุก 2 วินาที (`heartbeatIntervalMillis`); เอกสาร MongoDB เสริมว่าสมาชิกที่ heartbeat ไม่ตอบกลับภายใน 10 วินาทีจะถูกทำเครื่องหมายว่าเข้าถึงไม่ได้ ([Replica set elections](https://www.mongodb.com/docs/manual/core/replica-set-elections/), ตรวจเมื่อ 2026-09-30) secondary ปฏิเสธการเขียน (*3-node*, เชื่อมตรงกับ `rs-2`):
 
-## Election อัตโนมัติ
+```text
+MongoServerError | 10107 NotWritablePrimary | not primary
 
-เมื่อ primary หายไป สมาชิกที่เหลือจะลงคะแนนเสียง secondary ที่มีสิทธิ์จะเสนอชื่อตัวเอง คนอื่นลงคะแนน และผู้สมัครที่ได้คะแนนเสียงข้างมากจะกลายเป็น primary ใหม่ นี่คือหัวใจของ high availability ทั้งหมดเกิดขึ้นอัตโนมัติ โดยปกติภายในประมาณสิบถึงสิบสองวินาที โดยไม่มีใครต้องถูกตามตัวตอนตีสาม
+```
 
-export const electionFlow = `flowchart TB
-  P["Primary fails — heartbeats stop"] --> Detect["Secondaries notice the silence"]
-  Detect --> Vote["Eligible members call an election"]
-  Vote --> Win["Candidate with a majority of votes wins"]
-  Win --> NewP["A secondary becomes the new primary"]
-  NewP --> Resume["Writes resume on the new primary"]`
+ขนาดของ oplog ตัดสินว่า secondary (หรือ consumer ของ change stream) ออฟไลน์ได้นานแค่ไหนแล้วยังตามทัน เซตใน lab มี 128 MB (`rs.printReplicationInfo()`):
 
-<Mermaid code={electionFlow} title="election เลื่อนตำแหน่ง secondary ขึ้นเป็น primary เพื่อให้ write ดำเนินต่อได้โดยไม่ต้องแทรกแซงด้วยมือ" />
+```text
+actual oplog size
+'128 MB'
+---
+configured oplog size
+'128 MB'
+---
+log length start to end
+'13 secs (0 hrs)'
+---
+oplog first event time
+'Wed Sep 30 2026 08:52:19 GMT+0000 (Coordinated Universal Time)'
+---
+oplog last event time
+'Wed Sep 30 2026 08:52:32 GMT+0000 (Coordinated Universal Time)'
+---
+now
+'Wed Sep 30 2026 08:52:50 GMT+0000 (Coordinated Universal Time)'
 
-คำว่า **majority** ทำงานสำคัญตรงนี้ ผู้สมัครต้องเก็บคะแนนเสียงจากสมาชิกที่มีสิทธิ์ลงคะแนนมากกว่าครึ่งหนึ่ง ข้อกำหนดนั้นคือเหตุผลของคำแนะนำเรื่อง replica set ที่ถูกพูดซ้ำบ่อยที่สุด: ให้มีจำนวนสมาชิกที่ลงคะแนนเป็น **เลขคี่** ด้วยสามเสียง การล้มเหลวเพียงครั้งเดียวก็ยังเหลือเสียงข้างมากที่ชัดเจนคือสองเสียง; ด้วยสองเสียง การล้มเหลวเพียงครั้งเดียวจะทำให้เสมอกัน และไม่มีใครชนะได้
+```
 
-## การเชื่อมต่อกับ replica set
+## Election อัตโนมัติ — จับเวลา
 
-driver ไม่ได้ต่อกับ server ตัวใดตัวหนึ่งตายตัว แต่ต่อกับ *set* คุณระบุสมาชิกสองสามตัวเป็น seeds และตั้งชื่อ set ด้วย `replicaSet=` จากนั้น driver ค้นพบ topology ทั้งหมดเอง หา primary ปัจจุบันได้เอง และตาม primary ตัวใหม่โดยอัตโนมัติหลัง election
+เมื่อ primary หายไป สมาชิกที่เหลือโหวต ผู้สมัครที่ได้เสียงข้างมากเป็น primary ใช้เวลานานแค่ไหน? manual บอกว่า: "The median time before a cluster elects a new primary should not typically exceed 12 seconds, assuming default replica configuration settings. This includes time required to mark the primary as unavailable and call and complete an election." ([Replica set elections](https://www.mongodb.com/docs/manual/core/replica-set-elections/)) ระหว่าง election เซตประมวลผลการเขียนไม่ได้; การอ่านบน secondary ทำต่อได้
+
+วัดสองครั้ง writer ภายในเซต insert ด้วย `w: "majority"` ทุก 100 ms (`retryWrites` เปิดโดยค่าเริ่มต้น การเขียนที่ถูกขัดจังหวะจึงถูก retry เมื่อมี primary) และ writer บันทึกว่าแต่ละ insert ใช้เวลาเท่าไร:
+
+```js
+// mongosh/rs-writer.js @skip-verify needs the 3-node replica set (run inside a member)
+const c = db.getSiblingDB("lib").ticks;
+const end = Date.now() + 40000;
+let i = 0;
+while (Date.now() < end) {
+  const t0 = Date.now();
+  let r = "ok";
+  try { c.insertOne({ i: i++, t: new Date() }, { writeConcern: { w: "majority" } }); } catch (e) { r = "ERR " + e.name + " " + e.code; }
+  print(JSON.stringify({ at: t0, ms: Date.now() - t0, r }));
+  sleep(100);
+}
+```
+
+รอบที่ 1 — primary ถูก kill ด้วย `docker kill` (SIGKILL: ล่มโดยไม่บอกลา) รอบที่ 2 — primary ถูกหยุดด้วย `docker stop` (SIGTERM: ปิดอย่างสะอาด) รายการเดียวที่ช้ากว่า 300 ms:
+
+```text
+{"at":1790758407048,"ms":10773,"r":"ok"}
+rs-1:27017 SECONDARY | rs-2:27017 PRIMARY | rs-3:27017 SECONDARY
+
+```
+
+```text
+{"at":1790758473930,"ms":324,"r":"ok"}
+rs-1:27017 PRIMARY | rs-2:27017 (not reachable/healthy) | rs-3:27017 SECONDARY
+
+```
+
+การล่มทำให้การเขียนหนึ่งครั้งค้างราว 10.8 วินาที — election timeout 10 วินาทีบวก election เอง สอดคล้องกับ "typically ... 12 seconds" ของ manual — แล้วการเขียนนั้น *สำเร็จ*: driver รอ primary ใหม่แล้ว retry การปิดอย่างสะอาดทำให้ primary ส่งมอบงาน และค้างไม่ถึงครึ่งวินาที ทั้งสองให้บทเรียนเดียวกัน: โค้ดแอปต้องรองรับการหยุดราวสิบวินาทีเมื่อเกิดการล่มจริง ไม่ใช่ fail fast (Atlas มีปุ่มทดสอบ failover และระบุว่า election เฉลี่ยห้าวินาทีบน cluster ของมัน — [Test Resilience](https://www.mongodb.com/docs/atlas/tutorial/test-resilience/) ตรวจเมื่อ 2026-09-30)
+
+## ทำไมต้องเป็นจำนวนคี่
+
+ผู้สมัครต้องได้เสียงจากสมาชิกที่มีสิทธิ์โหวตมากกว่าครึ่ง ด้านล่างสองในสามสมาชิกถูกหยุด ตัวที่รอดชนะ election ไม่ได้และยังเป็น secondary จึงปฏิเสธการเขียน:
+
+```text
+rs-1:27017 SECONDARY | rs-2:27017 (not reachable/healthy) | rs-3:27017 (not reachable/healthy)
+MongoServerError | 10107 NotWritablePrimary | not primary
+
+```
+
+หลังสมาชิกสองตัวถูกสตาร์ทใหม่ เซตฟื้นตัวเอง:
+
+```text
+rs-1:27017 PRIMARY | rs-2:27017 SECONDARY | rs-3:27017 SECONDARY
+
+```
+
+ด้วยสามเสียง ความล้มเหลวหนึ่งครั้งยังเหลือเสียงข้างมากสอง ด้วยสองเสียง ความล้มเหลวหนึ่งครั้งเหลือหนึ่งในสอง — ไม่มีเสียงข้างมาก ไม่มี primary
+
+## เชื่อมต่อกับ replica set
+
+driver เชื่อมต่อกับ *เซต*: ระบุ seed ไม่กี่ตัวและตั้งชื่อเซตด้วย `replicaSet=` มันค้นหา topology ที่เหลือ หา primary และตามมันข้าม election ไปได้ Node driver ภายใน lab network (output *3-node* — การอ่าน 20 ครั้งด้วย `secondaryPreferred` ถูกให้บริการโดยสอง secondary):
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```bash
-    mongosh "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    # scripts/rs-connect.sh
+    mongosh "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/rs-connect.mjs @skip-verify needs the 3-node replica set (run inside the lab network)
     import { MongoClient } from "mongodb";
 
-    const uri =
-      "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0";
+    const uri = "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3";
     const client = new MongoClient(uri);
     await client.connect();
+    const hello = await client.db("admin").command({ hello: 1 });
+    console.log({ setName: hello.setName, primary: hello.primary, hosts: hello.hosts });
+
+    const members = client.db("lib").collection("members", { readPreference: "secondaryPreferred" });
+    const served = new Set();
+    for (let i = 0; i < 20; i++) served.add((await members.find({}).explain()).serverInfo.host);
+    console.log("reads served by:", [...served].sort());
+    await client.close();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     from pymongo import MongoClient
 
-    uri = "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    uri = "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3"
     client = MongoClient(uri)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    uri := "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0"
+    uri := "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3"
     client, err := mongo.Connect(options.Client().ApplyURI(uri))
     if err != nil {
         return err
@@ -85,109 +236,152 @@ driver ไม่ได้ต่อกับ server ตัวใดตัวห�
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let uri = "mongodb://host1:27017,host2:27017,host3:27017/?replicaSet=rs0";
+    let uri = "mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3";
     let client = Client::with_uri_str(uri).await?;
     ```
   </TabItem>
 </Tabs>
 
-ค่า default การอ่านก็ไปที่ primary เหมือนกัน ผลคือได้ strongly consistent ถ้าคุณยอมรับความล้าสมัยเล็กน้อยได้ — เช่น สำหรับ analytics หรือ feed ที่ไม่จำเป็นต้องได้ write ล่าสุดที่สุด — คุณสามารถบอก driver ให้อ่านจาก secondaries ด้วย read preference เช่น `secondaryPreferred` เพื่อกระจายภาระการอ่านออกจาก primary
+```text
+{
+  setName: 'rsb3',
+  primary: 'rs-1:27017',
+  hosts: [ 'rs-1:27017', 'rs-2:27017', 'rs-3:27017' ]
+}
+reads served by: [ 'rs-2', 'rs-3' ]
 
-## การตรวจสอบ set
+```
 
-จาก `mongosh` ที่เชื่อมต่ออยู่กับสมาชิกตัวใดก็ได้ `rs.status()` รายงานสถานะสด ๆ ของทั้ง set: ใครเป็น primary, ใครเป็น secondary และสมาชิกแต่ละตัวตามอยู่ห่างแค่ไหน นี่คือคำสั่งแรกที่คุณรันเมื่อมีอะไรดูผิดปกติ
+โดยค่าเริ่มต้นการอ่านไปที่ primary ซึ่งทำให้ consistent อย่างเข้ม เพื่อกระจายโหลดอ่านคุณเลือก read preference เช่น `secondaryPreferred` ได้ — แต่มีราคา ดังที่แสดงต่อไป
+
+## secondary อาจล้าหลัง
+
+secondary หนึ่งตัว (`rs-2`) ถูกแช่แข็งด้วย `db.fsyncLock()` — แทน member ที่ lag — ขณะที่ order ถูกเขียนลง primary และอ่านกลับทันทีสามวิธี (Node, *3-node*):
 
 ```js
-rs.status()
+// app/rs-stale-read.mjs @skip-verify needs the 3-node replica set and a frozen secondary (real output below)
+const orders = client.db("shop").collection("orders");
+const direct = new MongoClient("mongodb://rs-2:27017/?directConnection=true", { readPreference: "secondary" });
+await direct.connect();
+await orders.insertOne({ _id: "o-1", total: 42 });
+console.log("bug   (read the frozen secondary):", await direct.db("shop").collection("orders").findOne({ _id: "o-1" }));
+console.log("fix 1 (read the primary)         :", await orders.findOne({ _id: "o-1" }, { readPreference: "primary" }));
+// fix 2: causal consistency - the read waits for the secondary to reach the write
+const session = client.startSession({ causalConsistency: true });
+await orders.insertOne({ _id: "o-2", total: 7 }, { session, writeConcern: { w: "majority" } });
+await orders.findOne({ _id: "o-2" }, { session, readPreference: "secondary", readConcern: { level: "majority" }, maxTimeMS: 2000 });
 ```
 
-ผลลัพธ์แบบย่อแสดงสมาชิกแต่ละตัวพร้อมบทบาทในฟิลด์ `stateStr`:
+```text
+bug   (read the frozen secondary): null
+fix 1 (read the primary)         : { _id: 'o-1', total: 42 }
+fix 2 (causal session, secondary) : served by a caught-up secondary in 40 ms
 
-```json
-{
-  "set": "rs0",
-  "members": [
-    { "name": "host1:27017", "stateStr": "PRIMARY", "health": 1 },
-    { "name": "host2:27017", "stateStr": "SECONDARY", "health": 1 },
-    { "name": "host3:27017", "stateStr": "SECONDARY", "health": 1 }
-  ],
-  "ok": 1
-}
 ```
 
-**ใน Atlas:** ทุก cluster เป็น replica set อยู่แล้ว — คุณไม่ต้องตั้งค่าด้วยมือ มุมมอง cluster แสดงว่า node ไหนเป็น primary และให้คุณดู replication lag บนกราฟได้ และ failover เป็นการทดสอบแบบคลิกเดียวที่คุณ trigger ได้เพื่อดู election เกิดขึ้น
+การเขียนถูก acknowledge (`w: "majority"` โดยค่าเริ่มต้น — secondary อีกตัวและ primary มีมัน) แต่ secondary ที่ถูกแช่แข็งคืน `null` session แบบ causally consistent ให้การรับประกัน read-your-writes บน secondary: การอ่านถูกให้บริการโดยสมาชิกที่ตามการเขียนทันแล้วเท่านั้น — ที่นี่คือ `rs-3` ที่ปกติ ใน 40 ms — แทนที่จะเป็น `rs-2` ที่ถูกแช่แข็ง
+
+**ใน Atlas:** cluster ของ Atlas คือ replica set (ใน sharded cluster แต่ละ shard คือหนึ่งเซต — [Manage clusters](https://www.mongodb.com/docs/atlas/manage-clusters/)) และ *Test Failover* กระตุ้น election ให้คุณ
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ให้มีจำนวนสมาชิกที่ลงคะแนนเป็น **เลขคี่** เพื่อให้การล้มเหลวครั้งเดียวเหลือเสียงข้างมากที่ชัดเจนเสมอ สามตัวคือขั้นต่ำที่นิยมใช้สำหรับ production
-- **arbiter** คือสมาชิกขนาดเบาที่ลงคะแนนแต่ไม่ถือข้อมูล ช่วยตัดสินกรณีคะแนนเสมอได้แบบประหยัด แต่ขึ้นเป็น primary ไม่ได้ และไม่ได้เพิ่มความทนทานของข้อมูล ดังนั้นให้เลือก secondary จริงที่ถือข้อมูลเมื่อคุณมีพื้นที่จัดเก็บพอ
-- secondaries มี lag ถ้าแอปพลิเคชันของคุณอ่าน write ของตัวเองทันทีหลังจากเขียน ให้อ่านจาก primary หรือใช้ read concern ที่รอให้ write ทำ replication เสร็จ ไม่เช่นนั้นคุณอาจยังไม่เห็นการเปลี่ยนแปลงของตัวเอง
-- replica set ป้องกัน node ที่ล้มเหลว ไม่ได้ป้องกัน query ที่ผิดหรือ collection ที่ถูกลบทิ้ง — สิ่งเหล่านั้นถูก replicate ตามไปด้วย replication คือ availability ไม่ใช่ backup
+- ใช้จำนวนสมาชิกที่โหวตได้เป็น **เลขคี่**: สามทนล้มได้หนึ่ง ห้าทนได้สอง
+- **arbiter** โหวตแต่ไม่เก็บข้อมูล มันเป็น primary ไม่ได้และไม่เพิ่มความคงทน และยังเปลี่ยน write concern เริ่มต้นด้วย (ดูบท read/write concerns)
+- **secondary lag** ถ้าแอปอ่านสิ่งที่เพิ่งเขียนทันที ให้อ่านจาก primary หรือใช้ session แบบ causally consistent (พิสูจน์ข้างบน)
+- Replication คือ availability ไม่ใช่ backup: `deleteMany` ที่ผิดก็ replicate ไปด้วย
+- **การล่มไม่เหมือนการหยุดอย่างสะอาด** เผื่อเวลาที่การเขียนหยุดราวสิบวินาทีสำหรับความล้มเหลวจริง
 
-<Callout title="Availability ผ่านสำเนาและการลงคะแนน">
-replica set เก็บข้อมูลของคุณหลายสำเนาให้ซิงค์กันผ่าน oplog และเลือก primary ใหม่ด้วยคะแนนเสียงข้างมากเมื่อตัวเดิมล้มเหลว ใช้จำนวนผู้ลงคะแนนเป็นเลขคี่เพื่อให้การล้มเหลวครั้งเดียวไม่เคยทำให้เสมอกัน
+<Callout title="Availability ผ่านสำเนาและเสียงโหวต">
+replica set รักษาสำเนาให้ sync กันผ่าน oplog และเลือก primary ใหม่ด้วยเสียงข้างมาก primary ที่ล่มทำให้การเขียนหนึ่งครั้งค้างราวสิบวินาที ตัวที่ถูกหยุดค้างไม่ถึงครึ่งวินาที และการเสียเสียงข้างมากทำให้ทุกการเขียนล้มเหลว
 </Callout>
 
-## ข้อแลกเปลี่ยน
+## Reading AI-generated code
 
-| ตัวเลือก | Benefit | Cost |
+ผู้ช่วย AI ขยายการอ่านโดยส่งไป secondary และเขียนคอมเมนต์อย่างมั่นใจ:
+
+<SpotTheBug lang="js" code={`// AI comment: "the insert is acknowledged, so reading it back from a secondary is safe"
+await orders.insertOne({ _id: "o-1", total: 42 });
+const saved = await ordersOnSecondary.findOne({ _id: "o-1" });   // readPreference: "secondary"
+if (!saved) throw new Error("order lost");`}>
+
+การเขียนที่ถูก acknowledge อยู่บน primary และเสียงข้างมาก — ไม่จำเป็นต้องอยู่บน secondary ตัว *นั้น* ที่คุณอ่าน ใน lab secondary ที่ถูกแช่แข็งคืน `null` สำหรับการเขียนที่ acknowledge ไปแล้ว และโค้ดข้างบนจะรายงาน order หายทั้งที่ไม่ได้หาย อ่านสิ่งที่เพิ่งเขียนจาก primary หรือใช้ session แบบ causally consistent (`causalConsistency: true`) การรันข้างบนแสดงบั๊ก การอ่านจาก primary และการอ่านแบบ causal เคียงข้างกัน
+
+</SpotTheBug>
+
+## Mental Model
+
+replica set คือ **log ที่เป็นทางการหนึ่งชุด (oplog) กับสำเนาหลายตัวที่เล่นตามมัน** โดยมีการโหวตตัดสินว่าใครเป็นเจ้าของ log การเขียนไปที่เจ้าของ log; สำเนาตามหลังเล็กน้อยเสมอ; การโหวตต้องการเสียงข้างมากเด็ดขาดของผู้โหวตทั้งหมด ไม่ว่าจะยังอยู่หรือไม่ failover ไม่ทันทีเพราะที่เหลือต้องตัดสินก่อนว่าเจ้าของหายไปจริง — การตัดสินนั้นคือสิ่งที่ timeout สิบวินาทีซื้อไว้
+
+## Trade-offs
+
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| Replica set (เทียบ `mongod` เดี่ยว) | Automatic failover, ไม่มี downtime ยาวเมื่อ primary ล้มเหลว | ต้องรัน node เพิ่มอย่างน้อยสามตัว, write ยังคอขวดที่ primary เดียวเสมอ |
-| อ่านจาก secondaries | กระจายภาระ read ออกจาก primary | ข้อมูลที่ได้อาจ stale เพราะ replication lag |
-| อ่านจาก primary เท่านั้น | Consistency สูงสุด อ่าน write ล่าสุดเสมอ | ไม่ได้ประโยชน์จากการกระจายโหลด primary รับภาระเต็ม |
+| Replica set (เทียบกับ `mongod` ตัวเดียว) | failover อัตโนมัติ; วัดได้หยุดราว 10.8 วินาทีเมื่อล่ม, 0.3 วินาทีเมื่อหยุดอย่างสะอาด | ต้องรันอย่างน้อยสามโหนด; การเขียนยังคอขวดที่ primary ตัวเดียว |
+| อ่านจาก secondary | กระจายโหลดอ่านออกจาก primary | พิสูจน์ข้างบน: การเขียนที่ acknowledge แล้วมองไม่เห็นบน secondary ที่ lag |
+| อ่านจาก primary เท่านั้น | ได้การเขียนล่าสุดเสมอ | primary รับโหลดทั้งหมด |
+| จำนวนผู้โหวตเป็นเลขคู่ | ใช้เครื่องน้อยกว่าเลขคี่ถัดไป | ความล้มเหลวเดียวอาจไม่เหลือเสียงข้างมาก |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า write scale ได้ด้วยการเพิ่ม secondary** — secondary ช่วยกระจายเฉพาะ read เท่านั้น ทุก write ยังคงไปที่ primary ตัวเดียวเสมอ ถ้าต้องการ scale write ต้องไปที่ sharding ไม่ใช่การเพิ่ม secondary
-- **วางสมาชิกทุกตัวไว้ใน availability zone หรือ data center เดียวกัน** — replica set ป้องกัน node ล้มเหลว แต่ถ้าทุก node อยู่ที่เดียวกัน เมื่อ AZ ทั้งก้อนล่ม set ทั้งชุดก็ล่มไปด้วย ต้องกระจายสมาชิกข้าม AZ หรือ data center จริง ๆ
-- **คิดว่า write ปลอดภัยแล้วทันทีที่ primary รับ** — ตั้งแต่ MongoDB 5.0 (2021) เป็นต้นมา write concern เริ่มต้นคือ `w: "majority"` คือรอให้สมาชิกส่วนใหญ่ที่มีสิทธิ์ลงคะแนน (voting members) ยืนยันก่อน ไม่ใช่ยืนยันแค่ที่ primary เท่านั้น ความผิดพลาดคือการเข้าใจว่า write durable แล้วตั้งแต่ primary รับ ทั้งที่ค่า default จะรอ majority ให้อยู่แล้ว ถ้าไปตั้ง `w: 1` เอง write ที่ยังไม่ replicate อาจหายไปพร้อม election ได้ ข้อมูลสำคัญจึงควรคง `{ w: "majority" }` ไว้
+- **"เพิ่ม secondary แล้วการเขียน scale"** — ทุกการเขียนไปที่ primary ตัวเดียว; secondary scale เฉพาะการอ่าน การ scale การเขียนคือ sharding
+- **"failover ใช้เวลาแค่วินาทีสองวินาที"** — การล่มทำให้การเขียนหนึ่งครั้งค้างราว 10.8 วินาที (ปิดสะอาด 0.3 วินาที); manual บอกว่าค่ามัธยฐานไม่ควรเกิน 12 วินาที
+- **"การเขียนที่ acknowledge แล้วมองเห็นได้ทุกที่"** — มองเห็นบน primary และเสียงข้างมาก; secondary ตัวใดตัวหนึ่งอาจล้าหลัง (`null` ข้างบน)
+- **"สองโหนดก็พอสำหรับ HA"** — ด้วยสองผู้โหวต ความล้มเหลวหนึ่งครั้งเหลือหนึ่งในสอง และตัวที่รอดยังเป็น secondary
+- **"replica คือ backup"** — collection ที่ถูก drop ก็ replicate ไปด้วย
+- **"ทุกสมาชิกอยู่ใน availability zone เดียวไม่เป็นไร"** — replica set ป้องกันโหนดล้ม ไม่ใช่ zone ล้ม กระจายสมาชิกข้าม zone
 
-> 💡 ตัวอย่างจากของจริง
->
-> **ระบบ ride-hailing/booking ทั่วไป** — พึ่ง replica set กับ automatic failover เพื่อให้ trip data ยังเขียนต่อได้แม้ node ใดตัวหนึ่งล้มเหลวกลางดึกโดยไม่ต้องปลุกใครมาแก้
->
-> **MongoDB Atlas** — ทุก cluster เป็น replica set อย่างน้อยสาม node กระจายข้าม availability zone โดยอัตโนมัติ และมีปุ่มทดสอบ failover ให้ลองกดดูผลจริงได้โดยไม่ต้องรอเหตุการณ์จริงเกิดขึ้นก่อน
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่ตรวจแล้วใน shell/Node; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizReplica = [
   {
-    q: 'secondaries ทำให้ข้อมูลตัวเองซิงค์กับ primary ได้อย่างไร?',
+    q: 'secondary ทำให้ข้อมูลของตัวเองตรงกับ primary ได้อย่างไร?',
     options: [
-      'คัดลอกไฟล์ของ primary ตามตารางเวลาที่ตั้งไว้',
-      'อ่าน oplog ของ primary ต่อท้ายแล้วเล่นซ้ำทีละ operation',
+      'คัดลอกไฟล์ของ primary ตามกำหนดเวลา',
+      'ตาม oplog ของ primary และเล่นแต่ละ operation ซ้ำ',
       'ส่งต่อทุกการอ่านไปที่ primary',
-      're-import ทั้ง collection ใหม่ทุกนาที',
+      'import ทั้ง collection ใหม่ทุกนาที',
     ],
     answer: 1,
+    explain: 'oplog entry ของ insertOne แสดง op "i", document ใน o และ ts/t สำหรับเรียงลำดับ; secondary เล่นสิ่งเหล่านี้ซ้ำ',
   },
   {
-    q: 'จะเกิดอะไรขึ้นเมื่อ primary ล้มเหลว?',
+    q: 'คุณ docker kill (SIGKILL) primary ของเซต 3 โหนดขณะ writer insert ด้วย w: "majority" การรันจริงแสดงอะไร?',
     options: [
-      'ฐานข้อมูลหยุดรับ write จนกว่า admin จะเข้ามาแทรกแซง',
-      'สมาชิกที่เหลือจัด election และเลื่อนตำแหน่ง secondary ขึ้นเป็น primary',
-      'secondaries ทั้งหมดกลายเป็น primaries พร้อมกัน',
-      'oplog ถูกลบและสร้างใหม่',
+      'writer ล้มเหลวทันทีด้วย error',
+      'insert หนึ่งครั้งค้างราว 10.8 วินาทีแล้วสำเร็จบน primary ใหม่',
+      'ไม่มีอะไร: failover ทันที',
+      'การเขียนหายเงียบ ๆ',
     ],
     answer: 1,
+    explain: 'election timeout ค่าเริ่มต้นคือ 10 วินาที; driver retry การเขียนเมื่อมี primary ส่วน docker stop แบบสะอาดค้างเพียง ~0.3 วินาที',
   },
   {
-    q: 'ทำไมจึงแนะนำให้มีจำนวนสมาชิกที่ลงคะแนนเป็นเลขคี่?',
+    q: 'ทำไมแนะนำจำนวนสมาชิกที่โหวตได้เป็นเลขคี่?',
     options: [
       'ทำให้ oplog เล็กลง',
-      'เพื่อให้การล้มเหลวครั้งเดียวยังเหลือเสียงข้างมากที่ชัดเจนและหลีกเลี่ยงการลงคะแนนที่เสมอกัน',
-      'driver เชื่อมต่อได้เฉพาะกับ set ที่มีจำนวนเป็นเลขคี่',
-      'MongoDB ไม่อนุญาตให้ใช้เลขคู่',
+      'ความล้มเหลวหนึ่งครั้งยังเหลือเสียงข้างมากเด็ดขาด; ด้วยสองผู้โหวต ความล้มเหลวหนึ่งครั้งไม่เหลือเสียงข้างมาก',
+      'driver เชื่อมต่อได้เฉพาะเซตที่มีจำนวนคี่',
+      'ไม่อนุญาตจำนวนคู่',
     ],
     answer: 1,
+    explain: 'เมื่อ 2 จาก 3 สมาชิกถูกหยุด ตัวที่รอดยังเป็น SECONDARY และปฏิเสธการเขียน (NotWritablePrimary)',
   },
   {
-    q: 'การอ่านจาก secondary อาจคืนข้อมูลที่ล้าสมัยเล็กน้อยเพราะ:',
+    q: 'insert ถูก acknowledge แล้ว คุณอ่านจาก secondary ได้ null คำอธิบายไหนเข้ากัน?',
     options: [
-      'secondaries เก็บสำเนาข้อมูลแบบบีบอัด',
-      'มี replication lag ระหว่าง write บน primary กับตอนเล่นซ้ำบน secondaries',
-      'secondaries ถือ document เพียงครึ่งเดียว',
-      'secondaries ปฏิเสธการอ่านทั้งหมด',
+      'การเขียนหาย',
+      'secondary ตัวนั้นยังไม่ได้ apply การเขียน (replication lag)',
+      'secondary เก็บแค่ครึ่งหนึ่งของ document',
+      'secondary ปฏิเสธการอ่าน',
     ],
     answer: 1,
+    explain: 'secondary ที่ถูกแช่แข็งคืน null ขณะที่ primary มี order; การอ่านแบบ causally consistent ถูกตอบโดย secondary ที่ตามทันใน 40 ms',
+  },
+  {
+    q: 'heartbeat interval และ election timeout เริ่มต้นคืออะไร?',
+    options: ['2 วินาทีและ 10 วินาที', '10 วินาทีและ 2 วินาที', '30 วินาทีและ 60 วินาที', '1 วินาทีและ 1 วินาที'],
+    answer: 0,
+    explain: 'rs.conf().settings พิมพ์ heartbeatIntervalMillis 2000 และ electionTimeoutMillis 10000',
   },
 ]
 
