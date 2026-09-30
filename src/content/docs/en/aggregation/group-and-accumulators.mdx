@@ -1,6 +1,6 @@
 ---
 title: $group and accumulators
-description: Fold documents into groups by a key and summarise each group with accumulators like $sum, $avg, $min, $max, $push, and $addToSet, plus grand totals with _id null.
+description: "Fold documents into groups by a key and summarise each group with accumulators - $sum, $avg, $min, $max, $push, $addToSet, $first and $bottom - with the traps proven on 200 000 orders: unordered output, $first without a sort, and the 100 MB memory limit."
 sidebar:
   order: 3
 ---
@@ -9,15 +9,40 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-`$group` is where aggregation earns its name. It collapses many documents into one document **per distinct value** of a key you choose, and for each group it computes summaries with **accumulators**. This is the stage that answers "how many per genre," "average price per buyer," "biggest order per title." If you have written `GROUP BY` in SQL, the instinct is the same; the spelling is different.
+`$group` is where aggregation earns its name. It collapses many documents into one document **per distinct value** of a key you choose, and for each group it computes summaries with **accumulators**. This is the stage that answers "how many per genre", "average price per quantity", "cheapest title per genre". If you have written `GROUP BY` in SQL the instinct is the same; the spelling is different.
 
-We stay with the `sales` collection from the previous lessons.
+The lesson seeds the module's `sales` collection (200 000 orders `{ title, genre, quantity, price, buyer }`) and the `aplan()` helper from the module intro. Output was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program.
+
+```js
+// mongosh/grp-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.aplan = (pipeline) => {               // one line per aggregate explain: what the first stage read, then the stages left in the pipeline
+  const e = db.sales.explain("executionStats").aggregate(pipeline);
+  const cursor = e.stages ? e.stages[0].$cursor : e, rest = e.stages ? e.stages.slice(1).map((s) => Object.keys(s)[0]) : [];
+  const chain = (p) => { const out = []; for (p = p.queryPlan ?? p; p; p = p.inputStage) out.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : "")); return out.join(" > "); };
+  const s = cursor.executionStats;
+  return chain(cursor.queryPlanner.winningPlan) + "  keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + (rest.length ? "  | left in pipeline: " + rest.join(" > ") : "");
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.sales.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;                                          // 500 titles, 5 genres, quantity 1..5, price 5..25, 1000 buyers (pseudo-random but repeatable)
+    return { title: "T" + (i % 500), genre: genres[(i % 500) % 5], quantity: 1 + ((Math.imul(i, 2654435761) >>> 0) % 5), price: 5 + ((Math.imul(i, 40503) >>> 0) % 21), buyer: "b" + (i % 1000) };
+  }), { ordered: false });
+}
+db.sales.createIndex({ price: 1 });
+console.log("sales:", db.sales.countDocuments(), "orders");
+```
+
+```text
+sales: 200000 orders
+```
 
 ## Grouping by a key
 
-The `_id` of a `$group` stage is the grouping key — the field (or computed value) that documents are bucketed by. Every other field in the stage is an **accumulator**: an expression that folds all the documents in a group into a single value. Here we total the quantity sold per genre and also count the orders:
+The `_id` of a `$group` stage is the grouping key - the field or computed value documents are bucketed by. Every other field is an **accumulator**: an expression that folds all documents of a group into one value. Here we total the copies per genre and count the orders (the trailing `$sort` is only there to make the printed order stable - more on that below). The Node.js tab runs on a three-order collection:
 
 export const groupFlow = `flowchart LR
   In["sales documents"] --> G["$group _id genre"]
@@ -29,24 +54,30 @@ export const groupFlow = `flowchart LR
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $group: {
-          _id: "$genre",
-          totalCopies: { $sum: "$quantity" },
-          orders: { $sum: 1 }
-      } }
-    ])
+    // mongosh/grp-by-genre.js
+    const rows = db.sales.aggregate([
+      { $group: { _id: "$genre", totalCopies: { $sum: "$quantity" }, orders: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]).toArray();
+    console.log(rows);
+    assert.strictEqual(rows.reduce((n, r) => n + r.orders, 0), 200000);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
-      { $group: {
-          _id: "$genre",
-          totalCopies: { $sum: "$quantity" },
-          orders: { $sum: 1 },
-      } },
+    // app/grp-by-genre.mjs
+    const sales = db.collection("sales");
+    await sales.insertMany([
+      { title: "Dune", genre: "fiction", quantity: 3, price: 12, buyer: "Ada" },
+      { title: "Dune", genre: "fiction", quantity: 4, price: 12, buyer: "Linus" },
+      { title: "Cosmos", genre: "science", quantity: 5, price: 20, buyer: "Ada" },
+    ]);
+    const rows = await sales.aggregate([
+      { $group: { _id: "$genre", totalCopies: { $sum: "$quantity" }, orders: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
     ]).toArray();
+    console.log(rows);
+    if (rows[0]._id !== "fiction" || rows[0].totalCopies !== 7 || rows[0].orders !== 2) throw new Error("unexpected group");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,259 +88,255 @@ export const groupFlow = `flowchart LR
             "totalCopies": {"$sum": "$quantity"},
             "orders": {"$sum": 1},
         }},
+        {"$sort": {"_id": 1}},
     ]))
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$group", bson.D{
-            {"_id", "$genre"},
-            {"totalCopies", bson.D{{"$sum", "$quantity"}}},
-            {"orders", bson.D{{"$sum", 1}}},
+        {{Key: "$group", Value: bson.D{
+            {Key: "_id", Value: "$genre"},
+            {Key: "totalCopies", Value: bson.D{{Key: "$sum", Value: "$quantity"}}},
+            {Key: "orders", Value: bson.D{{Key: "$sum", Value: 1}}},
         }}},
+        {{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$group": {
-            "_id": "$genre",
-            "totalCopies": { "$sum": "$quantity" },
-            "orders": { "$sum": 1 }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$group": {
+                "_id": "$genre",
+                "totalCopies": { "$sum": "$quantity" },
+                "orders": { "$sum": 1 },
+            } },
+            doc! { "$sort": { "_id": 1 } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-One document comes back per genre, each carrying its summaries:
-
-```json
+```text
 [
-  { "_id": "fiction", "totalCopies": 11, "orders": 4 },
-  { "_id": "science", "totalCopies": 5, "orders": 2 }
+  { _id: 'comics', totalCopies: 120002, orders: 40000 },
+  { _id: 'fiction', totalCopies: 120000, orders: 40000 },
+  { _id: 'history', totalCopies: 119995, orders: 40000 },
+  { _id: 'poetry', totalCopies: 120001, orders: 40000 },
+  { _id: 'science', totalCopies: 119995, orders: 40000 }
+]
+```
+
+```text
+[
+  { _id: 'fiction', totalCopies: 7, orders: 2 },
+  { _id: 'science', totalCopies: 5, orders: 1 }
 ]
 ```
 
 ## The common accumulators
 
-A handful of accumulators cover most needs. They all take an expression evaluated against each document in the group:
+- `$sum` - adds a numeric expression, or counts with `$sum: 1`.
+- `$avg` - the mean.
+- `$min` / `$max` - smallest and largest value.
+- `$push` - every value into an array, duplicates included.
+- `$addToSet` - **distinct** values into an array.
+- `$first` / `$last` - value from the first/last document **in the current order**.
+- `$top` / `$bottom` (5.2+) - value from the top/bottom document of an explicit `sortBy`.
 
-- `$sum` — adds up a numeric expression, or counts with `$sum: 1`.
-- `$avg` — the mean of a numeric expression.
-- `$min` / `$max` — the smallest and largest value seen.
-- `$push` — collects every value into an array, duplicates included.
-- `$addToSet` — collects **distinct** values into an array.
+Grouping by `quantity` (1-5) and profiling each group. `$push` and `$addToSet` are turned into sizes so the output fits: 1 000 distinct buyers, but about 40 000 pushed (duplicates kept):
 
-A dedicated `$count` stage also exists for the special case of "just count the documents." Here we profile each genre more fully — average price, the price range, and the set of buyers:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $group: {
-          _id: "$genre",
-          avgPrice: { $avg: "$price" },
-          cheapest: { $min: "$price" },
-          priciest: { $max: "$price" },
-          buyers: { $addToSet: "$buyer" }
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $group: {
-          _id: "$genre",
-          avgPrice: { $avg: "$price" },
-          cheapest: { $min: "$price" },
-          priciest: { $max: "$price" },
-          buyers: { $addToSet: "$buyer" },
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$group": {
-            "_id": "$genre",
-            "avgPrice": {"$avg": "$price"},
-            "cheapest": {"$min": "$price"},
-            "priciest": {"$max": "$price"},
-            "buyers": {"$addToSet": "$buyer"},
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$group", bson.D{
-            {"_id", "$genre"},
-            {"avgPrice", bson.D{{"$avg", "$price"}}},
-            {"cheapest", bson.D{{"$min", "$price"}}},
-            {"priciest", bson.D{{"$max", "$price"}}},
-            {"buyers", bson.D{{"$addToSet", "$buyer"}}},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$group": {
-            "_id": "$genre",
-            "avgPrice": { "$avg": "$price" },
-            "cheapest": { "$min": "$price" },
-            "priciest": { "$max": "$price" },
-            "buyers": { "$addToSet": "$buyer" }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-Each genre now has a full profile, and `buyers` holds each name only once:
-
-```json
-[
-  { "_id": "fiction", "avgPrice": 12.5, "cheapest": 9, "priciest": 15, "buyers": ["Ada", "Linus"] },
-  { "_id": "science", "avgPrice": 20, "cheapest": 18, "priciest": 22, "buyers": ["Grace"] }
-]
+```js
+// mongosh/grp-accumulators.js
+const rows = db.sales.aggregate([
+  { $group: { _id: "$quantity", avgPrice: { $avg: "$price" }, cheapest: { $min: "$price" }, priciest: { $max: "$price" },
+              buyers: { $addToSet: "$buyer" }, allBuyers: { $push: "$buyer" } } },
+  { $project: { avgPrice: { $round: ["$avgPrice", 2] }, cheapest: 1, priciest: 1, distinctBuyers: { $size: "$buyers" }, pushedBuyers: { $size: "$allBuyers" } } },
+  { $sort: { _id: 1 } },
+]).toArray();
+console.log(rows.map((r) => JSON.stringify(r)).join("\n"));
+assert.strictEqual(rows.length, 5);
+assert.ok(rows.every((r) => r.distinctBuyers <= 1000 && r.pushedBuyers > r.distinctBuyers));       // $push keeps duplicates, $addToSet does not
 ```
 
-**In Compass:** the `$group` stage in the **Aggregations** tab gives you the same `_id` and accumulator structure. The preview is handy here — change the `_id` expression and watch the number of result documents change as the grouping coarsens or splits.
+```text
+{"_id":1,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":40001}
+{"_id":2,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":39999}
+{"_id":3,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":40002}
+{"_id":4,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":40002}
+{"_id":5,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":39996}
+```
 
-## Grand totals with _id null
+**In Compass:** the `$group` stage in the **Aggregations** tab gives you the same `_id` and accumulator structure; change the `_id` expression and watch the number of result documents change.
 
-Set the group `_id` to `null` and every document falls into a **single** group, giving you a grand total across the whole stream. This is how you compute "total revenue" or "overall average" with no per-key split:
+## Group output is not sorted
 
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $group: {
-          _id: null,
-          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
-          totalOrders: { $sum: 1 }
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $group: {
-          _id: null,
-          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
-          totalOrders: { $sum: 1 },
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$group": {
-            "_id": None,
-            "totalRevenue": {"$sum": {"$multiply": ["$price", "$quantity"]}},
-            "totalOrders": {"$sum": 1},
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$group", bson.D{
-            {"_id", nil},
-            {"totalRevenue", bson.D{{"$sum", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}}}},
-            {"totalOrders", bson.D{{"$sum", 1}}},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$group": {
-            "_id": null,
-            "totalRevenue": { "$sum": { "$multiply": ["$price", "$quantity"] } },
-            "totalOrders": { "$sum": 1 }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
+```js
+// mongosh/grp-unordered.js
+const ids = db.sales.aggregate([{ $group: { _id: "$title", n: { $sum: 1 } } }]).toArray().map((r) => r._id);
+console.log("first ten groups, exactly as returned:", ids.slice(0, 10).join(" "));
+const sorted = [...ids].sort();
+console.log("returned in sorted order?", ids.every((v, i) => v === sorted[i]));
+```
 
-A single summary document represents the whole collection:
+```text
+first ten groups, exactly as returned: T455 T50 T153 T381 T35 T164 T335 T372 T416 T129
+returned in sorted order? false
+```
 
-```json
-[
-  { "_id": null, "totalRevenue": 248, "totalOrders": 6 }
-]
+The groups come back in an order the server chose (here a hash-table walk), and a later run or version may differ. If you need an order, add `$sort` after `$group`.
+
+## $first needs a $sort
+
+`$first` returns the value from whichever document reaches the group first. The manual says it is "only meaningful when documents are in a defined order" and to "add a preceding `$sort` stage" ([$first](https://www.mongodb.com/docs/manual/reference/operator/aggregation/first/), consulted 2026-09-30). Cheapest title per genre three ways:
+
+```js
+// mongosh/grp-first.js
+const cheapestFirst = db.sales.aggregate([
+  { $sort: { price: 1, _id: 1 } },
+  { $group: { _id: "$genre", cheapestTitle: { $first: "$title" }, price: { $first: "$price" } } },
+  { $sort: { _id: 1 } },
+]).toArray();
+const noSort = db.sales.aggregate([
+  { $group: { _id: "$genre", firstTitleSeen: { $first: "$title" }, price: { $first: "$price" } } },
+  { $sort: { _id: 1 } },
+]).toArray();
+const top = db.sales.aggregate([
+  { $group: { _id: "$genre", cheapest: { $bottom: { sortBy: { price: -1, _id: 1 }, output: ["$title", "$price"] } } } },   // $bottom of a descending sort = smallest price
+  { $sort: { _id: 1 } },
+]).toArray();
+console.log("$sort then $first :", cheapestFirst.map((r) => r._id + " " + r.cheapestTitle + " $" + r.price).join(" | "));
+console.log("$first, no sort   :", noSort.map((r) => r._id + " " + r.firstTitleSeen + " $" + r.price).join(" | "));
+console.log("$bottom (5.2+)    :", top.map((r) => r._id + " " + r.cheapest[0] + " $" + r.cheapest[1]).join(" | "));
+assert.ok(cheapestFirst.every((r) => r.price === 5));
+```
+
+```text
+$sort then $first : comics T14 $5 | fiction T0 $5 | history T7 $5 | poetry T28 $5 | science T21 $5
+$first, no sort   : comics T4 $23 | fiction T0 $5 | history T2 $14 | poetry T3 $8 | science T1 $20
+$bottom (5.2+)    : comics T29 $5 | fiction T15 $5 | history T22 $5 | poetry T8 $5 | science T36 $5
+```
+
+## Counting and grand totals
+
+Set `_id` to `null` and every document falls into one group. `$count` and `$sortByCount` are shorthands for the two commonest groups:
+
+```js
+// mongosh/grp-count.js
+console.log("grand total   :", db.sales.aggregate([{ $group: { _id: null, revenue: { $sum: { $multiply: ["$price", "$quantity"] } }, orders: { $sum: 1 } } }]).toArray());
+console.log("$count stage  :", db.sales.aggregate([{ $match: { genre: "poetry" } }, { $count: "poetryOrders" }]).toArray());
+console.log("$sortByCount  :", db.sales.aggregate([{ $sortByCount: "$genre" }]).toArray().slice(0, 2), "...");
+console.log("empty input   :", db.sales.aggregate([{ $match: { genre: "none" } }, { $group: { _id: null, n: { $sum: 1 } } }]).toArray(), "<- no group at all, not n: 0");
+```
+
+```text
+grand total   : [ { _id: null, revenue: 8963632, orders: 200000 } ]
+$count stage  : [ { poetryOrders: 40000 } ]
+$sortByCount  : [ { _id: 'poetry', count: 40000 }, { _id: 'history', count: 40000 } ] ...
+empty input   : [] <- no group at all, not n: 0
+```
+
+## Memory: when a group does not fit
+
+`$group` keeps its groups in memory (100 MB by default, `internalDocumentSourceGroupMaxMemoryBytes`). This run pushes every 1 KB pad of a 130 MB collection into 1 000 groups, so the working set exceeds the limit:
+
+```js
+// mongosh/grp-spill.js
+for (let s = 0; s < 130000; s += 10000) db.big.insertMany(Array.from({ length: 10000 }, (_, k) => ({ n: s + k, pad: "x".repeat(1000) })), { ordered: false });
+const p = [{ $group: { _id: { $mod: ["$n", 1000] }, pads: { $push: "$pad" }, docs: { $sum: 1 } } }, { $count: "groups" }];
+console.log("collection MB:", +(db.big.stats().size / 1048576).toFixed(0), "| $group holds every pad in memory (~130 MB > 100 MB limit)");
+let t = Date.now();
+console.log("default            ->", db.big.aggregate(p).toArray(), Date.now() - t, "ms");
+try { db.big.aggregate(p, { allowDiskUse: false }).toArray(); }
+catch (e) { console.log("allowDiskUse:false ->", e.codeName + ":", e.message.slice(e.message.indexOf("Exceeded"), e.message.indexOf("Exceeded") + 100)); }
+const e = db.big.explain("executionStats").aggregate(p.slice(0, 1));
+const find = (s) => (s.stage === "group" ? s : s.inputStage ? find(s.inputStage) : null);
+const g = find((e.stages ? e.stages[0].$cursor : e).executionStats.executionStages);
+console.log("explain, group stage:", { usedDisk: g.usedDisk, spills: g.spills, spilledBytesMB: Math.round(g.spilledBytes / 1048576), peakMB: +(g.peakTrackedMemBytes / 1048576).toFixed(0) });
+```
+
+```text
+collection MB: 129 | $group holds every pad in memory (~130 MB > 100 MB limit)
+default            -> [ { groups: 1000 } ] 192 ms
+allowDiskUse:false -> QueryExceededMemoryLimitNoDiskUseAllowed: Exceeded memory limit for $group, but didn't allow external spilling; pass allowDiskUse:true to opt 
+explain, group stage: { usedDisk: true, spills: 2, spilledBytesMB: 125, peakMB: 101 }
 ```
 
 ## Tips and gotchas
 
-- After `$group`, only the fields you produced exist. The original document fields are gone unless you carried them through with an accumulator like `$push` or `$first`.
-- `$sum: 1` is the idiomatic "count rows in this group." `$sum: "$quantity"` adds a field's values instead.
-- `$push` keeps duplicates and order; `$addToSet` removes duplicates and does not promise an order. Reach for `$addToSet` when you want a *distinct* list.
-- Grouping does not sort. If you want the largest group first, add a `$sort` stage after `$group`.
+- After `$group` only `_id` and the accumulators exist; carry other fields forward with `$first`, `$last`, `$push` or `$top`.
+- `$sum: 1` counts rows; `$sum: "$quantity"` adds values. An empty input produces no group at all.
+- `$push` keeps duplicates and order, `$addToSet` removes duplicates and promises no order.
+- Grouping does not sort; add `$sort` (with a unique tie-breaker) when order matters.
+- A group that outgrows 100 MB spills to disk by default; do not rely on that for hot paths - `$match` first and keep accumulators small.
 
 <Callout title="Group collapses, accumulators summarise">
-Picture $group as folding the stream by a key: one output document per distinct key. The accumulators decide what each fold remembers — a sum, an average, a set of values. Set _id to null to fold everything into one grand total.
+Picture `$group` as folding the stream by a key: one output document per distinct key. The accumulators decide what each fold remembers - a sum, an average, a set of values. Set `_id` to `null` to fold everything into one grand total.
 </Callout>
+
+## Reading AI-generated code
+
+Asked for "the cheapest title in each genre", an assistant writes:
+
+<SpotTheBug lang="js" code={`// AI comment: "$first takes the cheapest title per genre"
+db.sales.aggregate([
+  { $group: { _id: "$genre", cheapestTitle: { $first: "$title" }, price: { $first: "$price" } } },
+]);`}>
+
+There is no `$sort`, so `$first` is just "the first order the server happened to read". In the run above the unsorted version reported comics at **$23**, history at **$14** and science at **$20**, while every genre actually has $5 orders. Sorting before the group fixes it, and `$bottom` (or `$top`) says what you mean inside the accumulator; both returned $5 for all five genres, as the `first` block above shows. Note that the two correct answers can name different titles because many titles tie at $5 - add a tie-breaker (`_id`) to make the result repeatable.
+
+</SpotTheBug>
+
+## Mental Model
+
+`$group` is a hash map from key to accumulator state, fed by the stream. Two consequences: the map has no order (so no sorted output), and the state lives in memory (so its size, not the input size, decides whether it spills). Accumulators that depend on arrival order (`$first`, `$last`, `$push`) are only as deterministic as the order you gave them.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `$group` in the pipeline | Computes the summary server-side, returning only the collapsed result — saves bandwidth and client-side memory | Must be expressed as MongoDB expressions (accumulators), which can be more limited than logic written in application code |
-| Grouping in application code (pull everything, summarise yourself) | Fully flexible, use any library or logic you want | Must send every raw document over the network first — slow and memory-heavy at scale |
-| Exact accumulators like `$sum`, `$avg` | 100% accurate results, suitable for financial figures or reporting | Must scan/process every document in the group, heavier than an approximation |
+| `$group` in the pipeline | Returns only the collapsed result: 5 rows instead of 200 000 | Limited to MongoDB expressions; state must fit 100 MB or spill |
+| Grouping in application code | Any logic | Moves every raw document first |
+| `$sort` + `$first` | Deterministic pick | Sorts the whole stream first |
+| `$top` / `$bottom` | Sort and pick in one accumulator | MongoDB 5.2+ only |
+| `$push` of large values | Keeps everything | 130 MB working set spilled twice |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming original fields automatically survive after `$group`** — after `$group`, only `_id` and the accumulators you declared exist. Every other original field is gone unless pulled forward with `$first`, `$last`, or `$push`.
-- **Using `$push` when you actually want distinct values** — `$push` keeps duplicates and preserves order. For a list with no duplicates, use `$addToSet` instead of deduplicating afterward yourself.
-- **Expecting `$group` output to be sorted** — `$group` makes no promise about the order of the groups it produces. Append your own `$sort` afterward if you need a specific order.
+- **"Original fields survive `$group`."** - only `_id` and your accumulators do.
+- **"`$group` returns groups sorted by key."** - the ten first titles came back as T455 T50 T153 ... and were not in sorted order.
+- **"`$first` is the smallest value."** - it is the first document's value; unsorted it gave $23 where $5 existed.
+- **"A `$group` over the memory limit errors."** - it spilled to disk (2 spills) unless `allowDiskUse: false`.
+- **"An empty match gives `n: 0`."** - `$group` with `_id: null` over no documents returns `[]`.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A typical analytics dashboard** — computing "total sales per day" or "weekly active users" is commonly done with `$group` keyed by date/week and an accumulator like `$sum`, instead of pulling every raw event to count in the application server.
->
-> **A typical real estate sales report** — summarising sales per broker uses `$group` with `$sum` and `$avg` to compute transaction value and average sale price per person, without pulling the entire transaction history out to compute outside the database. Keller Williams uses this style of MongoDB aggregation pipeline to summarise more than 70 million listing records on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+> **Keller Williams (real estate)** - its data team uses the Aggregation Pipeline Builder in MongoDB Compass to summarise more than 70 million listing records on MongoDB Atlas with `$group`-style pipelines instead of exporting the raw records ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the per-genre group returned the same totals) but they are not executed by the course's automated checker._
 
 export const quizGroup = [
   {
     q: 'What does the _id field of a $group stage specify?',
     options: [
       'The name of the output collection',
-      'The key documents are grouped by — one result document per distinct value',
+      'The key documents are grouped by - one result document per distinct value',
       'A filter applied before grouping',
       'The sort order of the result',
     ],
     answer: 1,
+    explain: '_id: "$genre" turned 200 000 orders into 5 documents, one per genre.',
   },
   {
     q: 'How do you count the number of documents in each group?',
@@ -320,11 +347,18 @@ export const quizGroup = [
       '$push: 1',
     ],
     answer: 2,
+    explain: 'orders: { $sum: 1 } gave 40 000 per genre; the standalone $count stage does the same for the whole stream (poetryOrders: 40000).',
   },
   {
     q: 'Which accumulator collects only the distinct values into an array?',
-    options: ['$push', '$addToSet', '$sum', '$max'],
+    options: [
+      '$push',
+      '$addToSet',
+      '$sum',
+      '$max',
+    ],
     answer: 1,
+    explain: 'For quantity = 1: $addToSet held 1 000 distinct buyers while $push held 40 001 entries, duplicates included.',
   },
   {
     q: 'What is the effect of setting a $group _id to null?',
@@ -335,6 +369,29 @@ export const quizGroup = [
       'It removes the _id from the output',
     ],
     answer: 1,
+    explain: 'One document: revenue 8963632 over 200000 orders. With an empty input the $group emits nothing at all, not n: 0.',
+  },
+  {
+    q: 'A $group uses $first to pick "the cheapest title per genre" without a $sort. What is wrong?',
+    options: [
+      'Nothing - $first means the smallest value',
+      '$first returns whichever document arrives first, so without a $sort it is arbitrary (prices $23, $14, $20 instead of $5)',
+      '$first only works on numbers',
+      '$first is removed in MongoDB 8',
+    ],
+    answer: 1,
+    explain: '$sort then $first gave $5 for every genre; unsorted $first returned $23 for comics, $14 for history, $20 for science. $bottom/$top do it in one accumulator.',
+  },
+  {
+    q: 'A $group holds ~130 MB. What happens on MongoDB 8 by default?',
+    options: [
+      'It fails at 100 MB',
+      'It spills to disk (usedDisk: true, 2 spills) and succeeds; allowDiskUse: false makes it fail',
+      'It returns partial groups',
+      'It is killed by the OOM killer',
+    ],
+    answer: 1,
+    explain: 'default: 1000 groups in 192 ms; allowDiskUse:false: "Exceeded memory limit for $group, but didn\'t allow external spilling".',
   },
 ]
 

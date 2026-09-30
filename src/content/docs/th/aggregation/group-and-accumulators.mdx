@@ -1,6 +1,6 @@
 ---
 title: $group และ accumulator
-description: ยุบ document เข้ากลุ่มตามคีย์ และสรุปแต่ละกลุ่มด้วย accumulator อย่าง $sum, $avg, $min, $max, $push และ $addToSet บวกกับยอดรวมทั้งหมดด้วย _id null
+description: "พับ document เป็นกลุ่มตาม key และสรุปแต่ละกลุ่มด้วย accumulator - $sum, $avg, $min, $max, $push, $addToSet, $first และ $bottom - พร้อมพิสูจน์กับดักบน order 200 000 รายการ: output ไม่เรียงลำดับ, $first ที่ไม่มี sort และเพดานหน่วยความจำ 100 MB"
 sidebar:
   order: 3
 ---
@@ -9,46 +9,75 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-`$group` คือจุดที่ aggregation สมชื่อจริง ๆ เพราะยุบ document จำนวนมากให้เหลือหนึ่ง document **ต่อค่าที่แตกต่างกันแต่ละค่า** ของคีย์ที่คุณเลือก แล้วคำนวณค่าสรุปของแต่ละกลุ่มด้วย **accumulator**
+`$group` คือที่ที่ aggregation ได้ชื่อของมัน มันยุบ document จำนวนมากเป็นหนึ่ง document **ต่อค่าที่ไม่ซ้ำ** ของ key ที่คุณเลือก และคำนวณสรุปของแต่ละกลุ่มด้วย **accumulator** นี่คือ stage ที่ตอบ "แต่ละ genre มีกี่รายการ", "ราคาเฉลี่ยต่อจำนวนเล่ม", "title ที่ถูกที่สุดต่อ genre" ถ้าคุณเคยเขียน `GROUP BY` ใน SQL สัญชาตญาณเหมือนกัน เพียงสะกดต่างกัน
 
-นี่คือ stage ที่ตอบคำถามอย่าง "แต่ละ genre ขายได้กี่เล่ม" "ราคาเฉลี่ยต่อผู้ซื้อเท่าไร" หรือ "ออเดอร์ที่ใหญ่ที่สุดของแต่ละชื่อเรื่องคืออันไหน" ถ้าคุณเคยเขียน `GROUP BY` ใน SQL แนวคิดก็อันเดียวกัน ต่างแค่วิธีเขียน
+บทนี้เตรียม collection `sales` ของโมดูล (order 200 000 รายการ `{ title, genre, quantity, price, buyer }`) และ helper `aplan()` จากบทนำโมดูล output จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
 
-เรายังใช้ collection `sales` จากบทเรียนก่อนหน้าต่อ
+```js
+// mongosh/grp-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.aplan = (pipeline) => {               // one line per aggregate explain: what the first stage read, then the stages left in the pipeline
+  const e = db.sales.explain("executionStats").aggregate(pipeline);
+  const cursor = e.stages ? e.stages[0].$cursor : e, rest = e.stages ? e.stages.slice(1).map((s) => Object.keys(s)[0]) : [];
+  const chain = (p) => { const out = []; for (p = p.queryPlan ?? p; p; p = p.inputStage) out.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : "")); return out.join(" > "); };
+  const s = cursor.executionStats;
+  return chain(cursor.queryPlanner.winningPlan) + "  keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + (rest.length ? "  | left in pipeline: " + rest.join(" > ") : "");
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.sales.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;                                          // 500 titles, 5 genres, quantity 1..5, price 5..25, 1000 buyers (pseudo-random but repeatable)
+    return { title: "T" + (i % 500), genre: genres[(i % 500) % 5], quantity: 1 + ((Math.imul(i, 2654435761) >>> 0) % 5), price: 5 + ((Math.imul(i, 40503) >>> 0) % 21), buyer: "b" + (i % 1000) };
+  }), { ordered: false });
+}
+db.sales.createIndex({ price: 1 });
+console.log("sales:", db.sales.countDocuments(), "orders");
+```
 
-## การจัดกลุ่มตามคีย์
+```text
+sales: 200000 orders
+```
 
-`_id` ของ stage `$group` คือคีย์การจัดกลุ่ม — ฟิลด์ (หรือค่าที่คำนวณ) ที่ใช้แบ่ง document เป็นถัง ทุกฟิลด์อื่นใน stage คือ **accumulator**: expression ที่ยุบ document ทั้งหมดในกลุ่มให้เป็นค่าเดียว ที่นี่เรารวมจำนวนที่ขายต่อ genre และนับออเดอร์ด้วย:
+## จัดกลุ่มตาม key
+
+`_id` ของ stage `$group` คือ key ที่ใช้จัดกลุ่ม - field หรือค่าที่คำนวณซึ่ง document ถูกแบ่งตามนั้น field อื่นทุกตัวเป็น **accumulator**: expression ที่พับทุก document ของกลุ่มเป็นค่าเดียว ที่นี่เรารวมจำนวนเล่มต่อ genre และนับ order (`$sort` ท้ายมีไว้ให้ลำดับที่พิมพ์คงที่ - ดูต่อด้านล่าง) แท็บ Node.js รันบน collection สาม order:
 
 export const groupFlow = `flowchart LR
   In["sales documents"] --> G["$group _id genre"]
   G --> A["accumulators: $sum quantity, $sum 1"]
   A --> Out["one document per genre"]`
 
-<Mermaid code={groupFlow} title="document จำนวนมากยุบลงเป็นหนึ่ง document ผลลัพธ์สำหรับคีย์กลุ่มที่แตกต่างกันแต่ละค่า" />
+<Mermaid code={groupFlow} title="document จำนวนมากพับเป็น document ผลลัพธ์หนึ่งรายการต่อ key ของกลุ่มที่ไม่ซ้ำ" />
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $group: {
-          _id: "$genre",
-          totalCopies: { $sum: "$quantity" },
-          orders: { $sum: 1 }
-      } }
-    ])
+    // mongosh/grp-by-genre.js
+    const rows = db.sales.aggregate([
+      { $group: { _id: "$genre", totalCopies: { $sum: "$quantity" }, orders: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]).toArray();
+    console.log(rows);
+    assert.strictEqual(rows.reduce((n, r) => n + r.orders, 0), 200000);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
-      { $group: {
-          _id: "$genre",
-          totalCopies: { $sum: "$quantity" },
-          orders: { $sum: 1 },
-      } },
+    // app/grp-by-genre.mjs
+    const sales = db.collection("sales");
+    await sales.insertMany([
+      { title: "Dune", genre: "fiction", quantity: 3, price: 12, buyer: "Ada" },
+      { title: "Dune", genre: "fiction", quantity: 4, price: 12, buyer: "Linus" },
+      { title: "Cosmos", genre: "science", quantity: 5, price: 20, buyer: "Ada" },
+    ]);
+    const rows = await sales.aggregate([
+      { $group: { _id: "$genre", totalCopies: { $sum: "$quantity" }, orders: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
     ]).toArray();
+    console.log(rows);
+    if (rows[0]._id !== "fiction" || rows[0].totalCopies !== 7 || rows[0].orders !== 2) throw new Error("unexpected group");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -59,262 +88,258 @@ export const groupFlow = `flowchart LR
             "totalCopies": {"$sum": "$quantity"},
             "orders": {"$sum": 1},
         }},
+        {"$sort": {"_id": 1}},
     ]))
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$group", bson.D{
-            {"_id", "$genre"},
-            {"totalCopies", bson.D{{"$sum", "$quantity"}}},
-            {"orders", bson.D{{"$sum", 1}}},
+        {{Key: "$group", Value: bson.D{
+            {Key: "_id", Value: "$genre"},
+            {Key: "totalCopies", Value: bson.D{{Key: "$sum", Value: "$quantity"}}},
+            {Key: "orders", Value: bson.D{{Key: "$sum", Value: 1}}},
         }}},
+        {{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$group": {
-            "_id": "$genre",
-            "totalCopies": { "$sum": "$quantity" },
-            "orders": { "$sum": 1 }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$group": {
+                "_id": "$genre",
+                "totalCopies": { "$sum": "$quantity" },
+                "orders": { "$sum": 1 },
+            } },
+            doc! { "$sort": { "_id": 1 } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-ได้ document กลับมาหนึ่งอันต่อหนึ่ง genre พร้อมค่าสรุปของแต่ละกลุ่ม:
-
-```json
+```text
 [
-  { "_id": "fiction", "totalCopies": 11, "orders": 4 },
-  { "_id": "science", "totalCopies": 5, "orders": 2 }
+  { _id: 'comics', totalCopies: 120002, orders: 40000 },
+  { _id: 'fiction', totalCopies: 120000, orders: 40000 },
+  { _id: 'history', totalCopies: 119995, orders: 40000 },
+  { _id: 'poetry', totalCopies: 120001, orders: 40000 },
+  { _id: 'science', totalCopies: 119995, orders: 40000 }
+]
+```
+
+```text
+[
+  { _id: 'fiction', totalCopies: 7, orders: 2 },
+  { _id: 'science', totalCopies: 5, orders: 1 }
 ]
 ```
 
 ## accumulator ที่ใช้บ่อย
 
-accumulator จำนวนหยิบมือเดียวครอบคลุมความต้องการส่วนใหญ่ ทุกตัวรับ expression ที่ประเมินกับแต่ละ document ในกลุ่ม:
+- `$sum` - รวม expression ตัวเลข หรือนับด้วย `$sum: 1`
+- `$avg` - ค่าเฉลี่ย
+- `$min` / `$max` - ค่าน้อยสุดและมากสุด
+- `$push` - ทุกค่าลง array รวมค่าซ้ำ
+- `$addToSet` - ค่าที่ **ไม่ซ้ำ** ลง array
+- `$first` / `$last` - ค่าจาก document แรก/สุดท้าย **ตามลำดับปัจจุบัน**
+- `$top` / `$bottom` (5.2+) - ค่าจาก document บน/ล่างของ `sortBy` ที่ระบุชัด
 
-- `$sum` — บวก expression ตัวเลข หรือใช้นับด้วย `$sum: 1`
-- `$avg` — ค่าเฉลี่ยของ expression ตัวเลข
-- `$min` / `$max` — ค่าน้อยที่สุดและมากที่สุดที่พบ
-- `$push` — เก็บทุกค่าเข้า array รวมค่าซ้ำด้วย
-- `$addToSet` — เก็บค่าที่ **แตกต่างกัน** เข้า array
+จัดกลุ่มตาม `quantity` (1-5) และดูโปรไฟล์ของแต่ละกลุ่ม `$push` และ `$addToSet` ถูกแปลงเป็นขนาดเพื่อให้ output พอดี: ผู้ซื้อที่ไม่ซ้ำ 1 000 คน แต่ push ราว 40 000 รายการ (เก็บค่าซ้ำ):
 
-stage `$count` เฉพาะทางก็มีอยู่สำหรับกรณีพิเศษ "แค่นับ document" ที่นี่เราทำโปรไฟล์แต่ละ genre ให้สมบูรณ์ขึ้น — ราคาเฉลี่ย ช่วงราคา และเซตของผู้ซื้อ:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $group: {
-          _id: "$genre",
-          avgPrice: { $avg: "$price" },
-          cheapest: { $min: "$price" },
-          priciest: { $max: "$price" },
-          buyers: { $addToSet: "$buyer" }
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $group: {
-          _id: "$genre",
-          avgPrice: { $avg: "$price" },
-          cheapest: { $min: "$price" },
-          priciest: { $max: "$price" },
-          buyers: { $addToSet: "$buyer" },
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$group": {
-            "_id": "$genre",
-            "avgPrice": {"$avg": "$price"},
-            "cheapest": {"$min": "$price"},
-            "priciest": {"$max": "$price"},
-            "buyers": {"$addToSet": "$buyer"},
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$group", bson.D{
-            {"_id", "$genre"},
-            {"avgPrice", bson.D{{"$avg", "$price"}}},
-            {"cheapest", bson.D{{"$min", "$price"}}},
-            {"priciest", bson.D{{"$max", "$price"}}},
-            {"buyers", bson.D{{"$addToSet", "$buyer"}}},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$group": {
-            "_id": "$genre",
-            "avgPrice": { "$avg": "$price" },
-            "cheapest": { "$min": "$price" },
-            "priciest": { "$max": "$price" },
-            "buyers": { "$addToSet": "$buyer" }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-ตอนนี้แต่ละ genre มีโปรไฟล์ครบถ้วน และ `buyers` เก็บแต่ละชื่อไว้เพียงครั้งเดียว:
-
-```json
-[
-  { "_id": "fiction", "avgPrice": 12.5, "cheapest": 9, "priciest": 15, "buyers": ["Ada", "Linus"] },
-  { "_id": "science", "avgPrice": 20, "cheapest": 18, "priciest": 22, "buyers": ["Grace"] }
-]
+```js
+// mongosh/grp-accumulators.js
+const rows = db.sales.aggregate([
+  { $group: { _id: "$quantity", avgPrice: { $avg: "$price" }, cheapest: { $min: "$price" }, priciest: { $max: "$price" },
+              buyers: { $addToSet: "$buyer" }, allBuyers: { $push: "$buyer" } } },
+  { $project: { avgPrice: { $round: ["$avgPrice", 2] }, cheapest: 1, priciest: 1, distinctBuyers: { $size: "$buyers" }, pushedBuyers: { $size: "$allBuyers" } } },
+  { $sort: { _id: 1 } },
+]).toArray();
+console.log(rows.map((r) => JSON.stringify(r)).join("\n"));
+assert.strictEqual(rows.length, 5);
+assert.ok(rows.every((r) => r.distinctBuyers <= 1000 && r.pushedBuyers > r.distinctBuyers));       // $push keeps duplicates, $addToSet does not
 ```
 
-**ใน Compass:** stage `$group` ในแท็บ **Aggregations** ให้โครงสร้าง `_id` และ accumulator เดียวกันกับคุณ การดูตัวอย่างมีประโยชน์ตรงนี้ — เปลี่ยน expression ของ `_id` แล้วเฝ้าดูจำนวน document ผลลัพธ์เปลี่ยนไปเมื่อการจัดกลุ่มหยาบขึ้นหรือแยกย่อยลง
-
-## ยอดรวมทั้งหมดด้วย _id null
-
-ตั้งค่า `_id` ของกลุ่มเป็น `null` แล้วทุก document จะตกลงในกลุ่ม **เดียว** ให้ยอดรวมทั้งหมดทั่วทั้ง stream นี่คือวิธีที่คุณคำนวณ "รายได้รวม" หรือ "ค่าเฉลี่ยโดยรวม" โดยไม่แยกตามคีย์:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $group: {
-          _id: null,
-          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
-          totalOrders: { $sum: 1 }
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $group: {
-          _id: null,
-          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
-          totalOrders: { $sum: 1 },
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$group": {
-            "_id": None,
-            "totalRevenue": {"$sum": {"$multiply": ["$price", "$quantity"]}},
-            "totalOrders": {"$sum": 1},
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$group", bson.D{
-            {"_id", nil},
-            {"totalRevenue", bson.D{{"$sum", bson.D{{"$multiply", bson.A{"$price", "$quantity"}}}}}},
-            {"totalOrders", bson.D{{"$sum", 1}}},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$group": {
-            "_id": null,
-            "totalRevenue": { "$sum": { "$multiply": ["$price", "$quantity"] } },
-            "totalOrders": { "$sum": 1 }
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-document สรุปเดียวแทนทั้ง collection:
-
-```json
-[
-  { "_id": null, "totalRevenue": 248, "totalOrders": 6 }
-]
+```text
+{"_id":1,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":40001}
+{"_id":2,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":39999}
+{"_id":3,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":40002}
+{"_id":4,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":40002}
+{"_id":5,"cheapest":5,"priciest":25,"avgPrice":14.94,"distinctBuyers":1000,"pushedBuyers":39996}
 ```
 
-## ทิปและกับดัก
+**In Compass:** stage `$group` ในแท็บ **Aggregations** ให้โครงสร้าง `_id` และ accumulator เดียวกัน ลองเปลี่ยน expression ของ `_id` แล้วดูจำนวน document ผลลัพธ์เปลี่ยน
 
-- หลังจาก `$group` มีแต่ฟิลด์ที่คุณสร้างขึ้นเท่านั้นที่ดำรงอยู่ ฟิลด์ document ต้นฉบับหายไป เว้นแต่คุณจะพาติดมาด้วย accumulator อย่าง `$push` หรือ `$first`
-- `$sum: 1` คือสำนวน "นับแถวในกลุ่มนี้" ส่วน `$sum: "$quantity"` บวกค่าของฟิลด์แทน
-- `$push` เก็บค่าซ้ำและลำดับไว้ ส่วน `$addToSet` ลบค่าซ้ำและไม่รับรองลำดับ หยิบ `$addToSet` มาใช้เมื่อคุณต้องการลิสต์ที่ *แตกต่างกัน*
-- การจัดกลุ่มไม่เรียงลำดับ ถ้าคุณต้องการกลุ่มที่ใหญ่ที่สุดอยู่ก่อน ให้เพิ่ม stage `$sort` หลัง `$group`
+## output ของ group ไม่เรียงลำดับ
+
+```js
+// mongosh/grp-unordered.js
+const ids = db.sales.aggregate([{ $group: { _id: "$title", n: { $sum: 1 } } }]).toArray().map((r) => r._id);
+console.log("first ten groups, exactly as returned:", ids.slice(0, 10).join(" "));
+const sorted = [...ids].sort();
+console.log("returned in sorted order?", ids.every((v, i) => v === sorted[i]));
+```
+
+```text
+first ten groups, exactly as returned: T455 T50 T153 T381 T35 T164 T335 T372 T416 T129
+returned in sorted order? false
+```
+
+กลุ่มกลับมาในลำดับที่ server เลือก (ที่นี่เป็นการไล่ hash table) และการรันครั้งหลังหรือเวอร์ชันอื่นอาจต่าง ถ้าต้องการลำดับ ให้เพิ่ม `$sort` หลัง `$group`
+
+## $first ต้องมี $sort
+
+`$first` คืนค่าจาก document ที่มาถึงกลุ่มก่อน คู่มือบอกว่า "only meaningful when documents are in a defined order" และให้ "add a preceding `$sort` stage" ([$first](https://www.mongodb.com/docs/manual/reference/operator/aggregation/first/), ตรวจ 2026-09-30) title ที่ถูกที่สุดต่อ genre สามวิธี:
+
+```js
+// mongosh/grp-first.js
+const cheapestFirst = db.sales.aggregate([
+  { $sort: { price: 1, _id: 1 } },
+  { $group: { _id: "$genre", cheapestTitle: { $first: "$title" }, price: { $first: "$price" } } },
+  { $sort: { _id: 1 } },
+]).toArray();
+const noSort = db.sales.aggregate([
+  { $group: { _id: "$genre", firstTitleSeen: { $first: "$title" }, price: { $first: "$price" } } },
+  { $sort: { _id: 1 } },
+]).toArray();
+const top = db.sales.aggregate([
+  { $group: { _id: "$genre", cheapest: { $bottom: { sortBy: { price: -1, _id: 1 }, output: ["$title", "$price"] } } } },   // $bottom of a descending sort = smallest price
+  { $sort: { _id: 1 } },
+]).toArray();
+console.log("$sort then $first :", cheapestFirst.map((r) => r._id + " " + r.cheapestTitle + " $" + r.price).join(" | "));
+console.log("$first, no sort   :", noSort.map((r) => r._id + " " + r.firstTitleSeen + " $" + r.price).join(" | "));
+console.log("$bottom (5.2+)    :", top.map((r) => r._id + " " + r.cheapest[0] + " $" + r.cheapest[1]).join(" | "));
+assert.ok(cheapestFirst.every((r) => r.price === 5));
+```
+
+```text
+$sort then $first : comics T14 $5 | fiction T0 $5 | history T7 $5 | poetry T28 $5 | science T21 $5
+$first, no sort   : comics T4 $23 | fiction T0 $5 | history T2 $14 | poetry T3 $8 | science T1 $20
+$bottom (5.2+)    : comics T29 $5 | fiction T15 $5 | history T22 $5 | poetry T8 $5 | science T36 $5
+```
+
+## การนับและยอดรวมทั้งหมด
+
+ตั้ง `_id` เป็น `null` ทุก document ตกในกลุ่มเดียว `$count` และ `$sortByCount` เป็นทางลัดของสองกลุ่มที่พบบ่อยที่สุด:
+
+```js
+// mongosh/grp-count.js
+console.log("grand total   :", db.sales.aggregate([{ $group: { _id: null, revenue: { $sum: { $multiply: ["$price", "$quantity"] } }, orders: { $sum: 1 } } }]).toArray());
+console.log("$count stage  :", db.sales.aggregate([{ $match: { genre: "poetry" } }, { $count: "poetryOrders" }]).toArray());
+console.log("$sortByCount  :", db.sales.aggregate([{ $sortByCount: "$genre" }]).toArray().slice(0, 2), "...");
+console.log("empty input   :", db.sales.aggregate([{ $match: { genre: "none" } }, { $group: { _id: null, n: { $sum: 1 } } }]).toArray(), "<- no group at all, not n: 0");
+```
+
+```text
+grand total   : [ { _id: null, revenue: 8963632, orders: 200000 } ]
+$count stage  : [ { poetryOrders: 40000 } ]
+$sortByCount  : [ { _id: 'poetry', count: 40000 }, { _id: 'history', count: 40000 } ] ...
+empty input   : [] <- no group at all, not n: 0
+```
+
+## หน่วยความจำ: เมื่อกลุ่มไม่พอดี
+
+`$group` เก็บกลุ่มในหน่วยความจำ (100 MB เป็นค่าเริ่มต้น, `internalDocumentSourceGroupMaxMemoryBytes`) การรันนี้ push ทุก pad ขนาด 1 KB ของ collection 130 MB ลง 1 000 กลุ่ม ชุดข้อมูลทำงานจึงเกินเพดาน:
+
+```js
+// mongosh/grp-spill.js
+for (let s = 0; s < 130000; s += 10000) db.big.insertMany(Array.from({ length: 10000 }, (_, k) => ({ n: s + k, pad: "x".repeat(1000) })), { ordered: false });
+const p = [{ $group: { _id: { $mod: ["$n", 1000] }, pads: { $push: "$pad" }, docs: { $sum: 1 } } }, { $count: "groups" }];
+console.log("collection MB:", +(db.big.stats().size / 1048576).toFixed(0), "| $group holds every pad in memory (~130 MB > 100 MB limit)");
+let t = Date.now();
+console.log("default            ->", db.big.aggregate(p).toArray(), Date.now() - t, "ms");
+try { db.big.aggregate(p, { allowDiskUse: false }).toArray(); }
+catch (e) { console.log("allowDiskUse:false ->", e.codeName + ":", e.message.slice(e.message.indexOf("Exceeded"), e.message.indexOf("Exceeded") + 100)); }
+const e = db.big.explain("executionStats").aggregate(p.slice(0, 1));
+const find = (s) => (s.stage === "group" ? s : s.inputStage ? find(s.inputStage) : null);
+const g = find((e.stages ? e.stages[0].$cursor : e).executionStats.executionStages);
+console.log("explain, group stage:", { usedDisk: g.usedDisk, spills: g.spills, spilledBytesMB: Math.round(g.spilledBytes / 1048576), peakMB: +(g.peakTrackedMemBytes / 1048576).toFixed(0) });
+```
+
+```text
+collection MB: 129 | $group holds every pad in memory (~130 MB > 100 MB limit)
+default            -> [ { groups: 1000 } ] 192 ms
+allowDiskUse:false -> QueryExceededMemoryLimitNoDiskUseAllowed: Exceeded memory limit for $group, but didn't allow external spilling; pass allowDiskUse:true to opt 
+explain, group stage: { usedDisk: true, spills: 2, spilledBytesMB: 125, peakMB: 101 }
+```
+
+## เคล็ดลับและข้อควรระวัง
+
+- หลัง `$group` มีแค่ `_id` และ accumulator; ส่ง field อื่นไปข้างหน้าด้วย `$first`, `$last`, `$push` หรือ `$top`
+- `$sum: 1` นับแถว; `$sum: "$quantity"` รวมค่า input ว่างไม่สร้างกลุ่มเลย
+- `$push` เก็บค่าซ้ำและลำดับ, `$addToSet` ตัดค่าซ้ำและไม่รับประกันลำดับ
+- การจัดกลุ่มไม่ sort; เพิ่ม `$sort` (พร้อม tie-breaker ที่ไม่ซ้ำ) เมื่อลำดับสำคัญ
+- กลุ่มที่โตเกิน 100 MB ล้นลงดิสก์เป็นค่าเริ่มต้น อย่าพึ่งกับเส้นทางที่ร้อน - `$match` ก่อนและเก็บ accumulator ให้เล็ก
 
 <Callout title="group ยุบ accumulator สรุป">
-ลองนึกภาพ $group เหมือนการพับ stream ตามคีย์: หนึ่ง document ผลลัพธ์ต่อหนึ่งคีย์ที่แตกต่างกัน accumulator ตัดสินว่าแต่ละการพับจดจำอะไรไว้ — ผลรวม ค่าเฉลี่ย เซตของค่า ตั้ง _id เป็น null เพื่อพับทุกอย่างเป็นยอดรวมทั้งหมดอันเดียว
+นึกภาพ `$group` เป็นการพับสายตาม key: หนึ่ง document ผลลัพธ์ต่อ key ที่ไม่ซ้ำ accumulator ตัดสินว่าการพับแต่ละครั้งจำอะไร - ผลรวม ค่าเฉลี่ย ชุดของค่า ตั้ง `_id` เป็น `null` เพื่อพับทุกอย่างเป็นยอดรวมเดียว
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ "title ที่ถูกที่สุดในแต่ละ genre" AI เขียนว่า:
+
+<SpotTheBug lang="js" code={`// AI comment: "$first takes the cheapest title per genre"
+db.sales.aggregate([
+  { $group: { _id: "$genre", cheapestTitle: { $first: "$title" }, price: { $first: "$price" } } },
+]);`}>
+
+ไม่มี `$sort` `$first` จึงเป็นแค่ "order แรกที่ server บังเอิญอ่าน" ในการรันข้างบน เวอร์ชันที่ไม่ sort รายงาน comics ที่ **$23**, history ที่ **$14** และ science ที่ **$20** ทั้งที่ทุก genre มี order ราคา $5 การ sort ก่อน group แก้ได้ และ `$bottom` (หรือ `$top`) บอกความหมายในตัว accumulator ทั้งสองวิธีคืน $5 ทั้งห้า genre ตามที่บล็อก `first` ข้างบนแสดง โปรดสังเกตว่าคำตอบที่ถูกสองแบบอาจระบุ title ต่างกันเพราะหลาย title ราคา $5 เท่ากัน - เพิ่ม tie-breaker (`_id`) ให้ผลซ้ำได้
+
+</SpotTheBug>
+
+## Mental Model
+
+`$group` คือ hash map จาก key ไปยังสถานะของ accumulator ที่ถูกป้อนด้วยสายข้อมูล ผลที่ตามมาสองข้อ: map ไม่มีลำดับ (จึงไม่มี output เรียง) และสถานะอยู่ในหน่วยความจำ (ขนาดของมัน ไม่ใช่ขนาด input ที่ตัดสินว่าจะล้นหรือไม่) accumulator ที่ขึ้นกับลำดับที่มา (`$first`, `$last`, `$push`) แน่นอนได้เท่าลำดับที่คุณกำหนดให้
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| `$group` ใน pipeline | คำนวณสรุปฝั่ง server ส่งกลับแค่ผลลัพธ์ที่ยุบแล้ว ประหยัด bandwidth และ memory ฝั่ง client | ต้องคิดเป็น expression ของ MongoDB (accumulator) ซึ่งอาจจำกัดกว่า logic ที่เขียนใน application code |
-| จัดกลุ่มใน application code (ดึง document ทั้งหมดมาแล้วสรุปเอง) | ยืดหยุ่นเต็มที่ ใช้ library หรือ logic ใดก็ได้ | ต้องส่ง document ดิบทั้งหมดผ่านเครือข่ายก่อน ช้าและกิน memory มากเมื่อข้อมูลใหญ่ |
-| accumulator ที่แม่นยำ เช่น `$sum`, `$avg` | ผลลัพธ์ถูกต้อง 100% เหมาะกับตัวเลขทางการเงินหรือรายงาน | ต้องสแกน/ประมวลผล document ทุกตัวในกลุ่ม ซึ่งหนักกว่าการประมาณค่า |
+| `$group` ใน pipeline | คืนเฉพาะผลที่ยุบแล้ว: 5 แถวแทน 200 000 | จำกัดอยู่ที่ expression ของ MongoDB; สถานะต้องพอดี 100 MB หรือล้นลงดิสก์ |
+| จัดกลุ่มในโค้ดแอป | ใช้ logic ใดก็ได้ | ต้องย้ายทุก document ดิบก่อน |
+| `$sort` + `$first` | เลือกได้แน่นอน | ต้อง sort ทั้งสายก่อน |
+| `$top` / `$bottom` | sort และเลือกใน accumulator เดียว | ใช้ได้ตั้งแต่ MongoDB 5.2 |
+| `$push` ค่าขนาดใหญ่ | เก็บทุกอย่าง | working set 130 MB ล้นสองครั้ง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่าฟิลด์ต้นฉบับยังอยู่หลัง `$group` โดยอัตโนมัติ** — หลัง `$group` มีแค่ `_id` กับ accumulator ที่คุณประกาศไว้เท่านั้น ฟิลด์อื่นของ document ต้นฉบับหายไป เว้นแต่จะดึงมาด้วย `$first`, `$last` หรือ `$push` เอง
-- **ใช้ `$push` เมื่อจริง ๆ ต้องการค่าที่ไม่ซ้ำ** — `$push` เก็บค่าซ้ำและรักษาลำดับ ถ้าต้องการ list ที่ไม่มีค่าซ้ำต้องใช้ `$addToSet` ไม่ใช่มา dedupe เองในภายหลัง
-- **คาดหวังว่าผลลัพธ์จาก `$group` จะเรียงลำดับ** — `$group` ไม่รับประกันลำดับของกลุ่มที่ออกมา ต้องเติม `$sort` ต่อท้ายเองถ้าต้องการลำดับที่แน่นอน
+- **"field ต้นฉบับรอดจาก `$group`"** - รอดแค่ `_id` และ accumulator ของคุณ
+- **"`$group` คืนกลุ่มเรียงตาม key"** - สิบ title แรกกลับมาเป็น T455 T50 T153 ... และไม่เรียงลำดับ
+- **"`$first` คือค่าที่น้อยที่สุด"** - มันคือค่าของ document แรก; ที่ไม่ sort ได้ $23 ทั้งที่มี $5
+- **"`$group` ที่เกินหน่วยความจำ error"** - มันล้นลงดิสก์ (2 spills) เว้นแต่ `allowDiskUse: false`
+- **"match ว่างได้ `n: 0`"** - `$group` ที่ `_id: null` บน document ศูนย์รายการคืน `[]`
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **Analytics dashboard** — การคำนวณ "ยอดขายรวมต่อวัน" หรือ "จำนวนผู้ใช้ที่ active ต่อสัปดาห์" มักทำด้วย `$group` ที่มี `_id` เป็นวันที่/สัปดาห์ และ accumulator อย่าง `$sum` แทนที่จะดึง event ดิบทั้งหมดมานับใน application server
->
-> **รายงานยอดขายอสังหาริมทรัพย์ทั่วไป** — สรุปยอดขายต่อนายหน้าใช้ `$group` พร้อม `$sum` และ `$avg` เพื่อสรุปมูลค่าธุรกรรมและราคาขายเฉลี่ยต่อคน โดยไม่ต้องดึงประวัติธุรกรรมทั้งหมดออกมาคำนวณนอกฐานข้อมูล — Keller Williams ใช้ MongoDB aggregation pipeline ในลักษณะนี้เพื่อสรุปข้อมูล listing กว่า 70 ล้านระเบียนบน Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
+> **Keller Williams (real estate)** - ทีมข้อมูลใช้ Aggregation Pipeline Builder ใน MongoDB Compass สรุปเรคคอร์ดรายการอสังหาฯ กว่า 70 ล้านรายการบน MongoDB Atlas ด้วย pipeline สไตล์ `$group` แทนการ export เรคคอร์ดดิบ ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (group ต่อ genre คืนยอดรวมชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizGroup = [
   {
-    q: 'ฟิลด์ _id ของ stage $group ระบุอะไร?',
+    q: 'field _id ของ stage $group กำหนดอะไร',
     options: [
-      'ชื่อของ collection ผลลัพธ์',
-      'คีย์ที่ใช้จัดกลุ่ม document — หนึ่ง document ผลลัพธ์ต่อหนึ่งค่าที่แตกต่างกัน',
-      ' filter ที่ใช้ก่อนการจัดกลุ่ม',
+      'ชื่อ collection ผลลัพธ์',
+      'key ที่ใช้จัดกลุ่ม document - หนึ่ง document ผลลัพธ์ต่อค่าที่ไม่ซ้ำ',
+      'filter ที่ใช้ก่อนจัดกลุ่ม',
       'ลำดับการเรียงของผลลัพธ์',
     ],
     answer: 1,
+    explain: '_id: "$genre" เปลี่ยน order 200 000 รายการเป็น 5 document หนึ่งต่อ genre',
   },
   {
-    q: 'คุณนับจำนวน document ในแต่ละกลุ่มอย่างไร?',
+    q: 'นับจำนวน document ในแต่ละกลุ่มอย่างไร',
     options: [
       '$count: "$quantity"',
       '$avg: 1',
@@ -322,21 +347,51 @@ export const quizGroup = [
       '$push: 1',
     ],
     answer: 2,
+    explain: 'orders: { $sum: 1 } ให้ 40 000 ต่อ genre; stage $count แบบเดี่ยวทำเช่นเดียวกันกับทั้งสาย (poetryOrders: 40000)',
   },
   {
-    q: 'accumulator ใดเก็บเฉพาะค่าที่แตกต่างกันเข้า array?',
-    options: ['$push', '$addToSet', '$sum', '$max'],
+    q: 'accumulator ใดเก็บเฉพาะค่าที่ไม่ซ้ำลง array',
+    options: [
+      '$push',
+      '$addToSet',
+      '$sum',
+      '$max',
+    ],
     answer: 1,
+    explain: 'สำหรับ quantity = 1: $addToSet เก็บผู้ซื้อที่ไม่ซ้ำ 1 000 คน ส่วน $push เก็บ 40 001 รายการรวมค่าซ้ำ',
   },
   {
-    q: 'การตั้ง _id ของ $group เป็น null มีผลอย่างไร?',
+    q: 'การตั้ง _id ของ $group เป็น null มีผลอย่างไร',
     options: [
       'ถูกปฏิเสธว่าไม่ถูกต้อง',
-      'ทุก document ตกลงในกลุ่มเดียว ให้ยอดรวมทั้งหมด',
-      'จัดกลุ่มตามฟิลด์ _id ของแต่ละ document',
+      'ทุก document ตกในกลุ่มเดียว ได้ยอดรวมทั้งหมด',
+      'จัดกลุ่มตาม field _id ของแต่ละ document',
       'ลบ _id ออกจากผลลัพธ์',
     ],
     answer: 1,
+    explain: 'ได้ document เดียว: revenue 8963632 จาก 200000 order เมื่อ input ว่าง $group ไม่ส่งอะไรออกมาเลย ไม่ใช่ n: 0',
+  },
+  {
+    q: '$group ใช้ $first เลือก "title ที่ถูกที่สุดต่อ genre" โดยไม่มี $sort ผิดตรงไหน',
+    options: [
+      'ไม่มี - $first คือค่าที่น้อยที่สุด',
+      '$first คืน document ที่มาก่อน ถ้าไม่มี $sort จึงไม่แน่นอน (ราคา $23, $14, $20 แทน $5)',
+      '$first ใช้ได้กับตัวเลขเท่านั้น',
+      '$first ถูกถอดใน MongoDB 8',
+    ],
+    answer: 1,
+    explain: '$sort แล้ว $first ได้ $5 ทุก genre; $first ที่ไม่เรียงได้ $23 สำหรับ comics, $14 สำหรับ history, $20 สำหรับ science ส่วน $bottom/$top ทำได้ใน accumulator เดียว',
+  },
+  {
+    q: '$group ถือข้อมูลราว 130 MB ค่าเริ่มต้นของ MongoDB 8 เกิดอะไรขึ้น',
+    options: [
+      'ล้มเหลวที่ 100 MB',
+      'ล้นลงดิสก์ (usedDisk: true, 2 spills) และสำเร็จ; allowDiskUse: false ทำให้ล้มเหลว',
+      'คืนกลุ่มบางส่วน',
+      'ถูก OOM killer ฆ่า',
+    ],
+    answer: 1,
+    explain: 'ค่าเริ่มต้น: 1000 กลุ่มใน 192 ms; allowDiskUse:false: "Exceeded memory limit for $group, but didn\'t allow external spilling"',
   },
 ]
 
