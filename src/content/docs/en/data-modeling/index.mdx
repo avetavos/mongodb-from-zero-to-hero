@@ -1,6 +1,6 @@
 ---
-title: Thinking in documents
-description: Why MongoDB data modeling is the opposite of relational design — you model for how your application reads and writes data, not for normalization — and why embedding versus referencing is the central choice.
+title: Data modeling
+description: "Model for access, not for storage - embedding versus referencing, measured on 10 000 orders: document sizes, round trips and read time, plus the N+1 trap."
 sidebar:
   order: 1
 ---
@@ -9,23 +9,43 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-If you arrive at MongoDB from a relational background, the hardest habit to unlearn is the one that served you best in SQL: splitting your data into many narrow tables, each holding one kind of thing, joined back together at query time. That discipline is called **normalization**, and it exists to remove duplication so that a fact lives in exactly one place. MongoDB asks you to think the other way around. You do not start from "what are my entities and how do I avoid repeating them"; you start from "what does my application ask for, and how can a single read hand back everything that one screen needs."
+If you arrive at MongoDB from a relational background, the hardest habit to unlearn is the one that served you best in SQL: splitting your data into many narrow tables joined back together at query time. That discipline is **normalization**; it removes duplication so a fact lives in exactly one place. MongoDB asks you to think the other way around. You start from "what does my application ask for, and how can a single read hand back everything one screen needs."
 
-The unit of storage is the **document** — a rich, nested, JSON-like structure that can hold arrays and sub-objects, not just flat columns. Because a document can contain related data inside itself, the question that dominates every modeling decision is no longer "which table does this column belong to" but **"do I nest this related data inside the document, or do I keep it separate and store a reference to it?"** That single choice — embedding versus referencing — is what this entire module turns on.
+The unit of storage is the **document** - a nested, JSON-like structure with arrays and sub-objects. Because a document can hold related data inside itself, the question behind every modeling decision is: **"do I nest this related data inside the document, or keep it separate and store a reference?"** That choice - embedding versus referencing - is what this module turns on.
+
+**Datasets in this module.** Each lesson seeds its own data with the same shape: `products` (`_id: "BK-n"`, `title`, `price`) and orders in two versions - `ordersEmb` (items carry a copy of the title and price) and `ordersRef` (items carry only `productId`). This lesson uses 500 products and 10 000 orders of 2-5 items. Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program.
+
+```js
+// mongosh/dm-seed.js
+const rnd = (() => { let x = 7; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();   // repeatable pseudo-random numbers
+db.products.insertMany(Array.from({ length: 500 }, (_, i) => ({ _id: "BK-" + i, title: "Book " + i, price: 10 + (i % 40) })));
+const specs = Array.from({ length: 10000 }, (_, i) => ({
+  _id: "order_" + i, customerId: "cust_" + (i % 500), status: i % 3 ? "shipped" : "new",
+  lines: Array.from({ length: 2 + Math.floor(rnd() * 4) }, () => { const p = Math.floor(rnd() * 500); return { p, qty: 1 + Math.floor(rnd() * 3) }; }),
+}));
+db.ordersEmb.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ sku: "BK-" + l.p, title: "Book " + l.p, qty: l.qty, price: 10 + (l.p % 40) })) })));   // embedded copies
+db.ordersRef.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ productId: "BK-" + l.p, qty: l.qty })) })));                                 // references only
+console.log("products:", db.products.countDocuments(), "| orders:", db.ordersEmb.countDocuments(), "embedded /", db.ordersRef.countDocuments(), "referenced");
+```
+
+```text
+products: 500 | orders: 10000 embedded / 10000 referenced
+```
 
 ## Relational habits versus document thinking
 
-In a relational schema you design around the data's shape and let queries pay the cost of reassembling it. In a document schema you design around the queries and let the data's shape absorb the cost up front. The two mindsets pull in opposite directions:
+In a relational schema you design around the data's shape and let queries pay the cost of reassembling it. In a document schema you design around the queries and decide duplication up front:
 
 export const mindsetDiagram = `flowchart TB
-  subgraph Relational["Relational — model for storage"]
+  subgraph Relational["Relational - model for storage"]
     R0["Start: list the entities"] --> R1["Split into normalized tables"]
-    R1 --> R2["No duplication — one fact, one place"]
+    R1 --> R2["No duplication - one fact, one place"]
     R2 --> R3["Reassemble with JOINs at read time"]
   end
-  subgraph Document["Document — model for access"]
+  subgraph Document["Document - model for access"]
     D0["Start: list the queries"] --> D1["Group data that is read together"]
     D1 --> D2["Embed or reference based on access"]
     D2 --> D3["One read returns a whole screen"]
@@ -33,103 +53,252 @@ export const mindsetDiagram = `flowchart TB
 
 <Mermaid code={mindsetDiagram} title="Relational design optimizes storage and pays at read time; document design optimizes the read and decides duplication up front" />
 
-Neither approach is universally "correct." The relational instinct is excellent when data is highly interrelated and updated from many directions. The document instinct shines when an application repeatedly fetches the same shaped bundle of data — a user and their settings, an order and its line items, an article and its tags. MongoDB lets you store that bundle the way the application wants to consume it.
+Neither is universally correct. The relational instinct is excellent when data is highly interrelated and updated from many directions; the document instinct shines when an application repeatedly fetches the same shaped bundle - a user and settings, an order and its line items, an article and its tags.
 
-## A worked example: an order
+## A worked example: an order, measured
 
-Consider an online order. A relational system would keep the order in one table, the line items in another, and the customer in a third, stitching them with foreign keys. In MongoDB you can keep the whole order — its items embedded as an array — in a single document, so reading the order is one operation rather than three joins:
+The same order in both shapes, then the numbers. The embedded document is everything an "order details" page needs; the referenced one is smaller but needs the `products` collection to become readable. The Node.js tab counts real query round trips with the database profiler; the Python, Go and Rust tabs show the referenced read as its two queries:
 
-```json
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/dm-size.js
+    const one = (c) => db[c].findOne({ _id: "order_42" });
+    console.log("order_42 embedded  :", JSON.stringify(one("ordersEmb")));
+    console.log("order_42 referenced:", JSON.stringify(one("ordersRef")));
+    const avg = (c) => Math.round(db[c].aggregate([{ $group: { _id: null, b: { $avg: { $bsonSize: "$$ROOT" } } } }]).toArray()[0].b);
+    console.log("average document bytes - embedded:", avg("ordersEmb"), "| referenced:", avg("ordersRef"), "| product:", avg("products"));
+    const mb = (c) => +(db[c].stats().size / 1048576).toFixed(2);
+    console.log("collection data MB - embedded:", mb("ordersEmb"), "| referenced:", mb("ordersRef"), "+ products", mb("products"));
+    assert.ok(avg("ordersEmb") > avg("ordersRef"));
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/dm-roundtrips.mjs
+    const products = db.collection("products"), emb = db.collection("ordersEmb"), ref = db.collection("ordersRef");
+    await products.insertMany([{ _id: "BK-1", title: "Distributed Systems", price: 42 }, { _id: "BK-2", title: "The Mythical Man-Month", price: 18.5 }, { _id: "BK-3", title: "Compilers", price: 55 }]);
+    await emb.insertOne({ _id: "o1", items: [{ sku: "BK-1", title: "Distributed Systems", qty: 1, price: 42 }, { sku: "BK-2", title: "The Mythical Man-Month", qty: 2, price: 18.5 }, { sku: "BK-3", title: "Compilers", qty: 1, price: 55 }] });
+    await ref.insertOne({ _id: "o1", items: [{ productId: "BK-1", qty: 1 }, { productId: "BK-2", qty: 2 }, { productId: "BK-3", qty: 1 }] });
+    const count = async (label, fn) => {
+      await db.command({ profile: 0 });
+      await db.collection("system.profile").drop().catch(() => {});                        // start each measurement with an empty profile
+      await db.command({ profile: 2 });                                                     // record every operation on THIS database
+      await fn();
+      await db.command({ profile: 0 });
+      const n = await db.collection("system.profile").countDocuments({ op: { $in: ["query", "command"] }, "command.find": { $exists: true } });
+      console.log(label.padEnd(32), n, "query round trip(s)");
+      return n;
+    };
+    const a = await count("embedded order", () => emb.findOne({ _id: "o1" }));
+    const b = await count("referenced, one query per item", async () => { const o = await ref.findOne({ _id: "o1" }); for (const i of o.items) await products.findOne({ _id: i.productId }); });
+    const c = await count("referenced, $in", async () => { const o = await ref.findOne({ _id: "o1" }); await products.find({ _id: { $in: o.items.map((i) => i.productId) } }).toArray(); });
+    await db.command({ profile: 0 });
+    if (a !== 1 || b !== 4 || c !== 2) throw new Error("unexpected round-trip counts " + [a, b, c]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    order = db.ordersRef.find_one({"_id": "order_42"})
+    ids = [i["productId"] for i in order["items"]]
+    products = list(db.products.find({"_id": {"$in": ids}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var order struct {
+        Items []struct {
+            ProductID string `bson:"productId"`
+            Qty       int    `bson:"qty"`
+        } `bson:"items"`
+    }
+    if err := coll.FindOne(ctx, bson.M{"_id": "order_42"}).Decode(&order); err != nil {
+        return err
+    }
+    ids := bson.A{}
+    for _, it := range order.Items {
+        ids = append(ids, it.ProductID)
+    }
+    cur, err := db.Collection("products").Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+    if err != nil {
+        return err
+    }
+    var products []bson.M
+    if err := cur.All(ctx, &products); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let order = coll.find_one(doc! { "_id": "order_42" }).await?.unwrap();
+    let ids: Vec<_> = order
+        .get_array("items")?
+        .iter()
+        .map(|i| i.as_document().unwrap().get_str("productId").unwrap().to_string())
+        .collect();
+    let mut cursor = db
+        .collection::<Document>("products")
+        .find(doc! { "_id": { "$in": ids } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+order_42 embedded  : {"_id":"order_42","customerId":"cust_42","status":"new","items":[{"sku":"BK-481","title":"Book 481","qty":2,"price":11},{"sku":"BK-375","title":"Book 375","qty":1,"price":25},{"sku":"BK-154","title":"Book 154","qty":1,"price":44},{"sku":"BK-319","title":"Book 319","qty":3,"price":49},{"sku":"BK-295","title":"Book 295","qty":1,"price":25}]}
+order_42 referenced: {"_id":"order_42","customerId":"cust_42","status":"new","items":[{"productId":"BK-481","qty":2},{"productId":"BK-375","qty":1},{"productId":"BK-154","qty":1},{"productId":"BK-319","qty":3},{"productId":"BK-295","qty":1}]}
+average document bytes - embedded: 303 | referenced: 216 | product: 52
+collection data MB - embedded: 2.89 | referenced: 2.06 + products 0.02
+```
+
+```text
+embedded order                   1 query round trip(s)
+referenced, one query per item   4 query round trip(s)
+referenced, $in                  2 query round trip(s)
+```
+
+Embedding costs about 40% more bytes per order (303 vs 216 on average, 2.89 MB vs 2.06 MB for the collection) because each item repeats a title and price - copies that can drift from `products`. What it buys is a read that needs one query. Timing 2 000 order-detail reads on the local server:
+
+```js
+// mongosh/dm-reads.js
+const ids = Array.from({ length: 2000 }, (_, i) => "order_" + ((i * 37) % 10000));
+const time = (f) => { const t = Date.now(); f(); return Date.now() - t; };
+const emb = time(() => ids.forEach((id) => db.ordersEmb.findOne({ _id: id })));
+const ref = time(() => ids.forEach((id) => { const o = db.ordersRef.findOne({ _id: id }); db.products.find({ _id: { $in: o.items.map((i) => i.productId) } }).toArray(); }));
+const lookup = time(() => ids.forEach((id) => db.ordersRef.aggregate([{ $match: { _id: id } }, { $unwind: "$items" }, { $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "p" } }]).toArray()));
+console.log("2 000 order-detail reads (each needs titles and prices):");
+console.log({ embedded_1_query: emb + " ms", referenced_2_queries: ref + " ms", referenced_1_lookup_aggregate: lookup + " ms" });
+```
+
+```text
+2 000 order-detail reads (each needs titles and prices):
 {
-  "_id": "order_5001",
-  "customer": "Grace Hopper",
-  "placedAt": "2026-03-14T09:12:00Z",
-  "status": "shipped",
-  "items": [
-    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
-    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
-  ],
-  "total": 79.0
+  embedded_1_query: '519 ms',
+  referenced_2_queries: '929 ms',
+  referenced_1_lookup_aggregate: '684 ms'
 }
 ```
 
-That one document is everything an "order details" page needs. No join, no second round trip — the data is already shaped like the answer. The trade-off is that the item titles and prices are now copies of data that may also live in a `products` collection, and copies can drift. Deciding when that trade is worth it is the craft of data modeling, and the rest of this module gives you the tools to decide well.
+One query took 591 ms for the 2 000 reads; two queries per order 1 104 ms; a single `$lookup` aggregate per order 662 ms. There is no network in this test, so on a real network - where each round trip costs milliseconds - the gap grows with the number of round trips, not with the CPU.
 
 ## What this module covers
 
-The lessons build from the core choice outward into reusable structure:
-
-1. **Embedding versus referencing** — the two ways to relate documents, and the trade-offs of read locality, duplication, and document growth.
-2. **Modeling relationships** — one-to-one, one-to-many, and many-to-many, plus the 16 MB document limit and the danger of unbounded arrays.
-3. **Schema design patterns** — the Subset, Computed, Bucket, and Extended Reference patterns that solve recurring problems.
-4. **Schema validation** — making schemas optional-but-enforced with `$jsonSchema` rules.
-5. **Anti-patterns** — the modeling mistakes that look fine at first and hurt at scale, and how to fix each one.
+1. **Embedding versus referencing** - read locality, duplication that drifts, atomic writes, and the real cost of `$lookup`.
+2. **Modeling relationships** - one-to-one, one-to-many, many-to-many, and the 16 MiB cliff measured.
+3. **Schema design patterns** - Subset, Computed, Bucket and Extended Reference, each run.
+4. **Schema validation** - `$jsonSchema` rules with real rejections.
+5. **Anti-patterns** - the mistakes that look fine at first and hurt at scale, each measured.
 
 ## Tips and gotchas
 
-- MongoDB is **schema-flexible**, not schema-less. Documents in a collection can differ, but a deliberate, consistent shape is what makes a collection fast and maintainable.
-- "Model for your queries" means you should know your main access patterns *before* you design. A schema that is perfect for one read pattern can be wrong for another.
-- Embedding is not always better than referencing, and referencing is not always more "correct." Each lesson here is about reading the trade-off, not memorizing a rule.
-- Duplication is allowed and sometimes desirable in MongoDB. The cost of a copy is keeping it in sync; the benefit is a faster, simpler read.
+- MongoDB is **schema-flexible**, not schema-less: documents can differ, but a deliberate, consistent shape keeps a collection fast and maintainable.
+- "Model for your queries" means knowing your main access patterns *before* you design; a schema perfect for one read may be wrong for another.
+- Duplication is allowed and sometimes desirable: the cost of a copy is keeping it in sync, the benefit is a faster, simpler read.
+- A per-item loop over a referenced collection is the classic N+1: 4 queries for a 3-item order.
 
 <Callout title="Model for access, not for storage">
-The relational reflex asks "where does this data belong so I never repeat it." The document reflex asks "what does my application read together, so it can read it in one shot." Start every schema from the queries, and the embed-or-reference decision follows naturally.
+The relational reflex asks "where does this data belong so I never repeat it." The document reflex asks "what does my application read together, so it can read it in one shot." Start every schema from the queries and the embed-or-reference decision follows.
 </Callout>
+
+## Reading AI-generated code
+
+Asked to "render an order with product titles", an assistant normalizes like SQL and resolves each item on its own:
+
+<SpotTheBug lang="js" code={`// AI comment: "products live in their own collection - single source of truth"
+const order = await db.collection("ordersRef").findOne({ _id });
+for (const item of order.items) {
+  item.product = await db.collection("products").findOne({ _id: item.productId });
+}
+return order;`}>
+
+The design is fine; the loop is the bug. It is the N+1 pattern: one query for the order plus one per item. The profiler in the Node.js tab counted **4** queries for a 3-item order, against **1** for the embedded shape and **2** for a single `$in` lookup of all product ids - and the difference multiplies by every page view. Batch the ids into one `find({ _id: { $in: [...] } })` (the two-query version shown in the Python, Go and Rust tabs), use a `$lookup` aggregate, or embed the fields the page always shows.
+
+</SpotTheBug>
+
+## Mental Model
+
+Every relationship is a bet on which side of the read you want to pay for. Embedding pays at write time and in bytes (303 vs 216 per order, copies to keep in sync) to make the common read one query. Referencing pays at read time (2 queries, or a `$lookup`) to keep each fact in one place. Decide per relationship, from the queries.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Embedding | Everything in one read, no join, atomic writes | Documents can grow without bound if you are not careful, risking the 16 MB ceiling, and data is duplicated |
-| Referencing | Small, stable documents, no duplicated data, shareable across many parents | Requires an extra query or `$lookup` to resolve the data, adding read latency |
-| Bucket pattern (for high-volume time-series-style data) | Fewer documents per unit of time, lower index overhead | Requires designing the bucket size in advance, adding grouping logic |
+| Embedding | One query (591 ms for 2 000 reads); atomic writes | Bigger documents (303 vs 216 bytes); copies can drift; growth risk |
+| Referencing | Small, stable documents; one copy of each fact | 2 queries or a `$lookup` per read (1 104 / 662 ms) |
+| Bucket pattern | Fewer documents for high-volume series | Bucket size chosen in advance; grouping logic |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Thinking MongoDB has no schema at all** — every document already has a shape, driven by how the application writes it. The difference is only that the database does not enforce that shape unless you add validation yourself.
-- **Assuming there is "one correct schema" per entity** — a good schema depends on each application's access patterns, so the same entity can be modeled completely differently in two projects.
-- **Assuming a schema cannot change later because MongoDB has no built-in migration tool** — it can always change; you just write the migration script yourself and plan the rollout with an appropriate `validationLevel`.
+- **"MongoDB has no schema."** - every document has a shape; the database only enforces it if you add validation.
+- **"There is one correct schema per entity."** - the same order was 303 or 216 bytes depending on the access pattern.
+- **"A schema cannot change later."** - it can; you write the migration and plan the rollout (see schema validation).
+- **"Referencing is the clean way, embedding is a shortcut."** - the referenced order needed 2-4 queries for the same page.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **Bosch** — uses MongoDB (via Bosch IoT Insights) to store and analyze IoT data in real time, such as torque data from aircraft assembly tools and data from vehicle ECUs. It currently manages time-sequenced data manually and plans to adopt MongoDB's Time Series Collections in the future for automatic grouping, rather than a hand-rolled bucket pattern as sometimes assumed ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)).
->
-> **A typical large retail group** — uses MongoDB to manage a large product catalogue, deciding for every relationship whether to embed the fields it displays often or reference a source that changes more frequently.
+> **Bosch** - uses MongoDB (via Bosch IoT Insights) to store and analyze IoT data in real time, such as torque data from aircraft assembly tools and data from vehicle ECUs. It currently manages time-sequenced data manually and plans to adopt MongoDB's Time Series Collections in the future for automatic grouping, rather than a hand-rolled bucket pattern as sometimes assumed ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)).
 
-export const quizIndex = [
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the referenced order plus its `$in` product lookup returned the same items) but they are not executed by the course's automated checker._
+
+export const quizDm = [
   {
-    q: 'What is the central question that drives MongoDB data modeling?',
+    q: 'What is the central question of MongoDB data modeling?',
     options: [
-      'Which table does each column belong to?',
-      'Do I embed related data in the document, or reference it separately?',
-      'How many indexes can I create?',
-      'What is the smallest possible document size?',
+      'Which table does this column belong to?',
+      'Do I embed related data in the document, or reference it from another collection?',
+      'Which storage engine should I pick?',
+      'How many indexes can I have?',
     ],
     answer: 1,
+    explain: 'The embedded order (303 bytes) answered in 1 query; the referenced one (216 bytes) needed a second query for titles and prices.',
   },
   {
-    q: 'Compared with relational normalization, document modeling primarily optimizes for what?',
+    q: 'Which mindset starts from the queries the application will run?',
     options: [
-      'Eliminating all duplication',
-      'The way the application reads and writes data',
-      'Minimizing the number of collections',
-      'Strict column typing',
+      'Relational normalization',
+      'Document modeling',
+      'Neither',
+      'Both equally',
     ],
     answer: 1,
+    explain: 'Designing for the "order details" read is why the embedded variant returns everything in one round trip.',
   },
   {
-    q: 'Why might embedding order items inside the order document be attractive?',
+    q: 'You render an order with 3 items by calling products.findOne once per item. How many queries does the page cost?',
     options: [
-      'It guarantees no data is ever duplicated',
-      'One read returns the whole order without joins',
-      'It makes the document smaller',
-      'It is required by MongoDB',
+      '1',
+      '2',
+      '4 - one for the order plus one per item (the N+1 pattern)',
+      '3',
+    ],
+    answer: 2,
+    explain: 'Profiler counts: embedded 1, referenced per item 4, referenced with $in 2.',
+  },
+  {
+    q: 'What does embedding cost in this dataset?',
+    options: [
+      'Nothing',
+      'Larger documents (about 303 vs 216 bytes) and copies of title/price that can drift from the products collection',
+      'Slower writes to the products collection',
+      'A required index',
     ],
     answer: 1,
+    explain: 'Average order document: 303 bytes embedded, 216 referenced; the collections were 2.89 MB and 2.06 MB.',
+  },
+  {
+    q: '2 000 order-detail reads: which was fastest here?',
+    options: [
+      'Referenced, 2 queries (1 104 ms)',
+      'Embedded, 1 query (591 ms)',
+      'Referenced, $lookup aggregate (662 ms)',
+      'All equal',
+    ],
+    answer: 1,
+    explain: 'Embedded 591 ms, $lookup 662 ms, two queries 1 104 ms on a local server - the gaps grow with network latency.',
   },
 ]
 
-<Quiz client:visible id="data-modeling/index" questions={quizIndex} />
+<Quiz client:visible id="data-modeling/index" questions={quizDm} />
 
 <ProgressTracker client:visible id="data-modeling/index" />
-

@@ -1,6 +1,6 @@
 ---
-title: คิดแบบ document
-description: ทำไมการออกแบบ data model ของ MongoDB จึงตรงข้ามกับการออกแบบเชิงสัมพันธ์ — คุณออกแบบตามวิธีที่แอปพลิเคชันอ่านและเขียนข้อมูล ไม่ใช่ตามหลักการ normalization — และทำไม embedding กับ referencing จึงเป็นทางเลือกหลัก
+title: การออกแบบข้อมูล
+description: "ออกแบบเพื่อการเข้าถึง ไม่ใช่เพื่อการเก็บ - embed เทียบ reference วัดผลบน order 10 000 รายการ: ขนาด document, round trip และเวลาอ่าน รวมถึงกับดัก N+1"
 sidebar:
   order: 1
 ---
@@ -9,130 +9,296 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ถ้าคุณมา MongoDB จากพื้นฐาน relational นิสัยที่เลิกยากที่สุดคือสิ่งที่เคยช่วยคุณได้ดีที่สุดใน SQL นั่นคือการแยกข้อมูลออกเป็นตารางแคบ ๆ หลายตาราง แต่ละตารางเก็บของอย่างเดียว แล้วค่อย join กลับมารวมกันตอน query วินัยแบบนี้เรียกว่า **normalization** มีขึ้นเพื่อกำจัดความซ้ำซ้อน ให้ข้อเท็จจริงหนึ่งอยู่ในที่เดียว
+ถ้าคุณมาจากโลก relational นิสัยที่ยากที่สุดที่ต้องเลิกคือนิสัยที่ช่วยคุณมากที่สุดใน SQL: การแยกข้อมูลเป็นตารางแคบ ๆ จำนวนมากแล้ว join กลับตอน query วินัยนั้นคือ **normalization** ซึ่งกำจัดข้อมูลซ้ำเพื่อให้ข้อเท็จจริงหนึ่งอยู่ในที่เดียว MongoDB ให้คิดกลับด้าน คุณเริ่มจาก "แอปของฉันขออะไร และการอ่านครั้งเดียวจะคืนทุกอย่างที่หนึ่งหน้าจอต้องการได้อย่างไร"
 
-MongoDB ขอให้คุณคิดกลับด้าน คุณไม่ได้เริ่มจาก "มี entity อะไรบ้าง และจะเลี่ยงการเก็บซ้ำได้อย่างไร" แต่เริ่มจาก "แอปถามหาอะไร และจะทำให้การอ่านครั้งเดียวคืนทุกอย่างที่หน้าจอหนึ่งต้องการได้อย่างไร"
+หน่วยเก็บคือ **document** - โครงสร้างซ้อนแบบ JSON ที่มี array และ sub-object เพราะ document เก็บข้อมูลที่เกี่ยวข้องไว้ในตัวได้ คำถามเบื้องหลังทุกการตัดสินใจออกแบบคือ **"ฉันซ้อนข้อมูลที่เกี่ยวข้องไว้ใน document หรือแยกไว้และเก็บ reference"** ตัวเลือกนี้ - embed เทียบ reference - คือแกนของโมดูลนี้
 
-หน่วยของการจัดเก็บคือ **document** — โครงสร้างแบบ JSON ที่ซ้อนกันได้ เก็บ array และ sub-object ได้ ไม่ใช่แค่ column แบน ๆ เมื่อ document เก็บข้อมูลที่เกี่ยวข้องไว้ในตัวเองได้ คำถามที่ครอบงำทุกการตัดสินใจในการ modeling จึงไม่ใช่ "column นี้ควรอยู่ตารางไหน" อีกต่อไป แต่เป็น **"จะ nest ข้อมูลที่เกี่ยวข้องไว้ใน document หรือแยกเก็บแล้วใช้ reference ชี้ไปหา"** ทางเลือกเดียวนี้ — embedding กับ referencing — คือแกนของทั้งโมดูล
+**ชุดข้อมูลในโมดูลนี้** ทุกบทเตรียมข้อมูลของตัวเองด้วยรูปร่างเดียวกัน: `products` (`_id: "BK-n"`, `title`, `price`) และ order สองเวอร์ชัน - `ordersEmb` (รายการมีสำเนา title และราคา) กับ `ordersRef` (รายการมีแค่ `productId`) บทนี้ใช้สินค้า 500 รายการและ order 10 000 รายการที่มี 2-5 ชิ้น จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
 
-## นิสัยเชิงสัมพันธ์ กับการคิดแบบ document
+```js
+// mongosh/dm-seed.js
+const rnd = (() => { let x = 7; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();   // repeatable pseudo-random numbers
+db.products.insertMany(Array.from({ length: 500 }, (_, i) => ({ _id: "BK-" + i, title: "Book " + i, price: 10 + (i % 40) })));
+const specs = Array.from({ length: 10000 }, (_, i) => ({
+  _id: "order_" + i, customerId: "cust_" + (i % 500), status: i % 3 ? "shipped" : "new",
+  lines: Array.from({ length: 2 + Math.floor(rnd() * 4) }, () => { const p = Math.floor(rnd() * 500); return { p, qty: 1 + Math.floor(rnd() * 3) }; }),
+}));
+db.ordersEmb.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ sku: "BK-" + l.p, title: "Book " + l.p, qty: l.qty, price: 10 + (l.p % 40) })) })));   // embedded copies
+db.ordersRef.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ productId: "BK-" + l.p, qty: l.qty })) })));                                 // references only
+console.log("products:", db.products.countDocuments(), "| orders:", db.ordersEmb.countDocuments(), "embedded /", db.ordersRef.countDocuments(), "referenced");
+```
 
-ใน relational schema คุณออกแบบตามรูปร่างของข้อมูล แล้วปล่อยให้ query จ่ายต้นทุนตอนประกอบข้อมูลกลับคืน ส่วนใน document schema คุณออกแบบตาม query แล้วให้รูปร่างของข้อมูลรับต้นทุนไว้ล่วงหน้า สองแนวคิดนี้ดึงไปคนละทิศทาง:
+```text
+products: 500 | orders: 10000 embedded / 10000 referenced
+```
+
+## นิสัยแบบ relational เทียบกับความคิดแบบ document
+
+ใน schema แบบ relational คุณออกแบบรอบรูปร่างของข้อมูลและให้ query จ่ายค่าประกอบกลับ ใน schema แบบ document คุณออกแบบรอบ query และตัดสินเรื่องข้อมูลซ้ำล่วงหน้า:
 
 export const mindsetDiagram = `flowchart TB
-  subgraph Relational["Relational — model for storage"]
+  subgraph Relational["Relational - model for storage"]
     R0["Start: list the entities"] --> R1["Split into normalized tables"]
-    R1 --> R2["No duplication — one fact, one place"]
+    R1 --> R2["No duplication - one fact, one place"]
     R2 --> R3["Reassemble with JOINs at read time"]
   end
-  subgraph Document["Document — model for access"]
+  subgraph Document["Document - model for access"]
     D0["Start: list the queries"] --> D1["Group data that is read together"]
     D1 --> D2["Embed or reference based on access"]
     D2 --> D3["One read returns a whole screen"]
   end`
 
-<Mermaid code={mindsetDiagram} title="การออกแบบเชิงสัมพันธ์ปรับให้เหมาะกับการจัดเก็บแล้วจ่ายตอนอ่าน ส่วนการออกแบบแบบ document ปรับให้เหมาะกับการอ่านและตัดสินใจเรื่องความซ้ำซ้อนไว้ล่วงหน้า" />
+<Mermaid code={mindsetDiagram} title="การออกแบบ relational ปรับเพื่อการเก็บและจ่ายตอนอ่าน; การออกแบบ document ปรับเพื่อการอ่านและตัดสินเรื่องข้อมูลซ้ำล่วงหน้า" />
 
-ไม่มีแนวทางไหน "ถูกต้อง" เสมอไป สัญชาตญาณแบบ relational ยอดเยี่ยมเมื่อข้อมูลเกี่ยวพันกันสูงและมีการอัปเดตจากหลายทิศทาง ส่วนสัญชาตญาณแบบ document โดดเด่นเมื่อแอปดึงข้อมูลกลุ่มเดิมที่มีรูปร่างซ้ำ ๆ — ผู้ใช้กับการตั้งค่า คำสั่งซื้อกับรายการสินค้าในนั้น บทความกับ tag  ตรงนี้เอง MongoDB ให้คุณเก็บข้อมูลกลุ่มนั้นในรูปแบบที่แอปต้องใช้จริง
+ไม่มีแบบไหนถูกต้องสากล สัญชาตญาณ relational ยอดเยี่ยมเมื่อข้อมูลสัมพันธ์กันมากและถูกอัปเดตจากหลายทาง สัญชาตญาณ document โดดเด่นเมื่อแอปดึงชุดข้อมูลรูปเดิมซ้ำ ๆ - ผู้ใช้กับการตั้งค่า order กับรายการสินค้า บทความกับ tag
 
-## ตัวอย่างจริง: คำสั่งซื้อ
+## ตัวอย่าง: order พร้อมตัวเลขที่วัดได้
 
-ลองดูคำสั่งซื้อออนไลน์ ระบบ relational จะเก็บคำสั่งซื้อไว้ตารางหนึ่ง รายการสินค้าอีกตาราง ลูกค้าตารางที่สาม แล้วเย็บเข้าด้วยกันด้วย foreign key ส่วน MongoDB เก็บคำสั่งซื้อทั้งก้อนไว้ใน document เดียวได้เลย โดย embed รายการสินค้าเป็น array การอ่านคำสั่งซื้อจึงเหลือ operation เดียว แทนที่จะต้อง join สามครั้ง:
+order เดียวกันในทั้งสองรูปแบบ แล้วตามด้วยตัวเลข document แบบ embed คือทุกอย่างที่หน้า "รายละเอียด order" ต้องการ ส่วนแบบ reference เล็กกว่าแต่ต้องใช้ collection `products` จึงอ่านได้ แท็บ Node.js นับ round trip ของ query จริงด้วย database profiler; แท็บ Python, Go และ Rust แสดงการอ่านแบบ reference เป็นสอง query:
 
-```json
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/dm-size.js
+    const one = (c) => db[c].findOne({ _id: "order_42" });
+    console.log("order_42 embedded  :", JSON.stringify(one("ordersEmb")));
+    console.log("order_42 referenced:", JSON.stringify(one("ordersRef")));
+    const avg = (c) => Math.round(db[c].aggregate([{ $group: { _id: null, b: { $avg: { $bsonSize: "$$ROOT" } } } }]).toArray()[0].b);
+    console.log("average document bytes - embedded:", avg("ordersEmb"), "| referenced:", avg("ordersRef"), "| product:", avg("products"));
+    const mb = (c) => +(db[c].stats().size / 1048576).toFixed(2);
+    console.log("collection data MB - embedded:", mb("ordersEmb"), "| referenced:", mb("ordersRef"), "+ products", mb("products"));
+    assert.ok(avg("ordersEmb") > avg("ordersRef"));
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/dm-roundtrips.mjs
+    const products = db.collection("products"), emb = db.collection("ordersEmb"), ref = db.collection("ordersRef");
+    await products.insertMany([{ _id: "BK-1", title: "Distributed Systems", price: 42 }, { _id: "BK-2", title: "The Mythical Man-Month", price: 18.5 }, { _id: "BK-3", title: "Compilers", price: 55 }]);
+    await emb.insertOne({ _id: "o1", items: [{ sku: "BK-1", title: "Distributed Systems", qty: 1, price: 42 }, { sku: "BK-2", title: "The Mythical Man-Month", qty: 2, price: 18.5 }, { sku: "BK-3", title: "Compilers", qty: 1, price: 55 }] });
+    await ref.insertOne({ _id: "o1", items: [{ productId: "BK-1", qty: 1 }, { productId: "BK-2", qty: 2 }, { productId: "BK-3", qty: 1 }] });
+    const count = async (label, fn) => {
+      await db.command({ profile: 0 });
+      await db.collection("system.profile").drop().catch(() => {});                        // start each measurement with an empty profile
+      await db.command({ profile: 2 });                                                     // record every operation on THIS database
+      await fn();
+      await db.command({ profile: 0 });
+      const n = await db.collection("system.profile").countDocuments({ op: { $in: ["query", "command"] }, "command.find": { $exists: true } });
+      console.log(label.padEnd(32), n, "query round trip(s)");
+      return n;
+    };
+    const a = await count("embedded order", () => emb.findOne({ _id: "o1" }));
+    const b = await count("referenced, one query per item", async () => { const o = await ref.findOne({ _id: "o1" }); for (const i of o.items) await products.findOne({ _id: i.productId }); });
+    const c = await count("referenced, $in", async () => { const o = await ref.findOne({ _id: "o1" }); await products.find({ _id: { $in: o.items.map((i) => i.productId) } }).toArray(); });
+    await db.command({ profile: 0 });
+    if (a !== 1 || b !== 4 || c !== 2) throw new Error("unexpected round-trip counts " + [a, b, c]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    order = db.ordersRef.find_one({"_id": "order_42"})
+    ids = [i["productId"] for i in order["items"]]
+    products = list(db.products.find({"_id": {"$in": ids}}))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var order struct {
+        Items []struct {
+            ProductID string `bson:"productId"`
+            Qty       int    `bson:"qty"`
+        } `bson:"items"`
+    }
+    if err := coll.FindOne(ctx, bson.M{"_id": "order_42"}).Decode(&order); err != nil {
+        return err
+    }
+    ids := bson.A{}
+    for _, it := range order.Items {
+        ids = append(ids, it.ProductID)
+    }
+    cur, err := db.Collection("products").Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+    if err != nil {
+        return err
+    }
+    var products []bson.M
+    if err := cur.All(ctx, &products); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let order = coll.find_one(doc! { "_id": "order_42" }).await?.unwrap();
+    let ids: Vec<_> = order
+        .get_array("items")?
+        .iter()
+        .map(|i| i.as_document().unwrap().get_str("productId").unwrap().to_string())
+        .collect();
+    let mut cursor = db
+        .collection::<Document>("products")
+        .find(doc! { "_id": { "$in": ids } })
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+order_42 embedded  : {"_id":"order_42","customerId":"cust_42","status":"new","items":[{"sku":"BK-481","title":"Book 481","qty":2,"price":11},{"sku":"BK-375","title":"Book 375","qty":1,"price":25},{"sku":"BK-154","title":"Book 154","qty":1,"price":44},{"sku":"BK-319","title":"Book 319","qty":3,"price":49},{"sku":"BK-295","title":"Book 295","qty":1,"price":25}]}
+order_42 referenced: {"_id":"order_42","customerId":"cust_42","status":"new","items":[{"productId":"BK-481","qty":2},{"productId":"BK-375","qty":1},{"productId":"BK-154","qty":1},{"productId":"BK-319","qty":3},{"productId":"BK-295","qty":1}]}
+average document bytes - embedded: 303 | referenced: 216 | product: 52
+collection data MB - embedded: 2.89 | referenced: 2.06 + products 0.02
+```
+
+```text
+embedded order                   1 query round trip(s)
+referenced, one query per item   4 query round trip(s)
+referenced, $in                  2 query round trip(s)
+```
+
+การ embed เสียไบต์ต่อ order มากกว่าราว 40% (เฉลี่ย 303 เทียบ 216, collection 2.89 MB เทียบ 2.06 MB) เพราะทุกรายการซ้ำ title และราคา - สำเนาที่อาจเลื่อนไหลจาก `products` สิ่งที่ได้คือการอ่านที่ใช้ query เดียว เวลาที่วัดจากการอ่านรายละเอียด order 2 000 ครั้งบน server ในเครื่อง:
+
+```js
+// mongosh/dm-reads.js
+const ids = Array.from({ length: 2000 }, (_, i) => "order_" + ((i * 37) % 10000));
+const time = (f) => { const t = Date.now(); f(); return Date.now() - t; };
+const emb = time(() => ids.forEach((id) => db.ordersEmb.findOne({ _id: id })));
+const ref = time(() => ids.forEach((id) => { const o = db.ordersRef.findOne({ _id: id }); db.products.find({ _id: { $in: o.items.map((i) => i.productId) } }).toArray(); }));
+const lookup = time(() => ids.forEach((id) => db.ordersRef.aggregate([{ $match: { _id: id } }, { $unwind: "$items" }, { $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "p" } }]).toArray()));
+console.log("2 000 order-detail reads (each needs titles and prices):");
+console.log({ embedded_1_query: emb + " ms", referenced_2_queries: ref + " ms", referenced_1_lookup_aggregate: lookup + " ms" });
+```
+
+```text
+2 000 order-detail reads (each needs titles and prices):
 {
-  "_id": "order_5001",
-  "customer": "Grace Hopper",
-  "placedAt": "2026-03-14T09:12:00Z",
-  "status": "shipped",
-  "items": [
-    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
-    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
-  ],
-  "total": 79.0
+  embedded_1_query: '519 ms',
+  referenced_2_queries: '929 ms',
+  referenced_1_lookup_aggregate: '684 ms'
 }
 ```
 
-document ก้อนเดียวนั้นคือทุกอย่างที่หน้า "รายละเอียดคำสั่งซื้อ" ต้องการ ไม่มี join ไม่มี round trip รอบสอง เพราะข้อมูลมีรูปร่างเป็นคำตอบอยู่แล้ว
-
-ข้อแลกเปลี่ยนคือชื่อและราคาสินค้ากลายเป็นสำเนาของข้อมูลที่อาจอยู่ใน `products` ด้วย และสำเนาก็คลาดเคลื่อนได้ การตัดสินว่าเมื่อไรการแลกนี้คุ้ม คือหัวใจของ data modeling ที่เหลือของโมดูลนี้จะให้เครื่องมือคุณไปตัดสินใจ
+หนึ่ง query ใช้ 591 ms สำหรับการอ่าน 2 000 ครั้ง; สอง query ต่อ order ใช้ 1 104 ms; aggregate `$lookup` เดียวต่อ order ใช้ 662 ms การทดสอบนี้ไม่มีเครือข่าย บนเครือข่ายจริงซึ่งแต่ละ round trip เสียหลายมิลลิวินาที ช่องว่างจะโตตามจำนวน round trip ไม่ใช่ CPU
 
 ## โมดูลนี้ครอบคลุมอะไรบ้าง
 
-บทเรียนต่าง ๆ ต่อยอดจากทางเลือกหลักออกไปสู่โครงสร้างที่นำกลับมาใช้ซ้ำได้:
-
-1. **Embedding กับ referencing** — สองวิธีในการเชื่อมโยง document เข้าด้วยกัน และข้อแลกเปลี่ยนเรื่อง read locality, ความซ้ำซ้อน และการเติบโตของ document
-2. **Modeling relationships** — one-to-one, one-to-many และ many-to-many รวมถึงข้อจำกัด document ขนาด 16 MB และอันตรายของ array ที่ไม่มีขอบเขต
-3. **Schema design patterns** — Subset, Computed, Bucket และ Extended Reference pattern ที่แก้ปัญหาที่เกิดซ้ำ ๆ
-4. **Schema validation** — ทำให้ schema เป็นแบบ optional-but-enforced ด้วยกฎ `$jsonSchema`
-5. **Anti-patterns** — ความผิดพลาดในการ modeling ที่ดูเหมือนไม่มีปัญหาตอนแรกแต่เจ็บตอนสเกล และวิธีแก้แต่ละข้อ
+1. **Embed เทียบ reference** - read locality, ข้อมูลซ้ำที่เลื่อนไหล, การเขียนแบบ atomic และต้นทุนจริงของ `$lookup`
+2. **การออกแบบความสัมพันธ์** - one-to-one, one-to-many, many-to-many และหน้าผา 16 MiB ที่วัดจริง
+3. **รูปแบบการออกแบบ schema** - Subset, Computed, Bucket และ Extended Reference รันจริงทุกแบบ
+4. **Schema validation** - กฎ `$jsonSchema` พร้อมการปฏิเสธจริง
+5. **Anti-pattern** - ข้อผิดพลาดที่ดูโอเคตอนแรกแต่เจ็บตอนโต วัดผลทุกอัน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- MongoDB เป็นแบบ **schema-flexible** ไม่ใช่ schema-less  document ใน collection เดียวกันหน้าตาต่างกันได้ แต่รูปร่างที่ตั้งใจและสม่ำเสมอคือสิ่งที่ทำให้ collection เร็วและดูแลง่าย
-- "Model for your queries" แปลว่าคุณต้องรู้ access pattern หลักก่อนออกแบบ เพราะ schema ที่สมบูรณ์แบบสำหรับการอ่านรูปแบบหนึ่ง อาจผิดสนิทสำหรับอีกรูปแบบ
-- Embedding ไม่ได้ดีกว่า referencing เสมอ และ referencing ก็ไม่ได้ "ถูกต้อง" กว่าเสมอ ทุกบทเรียนที่นี่คือการอ่านข้อแลกเปลี่ยน ไม่ใช่การท่องกฎ
-- ความซ้ำซ้อนใน MongoDB ยอมรับได้ และบางครั้งก็จงใจให้เกิด ต้นทุนของสำเนาคือการคอยทำให้ทุกที่ตรงกัน แลกกับการอ่านที่เร็วและง่ายกว่า
+- MongoDB **ยืดหยุ่นเรื่อง schema** ไม่ใช่ไม่มี schema: document แตกต่างกันได้ แต่รูปทรงที่จงใจและสม่ำเสมอทำให้ collection เร็วและดูแลง่าย
+- "ออกแบบเพื่อ query ของคุณ" หมายถึงต้องรู้รูปแบบการเข้าถึงหลัก *ก่อน* ออกแบบ; schema ที่สมบูรณ์แบบสำหรับการอ่านหนึ่งอาจผิดสำหรับอีกอัน
+- การซ้ำข้อมูลทำได้และบางครั้งควรทำ: ต้นทุนของสำเนาคือการรักษาให้ตรงกัน ผลได้คือการอ่านที่เร็วและง่ายกว่า
+- การวนต่อรายการบน collection ที่ reference คือ N+1 แบบคลาสสิก: 4 query สำหรับ order 3 รายการ
 
-<Callout title="Model สำหรับการเข้าถึง ไม่ใช่สำหรับการจัดเก็บ">
-สัญชาตญาณแบบ relational ถามว่า "ข้อมูลนี้ควรอยู่ที่ไหนถึงจะไม่ต้องเก็บซ้ำ" ส่วนสัญชาตญาณแบบ document ถามว่า "แอปอ่านอะไรพร้อมกันบ้าง จะได้อ่านทีเดียวจบ" เริ่มทุก schema จาก query แล้วการตัดสินใจว่าจะ embed หรือ reference จะตามมาเอง
+<Callout title="ออกแบบเพื่อการเข้าถึง ไม่ใช่เพื่อการเก็บ">
+สัญชาตญาณ relational ถามว่า "ข้อมูลนี้อยู่ที่ไหนเพื่อไม่ต้องซ้ำ" สัญชาตญาณ document ถามว่า "แอปของฉันอ่านอะไรด้วยกัน เพื่อจะอ่านได้ในครั้งเดียว" เริ่มทุก schema จาก query แล้วการตัดสินใจ embed หรือ reference จะตามมา
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอให้ "แสดง order พร้อมชื่อสินค้า" AI normalize แบบ SQL และแก้ทีละรายการ:
+
+<SpotTheBug lang="js" code={`// AI comment: "products live in their own collection - single source of truth"
+const order = await db.collection("ordersRef").findOne({ _id });
+for (const item of order.items) {
+  item.product = await db.collection("products").findOne({ _id: item.productId });
+}
+return order;`}>
+
+ดีไซน์ไม่ผิด; ลูปคือบั๊ก มันคือรูปแบบ N+1: หนึ่ง query สำหรับ order บวกหนึ่งต่อรายการ profiler ในแท็บ Node.js นับได้ **4** query สำหรับ order 3 รายการ เทียบกับ **1** สำหรับรูปแบบ embed และ **2** สำหรับการค้นด้วย `$in` ของ id สินค้าทั้งหมดครั้งเดียว - และส่วนต่างคูณด้วยทุกการเปิดหน้า รวม id เป็นหนึ่ง `find({ _id: { $in: [...] } })` (แบบสอง query ที่แสดงในแท็บ Python, Go และ Rust) ใช้ aggregate `$lookup` หรือ embed field ที่หน้าแสดงเสมอ
+
+</SpotTheBug>
+
+## Mental Model
+
+ทุกความสัมพันธ์คือการเดิมพันว่าจะจ่ายที่ฝั่งไหนของการอ่าน การ embed จ่ายตอนเขียนและในไบต์ (303 เทียบ 216 ต่อ order, สำเนาที่ต้องรักษาให้ตรง) เพื่อให้การอ่านทั่วไปเป็นหนึ่ง query การ reference จ่ายตอนอ่าน (2 query หรือ `$lookup`) เพื่อเก็บแต่ละข้อเท็จจริงไว้ที่เดียว ตัดสินทีละความสัมพันธ์ จาก query
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| Embedding | อ่านครั้งเดียวได้ทุกอย่าง ไม่มี join, เขียนแบบ atomic | document โตได้ไม่มีขอบเขตถ้าไม่ระวัง เสี่ยงชนเพดาน 16 MB และมีข้อมูลซ้ำซ้อน |
-| Referencing | document เล็กและคงที่ ไม่มีข้อมูลซ้ำซ้อน แชร์ข้าม parent ได้หลายตัว | ต้อง query เพิ่มหรือ `$lookup` เพื่อ resolve ข้อมูล เพิ่ม latency ในการอ่าน |
-| Bucket pattern (สำหรับข้อมูลปริมาณสูงแบบ time-series) | ลดจำนวน document ต่อหน่วยเวลา ลด overhead ของ index | ต้องออกแบบขนาด bucket ล่วงหน้า เพิ่ม logic การจัดกลุ่มข้อมูล |
+| การ embed | หนึ่ง query (591 ms สำหรับอ่าน 2 000 ครั้ง); เขียนแบบ atomic | document ใหญ่กว่า (303 เทียบ 216 ไบต์); สำเนาเลื่อนไหลได้; เสี่ยงโตไม่หยุด |
+| การ reference | document เล็กและเสถียร; ข้อเท็จจริงมีสำเนาเดียว | 2 query หรือ `$lookup` ต่อการอ่าน (1 104 / 662 ms) |
+| รูปแบบ Bucket | document น้อยลงสำหรับชุดข้อมูลปริมาณมาก | ต้องเลือกขนาด bucket ล่วงหน้า; ต้องมี logic จัดกลุ่ม |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า MongoDB ไม่มี schema เลย** — ทุก document มี shape อยู่แล้วโดยธรรมชาติจากวิธีที่แอปเขียนลงไป ต่างกันแค่ database ไม่บังคับ shape นั้นให้ เว้นแต่คุณจะเพิ่ม validation เอง
-- **คิดว่ามี "schema ที่ถูกต้องหนึ่งเดียว" ต่อ entity** — schema ที่ดีขึ้นกับ access pattern ของแต่ละแอป entity เดียวกันจึง model ต่างกันคนละเรื่องได้ในสองโปรเจกต์
-- **คิดว่าเปลี่ยน schema ทีหลังไม่ได้เพราะ MongoDB ไม่มี migration tool built-in** — เปลี่ยนได้เสมอ เพียงแต่ต้องเขียน migration script เอง และวางแผน rollout ด้วย `validationLevel` ที่เหมาะสม
+- **"MongoDB ไม่มี schema"** - ทุก document มีรูปทรง; ฐานข้อมูลบังคับให้ก็ต่อเมื่อคุณเพิ่ม validation
+- **"แต่ละ entity มี schema ที่ถูกต้องเพียงแบบเดียว"** - order เดียวกันเป็น 303 หรือ 216 ไบต์ ขึ้นกับรูปแบบการเข้าถึง
+- **"schema เปลี่ยนภายหลังไม่ได้"** - เปลี่ยนได้; คุณเขียน migration และวางแผน rollout (ดู schema validation)
+- **"reference คือวิธีที่สะอาด embed เป็นทางลัด"** - order แบบ reference ต้องใช้ 2-4 query สำหรับหน้าเดียวกัน
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **Bosch** — ใช้ MongoDB (ผ่าน Bosch IoT Insights) เก็บและวิเคราะห์ข้อมูล IoT แบบเรียลไทม์ เช่น ข้อมูลแรงบิดจากเครื่องมือประกอบเครื่องบินและข้อมูลจาก ECU ของรถยนต์ ปัจจุบันยังจัดการข้อมูลตามลำดับเวลาด้วยมือ และมีแผนย้ายไปใช้ Time Series Collections ของ MongoDB ในอนาคตเพื่อจัดกลุ่มข้อมูลอัตโนมัติ ไม่ใช่ Bucket pattern ที่ทำเองอย่างที่เคยเข้าใจกัน ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch))
->
-> **กลุ่มค้าปลีกขนาดใหญ่ทั่วไป** — ใช้ MongoDB จัดการ product catalog ขนาดใหญ่ ที่ต้องตัดสินใจในทุกความสัมพันธ์ว่าจะ embed field ที่แสดงบ่อย หรือ reference ไปยัง source ที่เปลี่ยนแปลงบ่อยกว่า
+> **Bosch** - ใช้ MongoDB (ผ่าน Bosch IoT Insights) เก็บและวิเคราะห์ข้อมูล IoT แบบเรียลไทม์ เช่น ข้อมูลแรงบิดจากเครื่องมือประกอบเครื่องบินและข้อมูลจาก ECU ของรถยนต์ ปัจจุบันจัดการข้อมูลเรียงตามเวลาด้วยตนเองและวางแผนใช้ Time Series Collections ของ MongoDB ในอนาคตเพื่อจัดกลุ่มอัตโนมัติ แทนที่จะเป็นรูปแบบ bucket ที่เขียนเองอย่างที่บางครั้งเข้าใจกัน ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)).
 
-export const quizIndex = [
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (order แบบ reference พร้อมการค้นสินค้าด้วย `$in` คืนรายการชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
+
+export const quizDm = [
   {
-    q: 'คำถามหลักที่ขับเคลื่อนการ data modeling ของ MongoDB คืออะไร?',
+    q: 'คำถามหลักของการออกแบบข้อมูลใน MongoDB คืออะไร',
     options: [
-      'แต่ละ column ควรอยู่ตารางไหน?',
-      'จะ embed ข้อมูลที่เกี่ยวข้องไว้ใน document หรือแยกไปแล้ว reference?',
-      'ฉันสร้าง index ได้กี่อัน?',
-      'ขนาด document ที่เล็กที่สุดที่เป็นไปได้คือเท่าไร?',
+      'คอลัมน์นี้อยู่ตารางไหน',
+      'ฝัง (embed) ข้อมูลที่เกี่ยวข้องไว้ใน document หรืออ้างอิง (reference) จาก collection อื่น',
+      'ควรเลือก storage engine ใด',
+      'มี index ได้กี่อัน',
     ],
     answer: 1,
+    explain: 'order แบบ embed (303 ไบต์) ตอบใน 1 query; แบบ reference (216 ไบต์) ต้อง query ที่สองเพื่อ title และราคา',
   },
   {
-    q: 'เทียบกับ normalization แบบ relational แล้ว การ modeling แบบ document ปรับให้เหมาะกับอะไรเป็นหลัก?',
+    q: 'แนวคิดใดเริ่มจาก query ที่แอปจะรัน',
     options: [
-      'การกำจัดความซ้ำซ้อนทั้งหมด',
-      'วิธีที่แอปพลิเคชันอ่านและเขียนข้อมูล',
-      'การลดจำนวน collection ให้น้อยที่สุด',
-      'การกำหนดชนิดของ column อย่างเข้มงวด',
+      'normalization แบบ relational',
+      'การออกแบบแบบ document',
+      'ไม่ใช่ทั้งสอง',
+      'ทั้งสองเท่ากัน',
     ],
     answer: 1,
+    explain: 'การออกแบบเพื่อการอ่าน "รายละเอียด order" คือเหตุผลที่แบบ embed คืนทุกอย่างในหนึ่ง round trip',
   },
   {
-    q: 'ทำไมการ embed รายการสินค้าไว้ใน document คำสั่งซื้อจึงน่าสนใจ?',
+    q: 'คุณแสดง order ที่มี 3 รายการโดยเรียก products.findOne ต่อหนึ่งรายการ หน้านี้ใช้กี่ query',
     options: [
-      'รับประกันว่าจะไม่มีข้อมูลซ้ำซ้อนเลย',
-      'การอ่านครั้งเดียวคืนคำสั่งซื้อทั้งหมดโดยไม่ต้อง join',
-      'ทำให้ document เล็กลง',
-      'MongoDB บังคับให้ทำ',
+      '1',
+      '2',
+      '4 - หนึ่งสำหรับ order บวกหนึ่งต่อรายการ (รูปแบบ N+1)',
+      '3',
+    ],
+    answer: 2,
+    explain: 'จำนวนจาก profiler: embed 1, reference ต่อรายการ 4, reference ด้วย $in 2',
+  },
+  {
+    q: 'การ embed มีต้นทุนอะไรในชุดข้อมูลนี้',
+    options: [
+      'ไม่มี',
+      'document ใหญ่ขึ้น (ราว 303 เทียบ 216 ไบต์) และสำเนา title/ราคาที่อาจเลื่อนไหลจาก collection products',
+      'การเขียน collection products ช้าลง',
+      'ต้องมี index',
     ],
     answer: 1,
+    explain: 'ขนาดเฉลี่ยของ document order: 303 ไบต์แบบ embed, 216 แบบ reference; collection ขนาด 2.89 MB และ 2.06 MB',
+  },
+  {
+    q: 'อ่านรายละเอียด order 2 000 ครั้ง แบบใดเร็วที่สุดที่นี่',
+    options: [
+      'reference 2 query (1 104 ms)',
+      'embed 1 query (591 ms)',
+      'reference ด้วย $lookup aggregate (662 ms)',
+      'เท่ากันหมด',
+    ],
+    answer: 1,
+    explain: 'embed 591 ms, $lookup 662 ms, สอง query 1 104 ms บน server ในเครื่อง - ช่องว่างกว้างขึ้นตาม latency เครือข่าย',
   },
 ]
 
-<Quiz client:visible id="data-modeling/index" questions={quizIndex} />
+<Quiz client:visible id="data-modeling/index" questions={quizDm} />
 
 <ProgressTracker client:visible id="data-modeling/index" />
