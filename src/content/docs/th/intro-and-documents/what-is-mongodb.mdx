@@ -8,6 +8,7 @@ sidebar:
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 MongoDB เป็น **document database** วลีเดียวนี้บรรจุแนวคิดทั้งหมดไว้แล้ว: สิ่งที่เก็บคือ **document** ที่เป็น object คล้าย JSON ที่ครบในตัวเอง และกลุ่มของ document ก็คือ **collection** ฝั่ง relational database ขอให้คุณกระจายหนึ่งระเบียนเชิงตรรกะออกไปยังหลายตารางแล้วเย็บกลับมาด้วย join ส่วน MongoDB ปล่อยให้หนึ่งระเบียนเป็น document เดียวที่บรรจุทุกอย่างที่ควรอยู่ด้วยกันไว้แล้ว — รวมทั้ง object ซ้อนในและ array
@@ -33,16 +34,39 @@ export const rowVsDocDiagram = `flowchart LR
 
 <Mermaid code={rowVsDocDiagram} title="ระเบียนเดียวกันในรูปของ relational row ที่ join กัน เทียบกับ MongoDB document เดียว" />
 
-นี่คือหน้าตาจริงของ document เดียวนั้น — ชื่อ ยอดคงเหลือ และหนังสือที่ยืมทั้งหมดอยู่ในที่เดียว:
+นี่คือ document นั้น รันจริง fence นี้ insert สมาชิก อ่านกลับมา และถามเซิร์ฟเวอร์ว่ามันคือใคร — output ใต้แต่ละ fence คือสิ่งที่ `mongosh` 2.11.1 พิมพ์บน Mac เครื่องนี้กับ `mongo:8.3.11` (single-node replica set) ไม่ใช่ JSON ที่เขียนเอง:
 
-```json
+```js
+// mongosh/what-is.js
+print(db.version());                       // server version
+print(db.hello().isWritablePrimary);       // this node accepts writes
+print(db.hello().maxBsonObjectSize);       // the per-document ceiling, in bytes
+
+db.members.insertOne({ name: "Grace", fines: 0, borrowed: ["Compilers", "Algorithms"] });
+const grace = db.members.findOne({ name: "Grace" });
+console.log(grace);
+
+assert.strictEqual(grace.borrowed.length, 2);       // the array lives INSIDE the document: no loans table, no join
+assert.strictEqual(db.hello().maxBsonObjectSize, 16777216);
+```
+
+```text
+8.3.11
+true
+16777216
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Grace",
-  "fines": 0,
-  "borrowed": ["Compilers", "Algorithms"]
+  _id: ObjectId('6abca2af5967435115bd62b0'),
+  name: 'Grace',
+  fines: 0,
+  borrowed: [ 'Compilers', 'Algorithms' ]
 }
 ```
+
+สองอย่างที่ควรสังเกต `_id` คือ `ObjectId('...')` จริง (ชนิด BSON ไม่ใช่ string อย่างที่ JSON ธรรมดาให้) — บทถัด ๆ ไปจะแกะให้ดู — และ `maxBsonObjectSize` คือ `16777216` byte: **16 MiB คือเพดานตายตัวของหนึ่ง document** ซึ่งเป็นเหตุผลที่ "embed ทุกอย่าง" มีขีดจำกัด
+
+<Callout title="เวอร์ชันที่ใช้ในคอร์สนี้">
+ทุก output ในคอร์สนี้สร้างบน **mongo 8.3.11** (สิ่งที่ `mongo:8` resolve ได้เมื่อ 2026-09-30), **mongosh 2.11.1** และ **Node.js driver 7.7.0** บน Mac เครื่องเดียว `8.3` เป็น rapid-release line; 8.0 (major แบบ LTS) ทำงานเหมือนกันสำหรับทุกอย่างที่สอนที่นี่ เว้นแต่บทนั้นบอกไว้ ค่า `ObjectId` และเวลาของคุณจะต่างออกไป แต่รูปร่างจะไม่ต่าง
+</Callout>
 
 ## schema ที่ยืดหยุ่น
 
@@ -50,12 +74,19 @@ collection ไม่ได้บังคับให้ทุก document ม�
 
 ความยืดหยุ่นเป็นความสะดวก ไม่ใช่ข้ออ้างสำหรับความวุ่นวาย ในทางปฏิบัติคุณจงใจทำให้ document ใน collection ค่อนข้างสม่ำเสมอ และ MongoDB ยอมให้คุณเพิ่มกฎ **schema validation** เมื่อคุณต้องการให้ database บังคับรูปร่าง ประเด็นคือ schema อยู่ในมือคุณและสามารถวิวัฒน์ทีละ field โดยไม่ต้อง migration ที่เขียนทับทุกระเบียนที่มีอยู่ตั้งแต่ต้น
 
-```json
-{ "_id": "1", "name": "Ada",  "fines": 0 }
+```js
+// mongosh/what-is-flexible.js
+db.people.insertOne({ name: "Ada", fines: 0 });
+db.people.insertOne({ name: "Alan", fines: 2, email: "alan@example.org" });
+console.log(db.people.find({}, { _id: 0 }).toArray());
+assert.strictEqual(db.people.countDocuments({ email: { $exists: true } }), 1);
 ```
 
-```json
-{ "_id": "2", "name": "Alan", "fines": 2, "email": "alan@example.org" }
+```text
+[
+  { name: 'Ada', fines: 0 },
+  { name: 'Alan', fines: 2, email: 'alan@example.org' }
+]
 ```
 
 ทั้งสองนี้เป็นสมาชิกที่ถูกต้องสมบูรณ์ใน collection เดียวกัน แม้ว่าจะมีเพียงหนึ่งที่มี `email`
@@ -90,24 +121,70 @@ document database ไม่ใช่คำตอบที่ถูกต้อ�
 MongoDB เก็บข้อมูลของคุณเป็น document — object คล้าย JSON ที่ยืดหยุ่น จัดกลุ่มอยู่ใน collection — ดังนั้น database จึงมักจะสะท้อน object ในโค้ดของคุณแทนที่จะกระจายข้อมูลออกไปตามตารางที่ต้อง join กัน
 </Callout>
 
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอ "collection members ใน MongoDB" มักจะปลอบใจว่า database นี้ schemaless จึงไม่ต้องประกาศอะไร โค้ดดูไม่มีพิษภัย:
+
+<SpotTheBug lang="js" code={`// AI comment: "MongoDB is schemaless, so we can just insert - no setup needed"
+db.members.insertMany([
+  { name: "Ada", fines: 0 },
+  { name: "Alan", fines: 2 },
+]);
+db.members.insertOne({ name: "Grace", finess: 9 });   // typo in the field name
+
+// later: who owes money?
+db.members.countDocuments({ fines: { $gte: 1 } });`}>
+
+insert นี้ **ถูกรับ** — MongoDB ไม่มี schema ให้ปฏิเสธ Grace ค้างชำระ 9 แต่ document ของเธอมี field สะกดผิดคือ `finess` ดังนั้นจำนวนที่นับได้คือ `1` (เฉพาะ Alan) แทนที่จะเป็น `2` และไม่มี error ใด ๆ เกิดขึ้น `find({ fines: { $exists: false } })` จะเปิดโปงเธอ: `[ { name: 'Grace', finess: 9 } ]` "ยืดหยุ่น" หมายความว่ารูปร่างเป็นความรับผิดชอบของ *คุณ* วิธีแก้คือให้ database บังคับรูปร่างด้วย validator แบบ `$jsonSchema` (พิสูจน์ด้านล่าง; บท schema-validation ลงลึกอีกที):
+
+```js
+// mongosh/what-is-validator.js
+db.createCollection("checked", {
+  validator: { $jsonSchema: {
+    required: ["name", "fines"],
+    properties: { _id: {}, name: { bsonType: "string" }, fines: { bsonType: "int" } },
+    additionalProperties: false,   // without `_id: {}` above, this would reject EVERY insert
+  } },
+});
+let rejected = "";
+try { db.checked.insertOne({ name: "Grace", finess: 9 }); } catch (e) { rejected = e.message; print(rejected); }
+assert.strictEqual(rejected, "Document failed validation");
+assert.strictEqual(db.checked.insertOne({ name: "Grace", fines: 9 }).acknowledged, true);
+```
+
+```text
+Document failed validation
+```
+
+ตอนนี้ typo กลายเป็น error ตอนเขียน (`errInfo.details.schemaRulesNotSatisfied` แสดง `additionalProperties` และ `required`) สังเกตบรรทัด `_id: {}`: เมื่อใช้ `additionalProperties: false` เซิร์ฟเวอร์ถือว่า `_id` เป็น property เกินด้วย — กับดักจริงที่เจอตอนเขียนบทนี้
+
+</SpotTheBug>
+
+## Mental Model
+
+คิดว่า collection คือ **ชั้นวางแฟ้มที่อธิบายตัวเองได้** ไม่ใช่ตาราง แต่ละแฟ้ม (document) พกชื่อ field ของตัวเองมาด้วย จึงไม่มีอะไรนอกแฟ้มที่ต้องเห็นด้วยกับมัน นั่นคือเหตุผลที่การเพิ่ม field ไม่เสียอะไร — และเป็นเหตุผลที่ typo ก็เป็นแค่อีก field ที่ถูกต้อง database ให้ *การเก็บและ query เป็นค่าเริ่มต้น* และ *การบังคับรูปร่างเฉพาะเมื่อคุณขอ*
+
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Document database (MongoDB) | รูปร่างข้อมูลยืดหยุ่น เหมาะกับข้อมูลที่เป็นลำดับชั้นหรือหลากหลายโดยธรรมชาติ อ่านและเขียน object ทั้งก้อนได้เร็วโดยไม่ต้อง join | schema ไม่ถูกบังคับโดยอัตโนมัติ ความสม่ำเสมอของ document เป็นเรื่องที่ทีมต้องดูแลเอง และ ad-hoc join ข้าม collection ทำได้จำกัดกว่า SQL |
-| Relational database (PostgreSQL, MySQL) | schema เข้มงวดตั้งแต่ต้น รองรับ join แบบ many-to-many ที่ซับซ้อนได้ดี และมี tooling/ระบบนิเวศรายงานที่เติบโตเต็มที่ | การเปลี่ยน schema ต้อง migration ที่กระทบทุก row ที่มีอยู่ และข้อมูลที่เกี่ยวข้องกันมักต้องกระจายไปหลายตารางแล้ว join กลับ |
+| Document database (MongoDB) | รูปร่างข้อมูลยืดหยุ่น เหมาะกับข้อมูลที่เป็นลำดับชั้นหรือหลากหลายโดยธรรมชาติ อ่านและเขียน object ทั้งก้อนโดยไม่ต้อง join | schema ไม่ถูกบังคับโดยอัตโนมัติ (typo `finess` ด้านบนถูกรับ) — ความสม่ำเสมอเป็นเรื่องของทีม และ ad-hoc join ข้าม collection ทำได้จำกัดกว่า SQL |
+| Relational database (PostgreSQL, MySQL) | schema เข้มงวดตั้งแต่ต้น รองรับ join แบบ many-to-many ที่ซับซ้อนได้ดี และมี tooling/ระบบนิเวศรายงานที่เติบโตเต็มที่ | การเปลี่ยน schema ต้อง migration ที่กระทบทุก row ที่มีอยู่ และข้อมูลที่เกี่ยวข้องกันกระจายไปหลายตารางแล้วต้อง join กลับ |
+| MongoDB **พร้อม** `$jsonSchema` validation | ยืดหยุ่นตรงที่ต้องการ เข้มงวดตรงที่สำคัญ | คุณต้องดูแล schema และ migration เอง คล้ายฝั่ง relational |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เลือก MongoDB เพราะกระแส ไม่ใช่เพราะรูปแบบการเข้าถึงข้อมูลเข้ากัน** — ถ้า workload ของคุณเป็น join แบบ many-to-many หนัก ๆ และสม่ำเสมอ relational database มักเหมาะกว่า ไม่ใช่ว่า document database ดีกว่าเสมอ
-- **คิดว่า "schema ยืดหยุ่น" แปลว่า "ไม่มี schema"** — ในทางปฏิบัติ document ส่วนใหญ่ใน collection เดียวกันควรมีรูปร่างใกล้เคียงกัน schema แค่ไม่ได้ถูกบังคับโดย database เอง (เว้นแต่คุณเพิ่ม validation)
-- **มองว่าต้องเลือกอย่างใดอย่างหนึ่งสำหรับทั้งระบบ** — หลายระบบใช้ MongoDB สำหรับส่วนที่ต้องการความยืดหยุ่น และ relational database สำหรับส่วนที่ต้องการ transaction หลาย row หรือ join ที่ซับซ้อน ใช้ทั้งสองพร้อมกันได้
+- **"flexible schema" แปลว่า "ไม่มี schema"** — ผิด schema อยู่ในโค้ดของคุณและ (ถ้าต้องการ) ใน validator ตัวอย่าง `finess` ด้านบนคือรูปแบบความล้มเหลวเมื่อไม่มีใครเป็นเจ้าของ
+- **MongoDB คือ key-value store หรือ JSON ที่ทิ้งไว้บนดิสก์** — มันทำ index ให้ field รัน query ที่ทรงพลัง และตรวจรูปร่างข้อมูลเมื่อคุณสั่ง ค่า `_id` เป็น `ObjectId` (BSON) จริง ไม่ใช่ JSON string
+- **เลือก MongoDB เพราะกระแส** — join แบบ many-to-many ที่หนักและสม่ำเสมอมักเหมาะกับ relational database กว่า ให้เลือกตาม access pattern
+- **ระบบต้องเลือกอย่างใดอย่างหนึ่ง** — หลายระบบใช้ MongoDB สำหรับส่วนที่ยืดหยุ่น และ relational database สำหรับส่วนที่ต้องการ transaction หลาย row
+- **"document ใหญ่แค่ไหนก็ได้"** — `maxBsonObjectSize` พิมพ์ `16777216` ด้านบน: 16 MiB ต่อ document
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Forbes** — ย้าย CMS จาก schema แบบ relational เดิมมาเป็น MongoDB Atlas เพราะ schema ที่ยืดหยุ่นของ document model ช่วยให้ทีมพัฒนาฟีเจอร์ได้เร็วขึ้น ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019)
->
-> **ทีมที่รวมข้อมูลลูกค้าจากหลายระบบเดิม** — สร้างระบบ "single customer view" ด้วย MongoDB โดยรวมข้อมูลลูกค้าจากระบบ relational เดิมหลายสิบระบบให้เป็น document เดียวต่อลูกค้าหนึ่งคน แทนที่จะพยายาม join ข้ามระบบเดิมที่แยกกันอยู่
+> **Forbes** — ย้าย CMS ที่ให้บริการเนื้อหาทั้งหมดบน forbes.com ไปยัง MongoDB Atlas ในปี 2019; โครงสร้างข้อมูลที่ยืดหยุ่นทำให้ทีมเพิ่ม component ใหม่ได้เร็ว และ Forbes รายงานว่าเวลา build เฉลี่ยลดจาก 25 นาทีเหลือเก้านาที ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), เรียกอ่านเมื่อ 2026-09-30)
+
+_บทนี้ไม่ใช้ Python/Go/Rust; ทุก fence ด้านบนรันใน `mongosh`_
 
 export const quizWhat = [
   {
@@ -119,6 +196,7 @@ export const quizWhat = [
       'SQL view',
     ],
     answer: 1,
+    explain: 'document คือ object คล้าย JSON (BSON) ที่ครบในตัวเอง และ document ถูกจัดกลุ่มเป็น collection',
   },
   {
     q: 'คำว่า "flexible schema" ใน MongoDB หมายความว่าอย่างไรกันแน่?',
@@ -129,6 +207,7 @@ export const quizWhat = [
       'schema ไม่สามารถถูกบังคับได้เลย',
     ],
     answer: 2,
+    explain: 'field ต่างกันได้ต่อ document และคุณยังบังคับรูปร่างได้ด้วย validator แบบ $jsonSchema เมื่อต้องการ',
   },
   {
     q: 'workload แบบไหนที่มักเหมาะกับ relational database มากกว่า MongoDB?',
@@ -139,6 +218,29 @@ export const quizWhat = [
       'ข้อมูลที่ schema ยังเปลี่ยนแปลงอย่างรวดเร็ว',
     ],
     answer: 1,
+    explain: 'join ข้าม entity ที่สม่ำเสมอและสำคัญเท่ากันคือสิ่งที่ SQL ถูกสร้างมา ส่วน document เหมาะกับระเบียนที่ครบในตัวเอง',
+  },
+  {
+    q: 'ผู้ช่วย AI insert { name: "Grace", finess: 9 } ลงใน collection ที่ไม่มี validator จะเกิดอะไรขึ้น?',
+    options: [
+      'MongoDB ปฏิเสธเพราะ finess ไม่ใช่ field ที่รู้จัก',
+      'ถูกรับ และ query บน `fines` พลาด Grace โดยไม่มีเสียง',
+      'MongoDB แก้ finess เป็น fines ให้อัตโนมัติ',
+      'ทั้ง collection ถูกล็อกจนกว่าจะแก้ typo',
+    ],
+    answer: 1,
+    explain: 'เมื่อไม่มี validator ก็ไม่มีอะไรให้ปฏิเสธการเขียน จำนวนของ fines >= 1 ค้างที่ 1 ในการรันจริง',
+  },
+  {
+    q: 'db.hello().maxBsonObjectSize คืนค่าอะไรบนเซิร์ฟเวอร์ที่ใช้ในคอร์สนี้ และหมายความว่าอย่างไร?',
+    options: [
+      '16777216 — หนึ่ง document ใหญ่เกิน 16 MiB ไม่ได้',
+      '16384 — document จำกัดที่ 16 KiB',
+      '4294967296 — document ใหญ่ได้ถึง 4 GiB',
+      '0 — ไม่มีขีดจำกัด',
+    ],
+    answer: 0,
+    explain: 'ค่าจริงคือ 16777216 byte (16 MiB) เพดานตายตัวต่อ document',
   },
 ]
 

@@ -8,6 +8,7 @@ sidebar:
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 MongoDB is a **document database**. That single phrase carries the whole idea: the thing it stores is a **document**, a self-contained JSON-like object, and a group of documents is a **collection**. Where a relational database asks you to spread one logical record across several tables and stitch it back together with joins, MongoDB lets a record be one document that already holds everything that belongs together — nested objects and arrays included.
@@ -33,16 +34,39 @@ export const rowVsDocDiagram = `flowchart LR
 
 <Mermaid code={rowVsDocDiagram} title="The same record as joined relational rows versus a single MongoDB document" />
 
-Here is what that single document actually looks like — name, balance, and the borrowed books all in one place:
+Here is that document, run for real. This fence inserts the member, reads it back, and asks the server who it is — the output below each fence is what `mongosh` 2.11.1 printed on this Mac against `mongo:8.3.11` (single-node replica set), not hand-written JSON:
 
-```json
+```js
+// mongosh/what-is.js
+print(db.version());                       // server version
+print(db.hello().isWritablePrimary);       // this node accepts writes
+print(db.hello().maxBsonObjectSize);       // the per-document ceiling, in bytes
+
+db.members.insertOne({ name: "Grace", fines: 0, borrowed: ["Compilers", "Algorithms"] });
+const grace = db.members.findOne({ name: "Grace" });
+console.log(grace);
+
+assert.strictEqual(grace.borrowed.length, 2);       // the array lives INSIDE the document: no loans table, no join
+assert.strictEqual(db.hello().maxBsonObjectSize, 16777216);
+```
+
+```text
+8.3.11
+true
+16777216
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Grace",
-  "fines": 0,
-  "borrowed": ["Compilers", "Algorithms"]
+  _id: ObjectId('6abca2af5967435115bd62b0'),
+  name: 'Grace',
+  fines: 0,
+  borrowed: [ 'Compilers', 'Algorithms' ]
 }
 ```
+
+Two things to notice. The `_id` is a real `ObjectId('...')` (a BSON type, not the string that plain JSON would give you — the next lessons unpack it), and `maxBsonObjectSize` is `16777216` bytes: **16 MiB is the hard ceiling for one document**, which is why "embed everything" has a limit.
+
+<Callout title="Versions used in this course">
+Every output in this course was produced on **mongo 8.3.11** (what `mongo:8` resolves to on 2026-09-30), **mongosh 2.11.1** and the **Node.js driver 7.7.0**, on one Mac. `8.3` is a rapid-release line; 8.0 (the LTS-style major) behaves the same for everything taught here unless a lesson says otherwise. Your `ObjectId` values and timings will differ; the shapes will not.
+</Callout>
 
 ## Flexible schema
 
@@ -50,12 +74,19 @@ A collection does not force every document to have the same fields. One member d
 
 Flexibility is a convenience, not an excuse for chaos. In practice you keep documents in a collection mostly consistent on purpose, and MongoDB lets you add **schema validation** rules when you want the database to enforce a shape. The point is that the schema lives in your hands and can evolve field by field, without a migration that rewrites every existing record up front.
 
-```json
-{ "_id": "1", "name": "Ada",  "fines": 0 }
+```js
+// mongosh/what-is-flexible.js
+db.people.insertOne({ name: "Ada", fines: 0 });
+db.people.insertOne({ name: "Alan", fines: 2, email: "alan@example.org" });
+console.log(db.people.find({}, { _id: 0 }).toArray());
+assert.strictEqual(db.people.countDocuments({ email: { $exists: true } }), 1);
 ```
 
-```json
-{ "_id": "2", "name": "Alan", "fines": 2, "email": "alan@example.org" }
+```text
+[
+  { name: 'Ada', fines: 0 },
+  { name: 'Alan', fines: 2, email: 'alan@example.org' }
+]
 ```
 
 Both of these are perfectly valid members in the same collection, even though only one has an `email`.
@@ -90,35 +121,82 @@ The honest summary: pick the database whose natural shape matches your data and 
 MongoDB stores your data as documents — flexible, JSON-like objects grouped into collections — so the database tends to mirror the objects in your code instead of scattering them across joined tables.
 </Callout>
 
+## Reading AI-generated code
+
+An assistant asked for "a members collection in MongoDB" will often reassure you that the database is schemaless, so nothing needs to be declared. The code looks harmless:
+
+<SpotTheBug lang="js" code={`// AI comment: "MongoDB is schemaless, so we can just insert - no setup needed"
+db.members.insertMany([
+  { name: "Ada", fines: 0 },
+  { name: "Alan", fines: 2 },
+]);
+db.members.insertOne({ name: "Grace", finess: 9 });   // typo in the field name
+
+// later: who owes money?
+db.members.countDocuments({ fines: { $gte: 1 } });`}>
+
+The insert is **accepted** - MongoDB has no schema to reject it against. Grace owes 9, but her document has the misspelled field `finess`, so the count is `1` (only Alan) instead of `2`, and no error ever fires. A `find({ fines: { $exists: false } })` would have exposed her: `[ { name: 'Grace', finess: 9 } ]`. "Flexible" means the shape is *your* responsibility. The fix is to make the database enforce the shape with a `$jsonSchema` validator (proven next; the schema-validation lesson covers it in depth):
+
+```js
+// mongosh/what-is-validator.js
+db.createCollection("checked", {
+  validator: { $jsonSchema: {
+    required: ["name", "fines"],
+    properties: { _id: {}, name: { bsonType: "string" }, fines: { bsonType: "int" } },
+    additionalProperties: false,   // without `_id: {}` above, this would reject EVERY insert
+  } },
+});
+let rejected = "";
+try { db.checked.insertOne({ name: "Grace", finess: 9 }); } catch (e) { rejected = e.message; print(rejected); }
+assert.strictEqual(rejected, "Document failed validation");
+assert.strictEqual(db.checked.insertOne({ name: "Grace", fines: 9 }).acknowledged, true);
+```
+
+```text
+Document failed validation
+```
+
+The typo is now an error at write time (`errInfo.details.schemaRulesNotSatisfied` lists `additionalProperties` and `required`). Note the `_id: {}` line: with `additionalProperties: false` the server treats `_id` as an extra property too - a real gotcha we hit while writing this lesson.
+
+</SpotTheBug>
+
+## Mental Model
+
+Think of a collection as a **shelf of self-describing folders**, not a grid. Each folder (document) carries its own field names, so nothing outside the folder needs to agree with it. That is why adding a field is free - and also why a typo is just another valid field. The database gives you *storage and queries by default*, and *shape enforcement only when you ask for it*.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Document database (MongoDB) | Flexible data shapes, a natural fit for hierarchical or varied data; reads and writes a whole object fast without a join | Schema is not automatically enforced — document consistency is the team's job, and ad-hoc joins across collections are more limited than SQL |
-| Relational database (PostgreSQL, MySQL) | Strict schema from the start, strong support for complex many-to-many joins, and a mature tooling/reporting ecosystem | Changing the schema requires a migration touching every existing row, and related data is often spread across many tables that then need joining back together |
+| Document database (MongoDB) | Flexible data shapes, a natural fit for hierarchical or varied data; reads and writes a whole object without a join | Schema is not automatically enforced (the `finess` typo above was accepted) - consistency is the team's job, and ad-hoc joins across collections are more limited than SQL |
+| Relational database (PostgreSQL, MySQL) | Strict schema from the start, strong support for complex many-to-many joins, and a mature tooling/reporting ecosystem | Changing the schema requires a migration touching every existing row, and related data is spread across many tables that then need joining back together |
+| MongoDB **with** `$jsonSchema` validation | Flexible where you want it, strict where it matters | You now maintain the schema and its migrations, much like the relational side |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Choosing MongoDB because of hype, not because the access pattern fits** — if your workload is heavy, consistent many-to-many joins, a relational database is usually the better fit, not because a document database is inherently better.
-- **Thinking "flexible schema" means "no schema"** — in practice most documents in the same collection should have a similar shape. The schema is just not enforced by the database itself (unless you add validation).
-- **Assuming the whole system must pick one or the other** — many systems use MongoDB for the parts that need flexibility and a relational database for the parts that need multi-row transactions or complex joins. Using both at once is fine.
+- **"Flexible schema" means "no schema"** - false. The schema lives in your code and, optionally, in a validator. The `finess` example above is the failure mode when nobody owns it.
+- **MongoDB is a key-value store or JSON dumped on disk** - it indexes fields, runs rich queries, and validates shapes when you ask it to. `_id` values are real `ObjectId` (BSON) values, not JSON strings.
+- **Choosing MongoDB because of hype** - heavy, uniform many-to-many joins usually fit a relational database better; choose by access pattern.
+- **The system must pick one or the other** - many systems use MongoDB for the flexible parts and a relational database for multi-row transactional parts.
+- **"No limits on document size"** - `maxBsonObjectSize` printed `16777216` above: 16 MiB per document.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **Forbes** — migrated its CMS from a fixed relational schema to MongoDB Atlas; the document model's flexible schema let the team ship features faster ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019).
->
-> **A team consolidating customer data from many legacy systems** — built a "single customer view" on MongoDB, merging customer data from dozens of legacy relational systems into one document per customer instead of joining across the separate legacy systems.
+> **Forbes** - migrated the CMS that serves all content on forbes.com to MongoDB Atlas in 2019; its flexible data structures let the team add new components quickly, and Forbes reports average build times cut from 25 minutes to nine ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), fetched 2026-09-30).
+
+_Python/Go/Rust are not used in this lesson; every fence above ran in `mongosh`._
 
 export const quizWhat = [
   {
     q: 'What does MongoDB store as its basic unit of data?',
     options: [
       'A row in a fixed-column table',
-      'A document — a flexible, JSON-like object in a collection',
+      'A document - a flexible, JSON-like object in a collection',
       'A single key-value pair',
       'An SQL view',
     ],
     answer: 1,
+    explain: 'A document is a self-contained JSON-like (BSON) object; documents are grouped into collections.',
   },
   {
     q: 'What does "flexible schema" actually mean in MongoDB?',
@@ -129,6 +207,7 @@ export const quizWhat = [
       'The schema can never be enforced',
     ],
     answer: 2,
+    explain: 'Fields can differ per document, and you can still enforce a shape with a $jsonSchema validator when you want to.',
   },
   {
     q: 'Which workload is usually a better fit for a relational database than MongoDB?',
@@ -139,6 +218,29 @@ export const quizWhat = [
       'Data whose schema is still changing rapidly',
     ],
     answer: 1,
+    explain: 'Joins across uniform, equally important entities are what SQL was built for; documents shine for self-contained records.',
+  },
+  {
+    q: 'An AI assistant inserts { name: "Grace", finess: 9 } into a collection with no validator. What happens?',
+    options: [
+      'MongoDB rejects it because finess is not a known field',
+      'It is accepted, and queries on `fines` silently miss Grace',
+      'MongoDB auto-corrects finess to fines',
+      'The whole collection is locked until the typo is fixed',
+    ],
+    answer: 1,
+    explain: 'Without a validator there is nothing to reject the write against. The count of fines >= 1 stayed at 1 in the real run.',
+  },
+  {
+    q: 'What does db.hello().maxBsonObjectSize return on the server used in this course, and what does it mean?',
+    options: [
+      '16777216 - a single document cannot exceed 16 MiB',
+      '16384 - documents are capped at 16 KiB',
+      '4294967296 - documents can be up to 4 GiB',
+      '0 - there is no limit',
+    ],
+    answer: 0,
+    explain: 'The real value is 16777216 bytes (16 MiB), the hard per-document ceiling.',
   },
 ]
 
