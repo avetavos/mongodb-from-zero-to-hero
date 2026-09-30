@@ -9,7 +9,9 @@
     "preview": "astro preview",
     "astro": "astro",
     "test": "vitest run",
-    "check": "node tools/check-parity.mjs"
+    "check": "node tools/check-parity.mjs",
+    "verify": "node tools/verify-snippets.mjs",
+    "verify:all": "node tools/verify-snippets.mjs --all"
   },
   "dependencies": {
     "@astrojs/preact": "^5.1.5",

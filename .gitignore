@@ -20,3 +20,8 @@ pnpm-debug.log*
 # macOS-specific files
 .DS_Store
 .vercel
+
+# verify harness scratch
+tools/probe/node_modules/
+tools/probe/lessons/
+tools/probe/package-lock.json.bak

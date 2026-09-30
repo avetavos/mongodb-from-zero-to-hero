@@ -1,0 +1,8 @@
+{
+  "name": "mongodb-from-zero-to-hero-probe",
+  "private": true,
+  "type": "module",
+  "description": "Harness-owned probe project for tools/verify-snippets.mjs (Node driver + tsc for `app/` fences). Not published; safe to delete.",
+  "dependencies": { "mongodb": "7.7.0" },
+  "devDependencies": { "@types/node": "24.19.0", "typescript": "5.9.3" }
+}

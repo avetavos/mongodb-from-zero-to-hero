@@ -1,0 +1,12 @@
+{
+  "_note": "Pins for tools/verify-snippets.mjs. `mongo:8` (what the course tells learners to run) resolved to 8.3.11 on 2026-09-30; 8.0.32 is the newest 8.0 (major-release) tag.",
+  "mongoImage": "mongo:8.3.11",
+  "mongod": "8.3.11",
+  "mongosh": "2.11.1",
+  "nodeDriver": "7.7.0",
+  "typescript": "5.9.3",
+  "node": "24.x",
+  "port": 27117,
+  "container": "mongodb-from-zero-to-hero-verify",
+  "replSet": "rs0"
+}
