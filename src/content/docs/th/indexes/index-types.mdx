@@ -1,6 +1,6 @@
 ---
-title: ประเภทของ index
-description: เหนือกว่า index ธรรมดา — multikey สำหรับ array, text สำหรับการค้นหา, TTL สำหรับการหมดอายุอัตโนมัติ, partial และ sparse สำหรับชุดย่อย และ unique สำหรับบังคับให้ค่ามีหนึ่งเดียวไม่ซ้ำใคร
+title: ชนิดของ index
+description: นอกเหนือจาก index ธรรมดา - multikey, text, TTL, partial, unique และ sparse รวมถึง wildcard, hashed และ geospatial - แต่ละแบบพิสูจน์ด้วย explain หรือการรันจริง รวมถึงกับดัก (การจัดอันดับ text, วันที่แบบ string, sparse กับ sort)
 sidebar:
   order: 5
 ---
@@ -8,23 +8,67 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-index แบบจากน้อยไปมากธรรมดาครอบคลุมความต้องการส่วนใหญ่ แต่ MongoDB มาพร้อม index ประเภทเฉพาะทางหลายชนิดสำหรับกรณีที่ index ธรรมดาจัดการได้ไม่สง่างาม: ฟิลด์ที่ถือ array, การค้นหาแบบ full-text, document ที่ควรหมดอายุเอง, index ที่ครอบเพียงชิ้นหนึ่งของ collection และ index ที่บังคับความไม่ซ้ำ แต่ละชนิดเป็นการปรับเปลี่ยนเล็กน้อยจาก `createIndex` และแค่รู้ว่ามีของพวกนี้อยู่ ก็ช่วยให้คุณไม่ต้องไปแก้ขัดแบบเก้งก้าง เราจะไล่ไปทีละชนิด โดยยังคงใช้ collection `members` ของห้องสมุดของเรา
+index แบบ ascending ธรรมดาตอบโจทย์ส่วนใหญ่ แต่ MongoDB มี index เฉพาะทางสำหรับกรณีที่จัดการได้ไม่สวย: field ที่เป็น array, full-text search, document ที่ควรหมดอายุเอง, index เฉพาะส่วนของ collection, ความไม่ซ้ำ, attribute ที่ไม่มี schema, การค้นแบบ hashed และตำแหน่ง แต่ละแบบเป็นเพียงการปรับ `createIndex` เล็กน้อย และแต่ละแบบมีกับดักที่ตัวอย่างในเอกสารทั่วไปไม่แสดง บทนี้พิสูจน์ทุกแบบ
 
-## Multikey: การทำ index ให้ array
+จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว บทนี้เตรียม `members` 100 000 รายการ (10 เมือง ยืมหนังสือคนละสามเล่ม 2% มี fines ครึ่งหนึ่งมี `cardNumber` บางรายมี `attrs` แบบอิสระ และแต่ละคนมีพิกัดใกล้ Berlin) และใช้ helper `plan()` บรรทัดเดียวเดิม แท็บ Python, Go และ Rust ถูกรันอย่างละหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน
 
-เมื่อคุณทำ index บนฟิลด์ที่ถือ array MongoDB จะทำให้เป็น **multikey** index อัตโนมัติ คือทำ index ให้ทุกสมาชิกของ array แยกกัน query หาสมาชิกตัวใดตัวหนึ่งจึง seek ตรงไปยัง document ที่ match ได้ คุณไม่ได้สั่งให้เป็น multikey แต่เกิดขึ้นเองเพราะค่าของฟิลด์เป็น array ทำ index บน array `borrowed` ของชื่อหนังสือ:
+```js
+// mongosh/types-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {                       // stage chain (also through TEXT/GEO stages), then keys and docs read
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+const colors = ["red", "green", "blue"];
+for (let s = 0; s < 100000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    const d = { name: "m" + i, city: cities[i % 10],
+                borrowed: ["book" + (i % 500), "book" + ((i * 7) % 500), "book" + ((i * 13) % 500)],
+                fines: i % 50 === 0 ? 1 + (i % 7) : 0,                       // only 2% of members owe anything
+                location: { type: "Point", coordinates: [13 + (i % 100) / 100, 52 + (Math.floor(i / 100) % 100) / 100] } };
+    if (i % 2 === 0) d.cardNumber = "C" + i;                                    // half the members have no card
+    if (i % 3 === 0) d.attrs = { color: colors[i % 3 === 0 ? (i / 3) % 3 : 0] };   // schemaless attributes
+    if (i % 5 === 0) d.attrs = Object.assign(d.attrs ?? {}, { size: "L" });
+    return d;
+  }), { ordered: false });
+}
+console.log("members:", db.members.countDocuments(), "| with fines:", db.members.countDocuments({ fines: { $gt: 0 } }), "| with cardNumber:", db.members.countDocuments({ cardNumber: { $exists: true } }));
+```
+
+```text
+members: 100000 | with fines: 2000 | with cardNumber: 50000
+```
+
+## Multikey: ทำ index ให้ array
+
+เมื่อคุณทำ index ให้ field ที่เก็บ array MongoDB ทำให้เป็น index แบบ **multikey** อัตโนมัติ: หนึ่ง entry ต่อหนึ่งสมาชิกของ array query หาหนังสือหนึ่งเล่มจึง seek ตรงถึงเจ้าของ ไม่ต้องตั้งค่าอะไร - ค่าเป็นตัวตัดสิน
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex({ borrowed: 1 })
+    // mongosh/types-multikey.js
+    console.log(db.members.createIndex({ borrowed: 1 }));
+    console.log("borrowed = book42:", plan(db.members.find({ borrowed: "book42" })));
+    const st = db.members.find({ borrowed: "book42" }).explain().queryPlanner.winningPlan.inputStage;
+    console.log({ isMultiKey: st.isMultiKey, multiKeyPaths: st.multiKeyPaths });
+    console.log("index entries vs documents:", db.members.aggregate([{ $indexStats: {} }]).toArray().length, "indexes;",
+      "borrowed_1 holds ~", db.members.countDocuments() * 3, "keys for", db.members.countDocuments(), "documents");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex({ borrowed: 1 });
+    // app/types-multikey.mjs
+    const c = db.collection("members");
+    await c.insertMany(Array.from({ length: 1000 }, (_, i) => ({ borrowed: ["book" + (i % 50), "book" + ((i * 7) % 50)] })));
+    console.log(await c.createIndex({ borrowed: 1 }));
+    const e = await c.find({ borrowed: "book7" }).explain("executionStats");
+    console.log("keys", e.executionStats.totalKeysExamined, "docs", e.executionStats.totalDocsExamined, "returned", e.executionStats.nReturned);
+    if (e.executionStats.totalDocsExamined !== e.executionStats.nReturned) throw new Error("multikey index not used");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -34,10 +78,9 @@ index แบบจากน้อยไปมากธรรมดาครอ�
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{Keys: bson.D{{Key: "borrowed", Value: 1}}},
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "borrowed", Value: 1}},
+    })
     if err != nil {
         return err
     }
@@ -53,43 +96,101 @@ index แบบจากน้อยไปมากธรรมดาครอ�
   </TabItem>
 </Tabs>
 
-query อย่างการหาทุกคนที่ยืม `"Compilers"` ตอนนี้ seek แทนที่จะสแกน แม้ค่าจะอยู่ภายใน array
+```text
+borrowed_1
+borrowed = book42: FETCH > IXSCAN(borrowed_1)  returned=600 keys=600 docs=600
+{ isMultiKey: true, multiKeyPaths: { borrowed: [ 'borrowed' ] } }
+index entries vs documents: 2 indexes; borrowed_1 holds ~ 300000 keys for 100000 documents
+```
 
-## Text: การค้นหาคำ
+```text
+borrowed_1
+keys 40 docs 40 returned 40
+```
 
-**text index** ตัดคำ (tokenize) ฟิลด์ string เพื่อให้คุณค้นหาคำด้วยตัวดำเนินการ `$text` แทนการ match string แบบเป๊ะ ลองทำ text index บนฟิลด์ `notes` ของสมาชิกแล้ว query ดู:
+สมาชิก 600 คนยืม `book42` และอ่าน 600 key กับ 600 document - อัตราส่วนสมบูรณ์ - แต่ราคาคือขนาด: ราวสาม entry ต่อ document compound index มี **field ที่เป็น array ได้อย่างมากหนึ่งอัน** เพราะสอง array จะคูณเป็นทุกการจับคู่
+
+```js
+// mongosh/types-parallel.js
+db.pairs.insertOne({ borrowed: ["a", "b"], tags: "single" });
+console.log(db.pairs.createIndex({ borrowed: 1, tags: 1 }));            // fine: only one of the two is an array
+try { db.pairs.insertOne({ borrowed: ["a", "b"], tags: ["x", "y"] }); } // both arrays in one document
+catch (e) { console.log("code", e.code + ":", e.message); }
+console.log("documents in pairs:", db.pairs.countDocuments());
+```
+
+```text
+borrowed_1_tags_1
+code 171: cannot index parallel arrays [tags] [borrowed]
+documents in pairs: 1
+```
+
+## Text: ค้นหาคำ
+
+**text index** แยกคำและทำ stem ให้ field แบบ string เพื่อให้ `$text` จับคู่คำได้ บทเดิมเคยบอกว่าผลลัพธ์เรียงตามความเกี่ยวข้อง แต่ไม่ใช่ เว้นแต่คุณขอ server เก็บคะแนนไว้และคุณต้อง project และ sort ด้วย `{ $meta: "textScore" }`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex({ notes: "text" })
-    db.members.find({ $text: { $search: "overdue reminder" } })
+    // mongosh/types-text.js
+    db.tickets.insertMany([
+      { n: 1, notes: "overdue" },
+      { n: 2, notes: "reminder" },
+      { n: 3, notes: "returned on time" },
+      { n: 4, notes: "overdue reminder sent" },
+      { n: 5, notes: "reminder: overdue, overdue again, overdue notice, reminder" },
+    ]);
+    console.log(db.tickets.createIndex({ notes: "text" }));
+    const plain = db.tickets.find({ $text: { $search: "overdue reminder" } }).toArray().map((d) => d.n);
+    console.log("no sort (index order)   :", plain);
+    const ranked = db.tickets.find({ $text: { $search: "overdue reminder" } }, { score: { $meta: "textScore" } }).sort({ score: { $meta: "textScore" } }).toArray();
+    console.log("sorted by textScore     :", ranked.map((d) => d.n + ":" + d.score.toFixed(2)).join("  "));
+    console.log("plan                    :", plan(db.tickets.find({ $text: { $search: "overdue reminder" } })));
+    try { db.tickets.createIndex({ other: "text" }); } catch (e) { console.log(e.codeName + ":", e.message.slice(0, 110)); }
+    assert.strictEqual(JSON.stringify(ranked.slice(0, 2).map((d) => d.n)), "[5,4]");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex({ notes: "text" });
-    await db.collection("members")
-      .find({ $text: { $search: "overdue reminder" } })
-      .toArray();
+    // app/types-text.mjs
+    const c = db.collection("tickets");
+    await c.insertMany([{ notes: "reminder sent" }, { notes: "overdue overdue reminder" }, { notes: "returned" }]);
+    console.log(await c.createIndex({ notes: "text" }));
+    const rows = await c.find({ $text: { $search: "overdue reminder" } }).project({ score: { $meta: "textScore" }, notes: 1, _id: 0 }).sort({ score: { $meta: "textScore" } }).toArray();
+    console.log(rows.map((r) => r.notes + " " + r.score.toFixed(2)));
+    if (!rows[0].notes.startsWith("overdue")) throw new Error("best match should come first");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     db.members.create_index([("notes", "text")])
-    list(db.members.find({"$text": {"$search": "overdue reminder"}}))
+    rows = list(
+        db.members.find(
+            {"$text": {"$search": "overdue reminder"}},
+            {"score": {"$meta": "textScore"}},
+        ).sort([("score", {"$meta": "textScore"})])
+    )
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{Keys: bson.D{{Key: "notes", Value: "text"}}},
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "notes", Value: "text"}},
+    })
     if err != nil {
         return err
     }
-    cur, err := coll.Find(ctx, bson.M{"$text": bson.M{"$search": "overdue reminder"}})
+    opts := options.Find().
+        SetProjection(bson.M{"score": bson.M{"$meta": "textScore"}}).
+        SetSort(bson.M{"score": bson.M{"$meta": "textScore"}})
+    cur, err := coll.Find(ctx, bson.M{"$text": bson.M{"$search": "overdue reminder"}}, opts)
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
+        return err
+    }
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -98,29 +199,52 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
         IndexModel::builder().keys(doc! { "notes": "text" }).build(),
     )
     .await?;
-    let cur = coll.find(doc! { "$text": { "$search": "overdue reminder" } }).await?;
+    let mut cursor = coll
+        .find(doc! { "$text": { "$search": "overdue reminder" } })
+        .projection(doc! { "score": { "$meta": "textScore" } })
+        .sort(doc! { "score": { "$meta": "textScore" } })
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-การค้นหาจับคู่คำใดคำหนึ่งและจัดอันดับผลลัพธ์ตามความเกี่ยวข้อง collection หนึ่งมี text index ได้อันเดียวเท่านั้น แม้ index อันนั้นจะครอบหลายฟิลด์ string ก็ตาม
+```text
+notes_text
+no sort (index order)   : [ 5, 1, 4, 2 ]
+sorted by textScore     : 5:2.31  4:1.33  1:1.00  2:1.00
+plan                    : TEXT_MATCH(notes_text) > FETCH > OR  returned=4 keys=6 docs=4
+IndexOptionsConflict: An equivalent index already exists with a different name and options. Requested index: { v: 2, key: { _fts: "t
+```
 
-## TTL: document ที่หมดอายุ
+```text
+notes_text
+[ 'overdue overdue reminder 1.92', 'reminder sent 0.75' ]
+```
 
-**TTL** (time to live) index ลบ document อัตโนมัติเมื่อฟิลด์วันที่เก่ากว่าจำนวนวินาทีที่กำหนด สร้างได้ด้วยการทำ index บนฟิลด์วันที่พร้อม option `expireAfterSeconds` ตรงนี้ ระเบียน session ของสมาชิกจะหมดอายุหนึ่งชั่วโมงหลังจาก timestamp `createdAt`:
+ถ้าไม่ sort ลำดับเป็น 5, 1, 4, 2 - document 1 (คะแนน 1.00) นำหน้า document 4 (1.33) เมื่อ sort ด้วย `textScore`: 5 (2.31), 4 แล้วตามด้วยคะแนนเสมอ plan เป็น `TEXT_MATCH > FETCH > OR` เพราะ query เป็น OR ของคำค้น หนึ่ง collection มี text index ได้อันเดียว (การสร้างอันที่สองได้ `IndexOptionsConflict` เพราะ text index มี internal key เดียวกันเสมอ) ให้ใส่ทุก field ที่ค้นได้ใน index เดียวนั้น text search สะดวกแต่พื้นฐาน: ไม่มี fuzzy matching หรือการปรับ relevance นอกจาก `weights` - สำหรับสิ่งเหล่านั้นให้ดู Atlas Search
+
+## TTL: document ที่หมดอายุเอง
+
+**TTL** index ลบ document เมื่อ field วันที่เก่ากว่า `expireAfterSeconds` field ต้องเป็น BSON date (หรือ array ที่มี date): คู่มือระบุว่า "specify an index field that is either a date type or an array that contains date type values" และงานเบื้องหลัง "runs every 60 seconds" ([TTL indexes](https://www.mongodb.com/docs/manual/core/index-ttl/), ตรวจ 2026-09-30) การสร้างทำได้ในการเรียกเดียว แท็บแรกด้านล่างยังพิสูจน์กับดักเรื่องชนิดข้อมูลด้วย:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 })
+    // mongosh/types-ttl-type.js
+    db.sessions2.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 });
+    db.sessions2.insertMany([{ _id: "bug", createdAt: new Date().toISOString() }, { _id: "fix", createdAt: new Date() }]);
+    console.log(db.sessions2.aggregate([{ $project: { _id: 1, type: { $type: "$createdAt" } } }]).toArray());
+    assert.strictEqual(db.sessions2.findOne({ _id: "bug" }) !== null && db.sessions2.aggregate([{ $match: { _id: "bug" } }, { $project: { t: { $type: "$createdAt" } } }]).toArray()[0].t, "string");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("sessions").createIndex(
-      { createdAt: 1 },
-      { expireAfterSeconds: 3600 }
-    );
+    // app/types-ttl.mjs
+    const c = db.collection("sessions");
+    console.log(await c.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 }));
+    const spec = (await c.listIndexes().toArray()).find((i) => i.name === "createdAt_1");
+    console.log("expireAfterSeconds:", spec.expireAfterSeconds);
+    if (spec.expireAfterSeconds !== 3600) throw new Error("TTL not set");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -130,13 +254,10 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys:    bson.D{{Key: "createdAt", Value: 1}},
-            Options: options.Index().SetExpireAfterSeconds(3600),
-        },
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys:    bson.D{{Key: "createdAt", Value: 1}},
+        Options: options.Index().SetExpireAfterSeconds(3600),
+    })
     if err != nil {
         return err
     }
@@ -149,7 +270,7 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
             .keys(doc! { "createdAt": 1 })
             .options(
                 IndexOptions::builder()
-                    .expire_after(Duration::from_secs(3600))
+                    .expire_after(std::time::Duration::from_secs(3600))
                     .build(),
             )
             .build(),
@@ -159,27 +280,71 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
   </TabItem>
 </Tabs>
 
-งานเบื้องหลังกวาดและลบ document ที่หมดอายุออก การกวาดทำงานราวหนึ่งครั้งต่อนาที ดังนั้นการลบจึงฉับไวแต่ไม่ทันที
+```text
+[ { _id: 'bug', type: 'string' }, { _id: 'fix', type: 'date' } ]
+```
 
-## Partial: การทำ index ชุดย่อย
+```text
+createdAt_1
+expireAfterSeconds: 3600
+```
 
-**partial** index ครอบเฉพาะ document ที่ตรงกับนิพจน์ตัวกรอง ซึ่งทำให้ index เล็กเมื่อคุณ query เพียงชิ้นหนึ่งของ collection ทำ index เฉพาะสมาชิกที่ค้าง fines จริง โดยแนบ `partialFilterExpression`:
+เพื่อเห็นเวลาจริง การรันนี้ใช้ `expireAfterSeconds: 1` และ poll ตรวจ มันถูกทำเครื่องหมาย `@skip-verify` เพราะรอตัว monitor ที่ทำงานทุก 60 วินาที และตัวตรวจของคอร์สมีงบ 90 วินาทีต่อบท:
+
+```js
+// mongosh/types-ttl.js @skip-verify waits up to ~60 s for the TTL monitor (default sweep interval)
+db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 1 });
+const t0 = Date.now();
+db.sessions.insertMany([
+  { _id: "date", createdAt: new Date() },
+  { _id: "array", createdAt: [new Date(), new Date(Date.now() + 3600e3)] },
+  { _id: "string", createdAt: new Date().toISOString() },                 // the trap: a string, not a Date
+]);
+let gone = null;
+while (Date.now() - t0 < 125000) {
+  if (gone === null && db.sessions.countDocuments({ _id: { $in: ["date", "array"] } }) === 0) gone = Math.round((Date.now() - t0) / 1000);
+  sleep(1000);
+}
+console.log("Date and array-of-Date documents gone after", gone, "s (expireAfterSeconds was 1)");
+console.log("after 125 s still stored:", db.sessions.find().toArray().map((d) => d._id));
+```
+
+```text
+Date and array-of-Date documents gone after 14 s (expireAfterSeconds was 1)
+after 125 s still stored: [ 'string' ]
+```
+
+document แบบ Date และ array ของ Date หายไปภายในรอบ 60 วินาทีของ monitor (14 วินาทีในการรันนี้ - เฟสขึ้นกับว่ารอบล่าสุดยิงเมื่อไร) ไม่เคยทันที document ที่เก็บ ISO string ยังอยู่หลัง 125 วินาที และจะอยู่ตลอดไป: TTL เมินค่าที่ไม่ใช่วันที่แบบเงียบ ๆ
+
+## Partial: ทำ index บางส่วน
+
+**partial** index ครอบคลุมเฉพาะ document ที่ตรง filter จึงเล็กเมื่อคุณ query แค่ส่วนเดียว มีสมาชิกเพียง 2% ที่ค้างค่าปรับ index ด้านล่างจึงมี 2 000 entry แทน 100 000:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex(
-      { fines: 1 },
-      { partialFilterExpression: { fines: { $gt: 0 } } }
-    )
+    // mongosh/types-partial.js
+    console.log(db.members.createIndex({ fines: 1 }, { partialFilterExpression: { fines: { $gt: 0 } }, name: "fines_owing" }));
+    const kb = (n) => Math.round(n / 1024);
+    db.members.createIndex({ fines: 1 }, { name: "fines_all" });
+    const sz = db.members.stats().indexSizes;
+    console.log("index sizes KB:", { fines_owing: kb(sz.fines_owing), fines_all: kb(sz.fines_all) });
+    db.members.dropIndex("fines_all");
+    console.log("fines > 2   :", plan(db.members.find({ fines: { $gt: 2 } })));
+    console.log("fines = 0   :", plan(db.members.find({ fines: 0 })));
+    console.log("fines >= 0  :", plan(db.members.find({ fines: { $gte: 0 } })));
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex(
-      { fines: 1 },
-      { partialFilterExpression: { fines: { $gt: 0 } } }
-    );
+    // app/types-partial.mjs
+    const c = db.collection("members");
+    await c.insertMany(Array.from({ length: 2000 }, (_, i) => (i % 2 ? { fines: i % 50 === 0 ? 3 : 0 } : { fines: i % 50 === 0 ? 3 : 0, cardNumber: "C" + i })));
+    console.log(await c.createIndex({ fines: 1 }, { partialFilterExpression: { fines: { $gt: 0 } } }));
+    console.log(await c.createIndex({ cardNumber: 1 }, { unique: true, partialFilterExpression: { cardNumber: { $exists: true } }, name: "card_unique" }));
+    const e = await c.find({ fines: { $gt: 2 } }).explain("executionStats");
+    console.log("fines > 2: keys", e.executionStats.totalKeysExamined, "docs", e.executionStats.totalDocsExamined);
+    if (e.executionStats.totalDocsExamined !== 40) throw new Error("partial index not used");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -188,19 +353,30 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
         [("fines", 1)],
         partialFilterExpression={"fines": {"$gt": 0}},
     )
+    db.members.create_index(
+        [("cardNumber", 1)],
+        unique=True,
+        name="card_unique",
+        partialFilterExpression={"cardNumber": {"$exists": True}},
+    )
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys: bson.D{{Key: "fines", Value: 1}},
-            Options: options.Index().SetPartialFilterExpression(
-                bson.M{"fines": bson.M{"$gt": 0}},
-            ),
-        },
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "fines", Value: 1}},
+        Options: options.Index().SetPartialFilterExpression(
+            bson.D{{Key: "fines", Value: bson.D{{Key: "$gt", Value: 0}}}},
+        ),
+    })
+    if err != nil {
+        return err
+    }
+    _, err = coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "cardNumber", Value: 1}},
+        Options: options.Index().SetUnique(true).SetName("card_unique").
+            SetPartialFilterExpression(bson.D{{Key: "cardNumber", Value: bson.D{{Key: "$exists", Value: true}}}}),
+    })
     if err != nil {
         return err
     }
@@ -219,101 +395,15 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
             .build(),
     )
     .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-สมาชิกที่มี fines เป็นศูนย์ไม่เคยเข้าสู่ index index จึงเล็กกระชับและยังรับใช้ query "ใครค้างเงิน" ได้ โดยไม่ต้องทำ index ทุกคน
-
-## Unique และ sparse
-
-**unique** index ปฏิเสธทุก insert หรือ update ที่จะทำให้ค่าที่ทำ index ซ้ำกัน — เป็นวิธีที่คุณรับประกัน เช่น ว่าไม่มีสมาชิกสองคนใช้ `cardNumber` ร่วมกัน:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ cardNumber: 1 }, { unique: true })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex({ cardNumber: 1 }, { unique: true });
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("cardNumber", 1)], unique=True)
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
-            Options: options.Index().SetUnique(true),
-        },
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    coll.create_index(
-        IndexModel::builder()
-            .keys(doc! { "cardNumber": 1 })
-            .options(IndexOptions::builder().unique(true).build())
-            .build(),
-    )
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-**sparse** index ก้าวไปอีกขั้นด้วยการข้าม document ที่ขาดฟิลด์ที่ทำ index ไปเลย แทนที่จะเก็บเป็นค่า null การใช้ sparse คู่กับ unique จึงยอมให้ document จำนวนมากไม่มี `cardNumber` ได้ แต่ยังห้ามค่าซ้ำในกลุ่มที่มีค่าอยู่:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ cardNumber: 1 }, { unique: true, sparse: true })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex(
-      { cardNumber: 1 },
-      { unique: true, sparse: true }
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("cardNumber", 1)], unique=True, sparse=True)
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
-            Options: options.Index().SetUnique(true).SetSparse(true),
-        },
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
     coll.create_index(
         IndexModel::builder()
             .keys(doc! { "cardNumber": 1 })
             .options(
-                IndexOptions::builder().unique(true).sparse(true).build(),
+                IndexOptions::builder()
+                    .unique(true)
+                    .name("card_unique".to_string())
+                    .partial_filter_expression(doc! { "cardNumber": { "$exists": true } })
+                    .build(),
             )
             .build(),
     )
@@ -322,70 +412,246 @@ query อย่างการหาทุกคนที่ยืม `"Compiler
   </TabItem>
 </Tabs>
 
-**ใน Compass:** ไดอะล็อก **Create Index** ในแท็บ **Indexes** เปิดเผยสิ่งเหล่านี้เป็นตัวเลือก — คุณติ๊ก **Unique** ตั้งค่า **TTL** หรือให้ **Partial Filter Expression** ได้โดยไม่ต้องออกจาก GUI
+```text
+fines_owing
+index sizes KB: { fines_owing: 28, fines_all: 360 }
+fines > 2   : FETCH > IXSCAN(fines_owing)  returned=1428 keys=1428 docs=1428
+fines = 0   : COLLSCAN  returned=98000 keys=0 docs=100000
+fines >= 0  : COLLSCAN  returned=100000 keys=0 docs=100000
+```
 
-## เคล็ดลับและจุดพลาด
+```text
+fines_1
+card_unique
+fines > 2: keys 40 docs 40
+```
 
-- multikey index มีข้อจำกัด: compound index รวมฟิลด์ array ได้มากที่สุดหนึ่งฟิลด์ เพราะการทำ index สอง array พร้อมกันจะคูณกันออกมาเป็นรายการ index ที่ระเบิดมหาศาล
-- การลบของ TTL จับเวลาแบบโดยประมาณ การกวาดเบื้องหลังทำงานราวหนึ่งครั้งต่อนาที document ที่หมดอายุจึงอาจค้างอยู่เกินกำหนดได้ถึงราวหนึ่งนาทีก่อนโดนลบ
-- partial index ให้บริการ query ได้ก็ต่อเมื่อ query นั้นรับประกันว่าตกอยู่ภายในตัวกรองของ index query ที่อาจตรงกับ document ที่ถูกยกเว้นใช้ partial index ไม่ได้ แม้กับส่วนที่ทับซ้อนกันก็ตาม
-- unique index นับฟิลด์ที่หายไปว่าเป็นค่า `null` ถ้าไม่ใส่ `sparse` จึงมี document ที่ไม่มีฟิลด์นั้นได้แค่อันเดียว เพิ่ม `sparse` เมื่อ document จำนวนมากจะขาดฟิลด์นั้น
+partial index มีขนาด 28 KB เทียบ 360 KB ของ index เต็มบน field เดียวกัน มันรับ `fines > 2` (1 428 key สำหรับ 1 428 ผลลัพธ์) แต่ไม่รับ `fines = 0` หรือ `fines >= 0`: planner ใช้ partial index ก็ต่อเมื่อรับประกันได้ว่า query อยู่ในช่วงของ filter และสองแบบนั้นอาจ match สมาชิกที่ไม่เคยถูกทำ index
 
-<Callout title="เลือก index ที่เข้ากับรูปทรงของข้อมูล">
-query ส่วนใหญ่ต้องการ index ธรรมดา แต่ array ต้องการ multikey, คำต้องการ text, ข้อมูลที่หมดอายุต้องการ TTL, ชุดย่อยที่ถูก query ต้องการ partial, ค่าที่มีหนึ่งเดียวไม่ซ้ำใครต้องการ unique และฟิลด์ที่เป็นทางเลือกต้องการ sparse จับคู่ประเภทให้เข้ากับงานแล้ว index จะยังคงเล็กและเร็ว
+## Unique และทำไม sparse จึงเป็นเครื่องมือที่ผิด
+
+**unique** index ปฏิเสธค่าซ้ำ จุดยากคือ field ที่ไม่บังคับ: field ที่หายถูก index เป็น `null` และ `null` สองตัวนับว่าซ้ำ บทเดิมรัน `unique` แล้ว `unique + sparse` บน key เดียวกัน ซึ่งล้มเหลว (ชื่อ index ซ้ำ) ลำดับทั้งหมดพร้อม error จริง:
+
+```js
+// mongosh/types-unique.js
+try { db.members.createIndex({ cardNumber: 1 }, { unique: true }); }              // half the members have no cardNumber
+catch (e) { console.log("1. unique alone     :", e.codeName, "-", e.message.slice(e.message.indexOf("E11000"))); }
+console.log("2. unique + sparse  :", db.members.createIndex({ cardNumber: 1 }, { unique: true, sparse: true }));
+try { db.members.createIndex({ cardNumber: 1 }, { unique: true, partialFilterExpression: { cardNumber: { $exists: true } } }); }
+catch (e) { console.log("3. switch to partial (same name):", e.codeName); }
+db.members.dropIndex("cardNumber_1");
+console.log("4. partial + unique :", db.members.createIndex({ cardNumber: 1 }, { unique: true, partialFilterExpression: { cardNumber: { $exists: true } }, name: "card_unique" }));
+db.members.insertMany([{ name: "no card 1" }, { name: "no card 2" }]);
+try { db.members.insertOne({ name: "dup", cardNumber: "C2" }); } catch (e) { console.log("   duplicate card     : code", e.code, JSON.stringify(e.keyValue)); }
+console.log("   members without a card inserted:", db.members.countDocuments({ name: /^no card / }));
+```
+
+```text
+1. unique alone     : DuplicateKey - E11000 duplicate key error collection: b2_e5a3dc.members index: cardNumber_1 dup key: { cardNumber: null }
+2. unique + sparse  : cardNumber_1
+3. switch to partial (same name): IndexKeySpecsConflict
+4. partial + unique : card_unique
+   duplicate card     : code 11000 {"cardNumber":"C2"}
+   members without a card inserted: 2
+```
+
+ขั้น 1 ล้มเหลวเพราะสมาชิก 50 000 คนไม่มีบัตร (`dup key: { cardNumber: null }`) ขั้น 2 ใช้ได้ แต่เป็นเครื่องมือที่ผิด: index แบบ **sparse** ข้าม document ที่ไม่มี field และ sparse index ที่ planner ถูกบังคับให้ใช้กับ sort คืนผลไม่ครบ:
+
+```js
+// mongosh/types-sparse.js
+db.cards.insertMany([{ n: 1, card: "b" }, { n: 2 }, { n: 3, card: "a" }]);
+db.cards.createIndex({ card: 1 }, { sparse: true, name: "card_sparse" });
+console.log("plain sort           :", db.cards.find().sort({ card: 1 }).toArray().map((d) => d.n));
+console.log("sort with sparse hint:", db.cards.find().sort({ card: 1 }).hint("card_sparse").toArray().map((d) => d.n), "<- document 2 is missing");
+assert.strictEqual(db.cards.find().sort({ card: 1 }).hint("card_sparse").toArray().length, 2);
+```
+
+```text
+plain sort           : [ 2, 3, 1 ]
+sort with sparse hint: [ 3, 1 ] <- document 2 is missing
+```
+
+document 2 ไม่มี `card` plan ที่ถูก hint จึงทิ้งมัน (2 จาก 3 document); ถ้าไม่ hint planner ปฏิเสธ sparse index และคืนครบทั้งสาม คู่มือบอกเช่นกัน: "MongoDB does not select the sparse index to fulfill the query in order to return complete results" และ "Partial indexes can function as sparse indexes, but also support filter expressions ... Use a partial index for greater control" ([sparse indexes](https://www.mongodb.com/docs/manual/core/index-sparse/), ตรวจ 2026-09-30) ขั้น 4 ข้างบนคือรูปแบบที่แนะนำ: `unique` บวก `partialFilterExpression: { cardNumber: { $exists: true } }` ยอมให้สมาชิกที่ไม่มีบัตรมีกี่คนก็ได้และปฏิเสธบัตรซ้ำ การเปลี่ยน index ที่มีอยู่ไปใช้ option ต่างต้อง drop ก่อน (ขั้น 3 ได้ `IndexKeySpecsConflict`)
+
+## อีกสามแบบที่คุณจะเจอ
+
+**Wildcard** - index เดียวบน subtree ที่คุณไม่รู้ key ล่วงหน้า (`attrs.$**`) สะดวกกับ attribute ที่ไม่มี schema แต่ทำ index ทุก path จึงใหญ่และช้ากว่า index เฉพาะจุด สังเกตว่า conjunction ด้านล่างยังใช้ path wildcard เดียวแล้วกรองที่เหลือ (11 112 key สำหรับ 2 223 ผลลัพธ์):
+
+```js
+// mongosh/types-wildcard.js
+console.log(db.members.createIndex({ "attrs.$**": 1 }));
+console.log("attrs.color = red :", plan(db.members.find({ "attrs.color": "red" })));
+console.log("attrs.size  = L   :", plan(db.members.find({ "attrs.size": "L" })));
+console.log("size = L AND color:", plan(db.members.find({ "attrs.size": "L", "attrs.color": "red" })));
+```
+
+```text
+attrs.$**_1
+attrs.color = red : FETCH > IXSCAN(attrs.$**_1)  returned=11112 keys=11112 docs=11112
+attrs.size  = L   : FETCH > IXSCAN(attrs.$**_1)  returned=20000 keys=20000 docs=20000
+size = L AND color: FETCH > IXSCAN(attrs.$**_1)  returned=2223 keys=11112 docs=11112
+```
+
+**Hashed** - เก็บ hash ของค่า: เหมาะกับ equality และ hash-based sharding แต่ไร้ประโยชน์กับช่วงและ sort:
+
+```js
+// mongosh/types-hashed.js
+console.log(db.members.createIndex({ name: "hashed" }));
+console.log("name = m4242 :", plan(db.members.find({ name: "m4242" })));
+console.log("name range   :", plan(db.members.find({ name: { $gte: "m4242", $lt: "m4243" } })));
+console.log("sort by name :", plan(db.members.find().sort({ name: 1 }).limit(3)));
+```
+
+```text
+name_hashed
+name = m4242 : FETCH > IXSCAN(name_hashed)  returned=1 keys=1 docs=1
+name range   : COLLSCAN  returned=11 keys=0 docs=100002
+sort by name : SORT > COLLSCAN  returned=3 keys=0 docs=100002
+```
+
+**2dsphere** - พิกัด GeoJSON บนทรงกลม สำหรับ `$near`, `$geoWithin` และพวกเดียวกัน stage ใน plan คือ `GEO_NEAR_2DSPHERE`:
+
+```js
+// mongosh/types-geo.js
+console.log(db.members.createIndex({ location: "2dsphere" }));
+const near = { location: { $near: { $geometry: { type: "Point", coordinates: [13.5, 52.5] }, $maxDistance: 2000 } } };
+console.log("$near 2 km :", plan(db.members.find(near)));
+console.log("nearest 3  :", db.members.find(near, { name: 1, _id: 0 }).limit(3).toArray().map((d) => d.name));
+```
+
+```text
+location_2dsphere
+$near 2 km : GEO_NEAR_2DSPHERE(location_2dsphere)  returned=150 keys=383 docs=250
+nearest 3  : [ 'm5050', 'm25050', 'm65050' ]
+```
+
+**In Compass:** ไดอะล็อก **Create Index** ในแท็บ **Indexes** มีตัวเลือกเหล่านี้ - ติ๊ก **Unique** ตั้งค่า **TTL** หรือใส่ **Partial Filter Expression** ได้โดยไม่ต้องออกจาก GUI
+
+## เคล็ดลับและข้อควรระวัง
+
+- compound index มี field แบบ array ได้อย่างมากหนึ่งอัน (`cannot index parallel arrays`, code 171) และ error อาจโผล่ทีหลังตอน insert
+- `$text` ไม่จัดอันดับเว้นแต่คุณ project และ sort `textScore`; หนึ่ง collection มี text index ได้อันเดียว
+- TTL ลบเฉพาะ BSON date ภายในราว 60 วินาที ไม่ใช่ทันที; วันที่แบบ string ไม่เคยถูกลบ
+- เลือก partial แทน sparse; partial index รับเฉพาะ query ที่รับประกันว่าอยู่ในช่วง filter
+- unique index ถือ field ที่หายเป็น `null`; ถ้าไม่มี partial filter document ที่ไม่มี field นั้นได้เพียงอันเดียว
+
+<Callout title="เลือก index ที่เข้ากับรูปร่างของข้อมูล">
+query ส่วนใหญ่ต้องการ index ธรรมดา แต่ array ต้องการ multikey, คำต้องการ text (และ sort ตามคะแนน), ข้อมูลหมดอายุต้องการ TTL บนวันที่จริง, ส่วนย่อยที่ถูก query ต้องการ partial, ค่า unique แบบไม่บังคับต้องการ partial + unique, key ที่ไม่รู้ล่วงหน้าต้องการ wildcard และตำแหน่งต้องการ 2dsphere
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอให้ "ทำให้ session ล็อกอินหมดอายุหลังหนึ่งชั่วโมง" AI เขียนว่า:
+
+<SpotTheBug lang="js" code={`// AI comment: "TTL index deletes sessions one hour after creation"
+await sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 });
+await sessions.insertOne({ userId, createdAt: new Date().toISOString() });`}>
+
+`toISOString()` สร้าง **string** และ TTL index มองเฉพาะ BSON date และ array ของ date index ถูกสร้างโดยไม่บ่นและ document ไม่เคยถูกลบ (การรันก่อนหน้าเก็บ string ไว้ 125 วินาทีขณะที่ document แบบ Date หายภายในหนึ่งนาที) ทางแก้คือเก็บ `new Date()` ดังที่แถว `fix` ของการตรวจ `$type` (แท็บแรกด้านบน) แสดง:
+
+```text
+[ { _id: 'bug', type: 'string' }, { _id: 'fix', type: 'date' } ]
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+index พิเศษทุกชนิดคือ B-tree เดียวกันที่มีกฎต่างกันว่า **entry ใดถูกใส่เข้าไป** (multikey: ทุกสมาชิกของ array; partial/sparse: เฉพาะบาง document; wildcard: ทุก path; hashed: ค่า hash; TTL: วันที่ที่ server เฝ้าดู) และ **ตอบคำถามแบบไหนได้** (text: จับคู่คำพร้อมคะแนน; 2dsphere: ระยะทาง; hashed: equality เท่านั้น) ถ้า query ต้องการ entry ที่ไม่เคยถูกเขียน index ก็ช่วยไม่ได้
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| text index | ค้นหาคำแบบ full-text สะดวก ไม่ต้อง regex | หนึ่ง collection มี text index ได้แค่อันเดียว |
-| TTL index | ลบ document ที่หมดอายุอัตโนมัติ ไม่ต้องเขียน job แยก | เวลาลบไม่แม่นยำ เพราะงานกวาดพื้นหลังทำงานราวหนึ่งครั้งต่อนาที |
-| partial index | เล็กกว่า index เต็ม เพราะครอบเฉพาะ document ที่ตรงตัวกรอง | ช่วยเฉพาะ query ที่การันตีว่าตกอยู่ในตัวกรองของ index เท่านั้น |
-| unique index | รับประกันความไม่ซ้ำของข้อมูลในระดับ database | insert หรือ update ที่ทำให้ค่าซ้ำจะโดน reject ทันที ต้องเขียน error path รองรับเพิ่ม |
+| Multikey | seek ตามสมาชิก array ใดก็ได้ | ราว 3 entry ต่อ document ที่นี่; หนึ่ง array field ต่อ compound index |
+| Text | ค้นหาคำพร้อมคะแนน | อันเดียวต่อ collection; ไม่จัดอันดับเว้นแต่ sort ตาม textScore |
+| TTL | ข้อมูลล้างตัวเอง ไม่ต้อง cron | ช้าได้ถึง ~60 วินาที; เฉพาะวันที่จริง |
+| Partial | 28 KB แทน 360 KB | เฉพาะ query ที่อยู่ในช่วง filter ใช้ได้ |
+| Unique (+ partial) | ความไม่ซ้ำระดับฐานข้อมูลพร้อม field ที่ไม่บังคับ | การเขียนซ้ำถูกปฏิเสธ: ต้องจัดการ E11000 |
+| Wildcard | ไม่ต้องรู้ key ล่วงหน้า | ทำ index ทุก path; อ่อนกว่า index เฉพาะจุด |
+| Hashed | กระจายสม่ำเสมอ equality ถูก | ไม่มีช่วง ไม่มี sort |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **สร้าง text index สองอันบน collection เดียว** — MongoDB อนุญาตให้มี text index ได้แค่อันเดียวต่อ collection แม้จะครอบหลายฟิลด์ก็ตาม ต้องรวมฟิลด์ที่ต้องการค้นหาไว้ใน index เดียว
-- **คาดหวังว่า TTL index ลบ document ตรงเวลาเป๊ะ** — งานกวาดพื้นหลังทำงานราวหนึ่งครั้งต่อนาที document อาจค้างเกินกำหนดได้นานถึงหนึ่งนาที อย่าพึ่ง TTL สำหรับ use case ที่ต้องการความแม่นยำระดับวินาที
-- **ลืมใส่ `sparse` คู่กับ `unique` เมื่อฟิลด์เป็น optional** — unique index นับค่าที่หายไปเป็น `null` เหมือนกันหมด ดังนั้นถ้าไม่ใส่ `sparse` จะมี document ได้แค่หนึ่งฉบับเท่านั้นที่ขาดฟิลด์นั้นได้
+- **"ผล `$text` มาแบบจัดอันดับ"** - ลำดับที่ไม่ sort คือ 5, 1, 4, 2; sort ตามคะแนนคือ 5, 4, 1, 2
+- **"TTL ใช้ได้กับ field ที่หน้าตาเหมือน timestamp ทุกอัน"** - ISO string อยู่รอด 125 วินาที; ลบเฉพาะวันที่จริง
+- **"unique + sparse คือวิธีทำให้ field ที่ไม่บังคับไม่ซ้ำ"** - ใช้ partial filter; sparse ทำ document หายเมื่อ sort
+- **"partial index เร่งทุก query บน field"** - `fines = 0` และ `fines >= 0` เป็น COLLSCAN
+- **"hashed index ช่วยช่วงและ sort ด้วย"** - ทั้งสองเป็น COLLSCAN บน 100 000 document
+- **"TTL ลบตรงวินาทีเป๊ะ"** - อยู่ในรอบ monitor 60 วินาที ไม่เคยทันที
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **แพลตฟอร์ม SaaS ที่เก็บ session/token ชั่วคราว** — ใช้ TTL index บนฟิลด์ `expiresAt` เพื่อให้ session หมดอายุลบตัวเองโดยไม่ต้องมี cron job แยกไว้ล้างข้อมูลเก่า
->
-> **ระบบ support ticket ที่ทำ full-text search บนเนื้อหา ticket** — ใช้ text index บนฟิลด์ `subject` และ `body` รวมกัน เพื่อให้ agent ค้นหา ticket ด้วยคำสำคัญได้โดยไม่ต้องพึ่ง search engine แยกต่างหากอย่าง Elasticsearch สำหรับข้อมูลปริมาณไม่ใหญ่มาก
+> คู่มือ MongoDB เองชี้ให้ห่างจาก sparse: "Partial indexes can function as sparse indexes, but also support filter expressions for conditions beyond whether a field exists" ([sparse indexes](https://www.mongodb.com/docs/manual/core/index-sparse/), ตรวจ 2026-09-30) และเตือนว่า document ที่หมดอายุ "may exist for some time beyond the 60 second period between runs of the background task" บน server ที่ยุ่ง ([TTL indexes](https://www.mongodb.com/docs/manual/core/index-ttl/), ตรวจ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (การเรียก `createIndex` แบบ multikey, text, TTL, partial และ unique สำเร็จ) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizTypes = [
   {
-    q: 'เมื่อใดที่ MongoDB ทำให้ index เป็น multikey?',
+    q: 'MongoDB ทำให้ index เป็น multikey เมื่อไร',
     options: [
-      'เมื่อคุณส่งตัวเลือก multikey',
-      'อัตโนมัติ เมื่อฟิลด์ที่ทำ index ถือค่าที่เป็น array',
-      'เฉพาะสำหรับ text index',
-      'เมื่อ collection มี index มากกว่าหนึ่งอัน',
+      'เมื่อคุณส่ง option multikey',
+      'อัตโนมัติ เมื่อ field ที่ทำ index มีค่าเป็น array',
+      'เฉพาะ text index',
+      'เมื่อ collection มีมากกว่าหนึ่ง index',
     ],
     answer: 1,
+    explain: 'borrowed_1 รายงาน isMultiKey: true และมีราว 300 000 entry สำหรับ 100 000 document; compound index บนสอง field ที่เป็น array ล้มเหลวด้วย "cannot index parallel arrays"',
   },
   {
-    q: 'TTL index ทำอะไร?',
+    q: 'จะได้ผล $text เรียงตามความเกี่ยวข้องอย่างไร',
     options: [
-      'แคชผลลัพธ์ query ไว้เป็นเวลาที่กำหนด',
-      'ลบ document อัตโนมัติเมื่อฟิลด์วันที่ผ่านอายุที่ตั้งค่าไว้',
-      'จำกัดว่า query รันได้นานแค่ไหน',
-      'บีบอัด document เก่าเพื่อประหยัดพื้นที่',
+      '$text คืนตัวที่ตรงที่สุดก่อนเสมอ',
+      'project { $meta: "textScore" } แล้ว sort ตามมัน',
+      'เพิ่ม option weights อย่างเดียว',
+      'ใช้ regex แทน',
     ],
     answer: 1,
+    explain: 'ถ้าไม่ sort ลำดับเป็น 5, 1, 4, 2; เมื่อ sort ด้วย textScore เป็น 5 (2.31), 4 (1.33) แล้วตามด้วยคะแนนเสมอ 1 และ 2 (1.00)',
   },
   {
-    q: 'ทำไมจึงรวม unique index กับ sparse?',
+    q: 'TTL index บน createdAt ไม่ลบอะไรเลย สาเหตุที่น่าจะเป็นที่สุดคือ',
     options: [
-      'เพื่อให้ index สร้างได้เร็วขึ้น',
-      'เพื่อให้ document จำนวนมากไม่มีฟิลด์นั้นได้ แต่ยังห้ามค่าซ้ำในกลุ่มที่มีค่า',
-      'เพื่อทำ index ฟิลด์ array สองฟิลด์พร้อมกัน',
-      'เพื่อเปิดใช้การค้นหา full-text บนฟิลด์',
+      'field เก็บ string ISO ไม่ใช่ BSON Date',
+      'expireAfterSeconds ต้องอย่างน้อย 60',
+      'TTL ใช้ได้เฉพาะ capped collection',
+      'TTL ต้องใช้ replica set',
+    ],
+    answer: 0,
+    explain: '$type แสดง "string" สำหรับ document ที่เก็บ ISO string ซึ่งอยู่รอด 125 วินาที ขณะที่ Date และ array ของ Date ถูกลบ (เห็นว่าหายครั้งแรกที่ 14 วินาที)',
+  },
+  {
+    q: 'ทำไมควรใช้ partial unique index แทน unique + sparse สำหรับ cardNumber ที่ไม่บังคับ',
+    options: [
+      'sparse เป็นไวยากรณ์ที่เลิกใช้แล้ว',
+      'partial ระบุ filter อะไรก็ได้ และ sparse index ให้ผลไม่ครบเมื่อใช้ sort',
+      'query ไม่เคยใช้ partial index',
+      'unique ใช้ร่วมกับ sparse ไม่ได้',
     ],
     answer: 1,
+    explain: 'sort ผ่าน sparse index คืน 2 จาก 3 document; คู่มือ MongoDB แนะนำ partial index เพื่อควบคุมได้มากกว่า',
+  },
+  {
+    q: 'partial index บน { fines: 1 } ที่มี filter { fines: { $gt: 0 } }: query ใดใช้มัน',
+    options: [
+      '{ fines: 0 }',
+      '{ fines: { $gte: 0 } }',
+      '{ fines: { $gt: 2 } }',
+      'ทุก query บน fines',
+    ],
+    answer: 2,
+    explain: 'เฉพาะ { fines: { $gt: 2 } } ที่รับประกันว่าอยู่ในช่วงของ filter: IXSCAN 1 428 key; อีกสองแบบเป็น COLLSCAN partial index มีขนาด 28 KB เทียบ 360 KB ของแบบเต็ม',
+  },
+  {
+    q: 'index แบบ hashed รับอะไรได้',
+    options: [
+      'query ช่วงบน field',
+      'การ sort ตาม field',
+      'การค้นหาแบบ equality บน field',
+      'text search',
+    ],
+    answer: 2,
+    explain: 'name = "m4242" เป็น IXSCAN 1 key; ช่วงและ sort เป็น COLLSCAN บน 100 000 document',
   },
 ]
 

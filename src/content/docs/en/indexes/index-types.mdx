@@ -1,6 +1,6 @@
 ---
 title: Index types
-description: Beyond the plain index — multikey for arrays, text for search, TTL for auto-expiry, partial and sparse for subsets, and unique for enforcing one-of-a-kind values.
+description: Beyond the plain index - multikey, text, TTL, partial, unique and sparse, plus wildcard, hashed and geospatial - each proven with explain or a real run, including the traps (text ranking, string dates, sparse sorts).
 sidebar:
   order: 5
 ---
@@ -8,23 +8,67 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-A plain ascending index covers most needs, but MongoDB ships several specialized index types for cases a plain index cannot handle gracefully: fields that hold arrays, full-text search, documents that should expire on their own, indexes that cover only a slice of a collection, and indexes that enforce uniqueness. Each is a small variation on `createIndex`, and knowing they exist saves you from awkward workarounds. We will take them one at a time, keeping our library `members` collection.
+A plain ascending index covers most needs, but MongoDB ships specialised index types for cases it cannot handle gracefully: fields that hold arrays, full-text search, documents that should expire on their own, indexes over only a slice of a collection, uniqueness, schemaless attributes, hashed lookups and locations. Each is a small variation on `createIndex`, and each has a trap that the plain documentation examples do not show. This lesson proves every one of them.
+
+Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac. The lesson seeds 100 000 `members` (10 cities, three borrowed titles each, 2% owing fines, half with a `cardNumber`, some with free-form `attrs`, each at a coordinate near Berlin) and reuses the one-line `plan()` helper. Python, Go and Rust tabs were each run once in a scratch program against the same server.
+
+```js
+// mongosh/types-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {                       // stage chain (also through TEXT/GEO stages), then keys and docs read
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined;
+};
+const colors = ["red", "green", "blue"];
+for (let s = 0; s < 100000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    const d = { name: "m" + i, city: cities[i % 10],
+                borrowed: ["book" + (i % 500), "book" + ((i * 7) % 500), "book" + ((i * 13) % 500)],
+                fines: i % 50 === 0 ? 1 + (i % 7) : 0,                       // only 2% of members owe anything
+                location: { type: "Point", coordinates: [13 + (i % 100) / 100, 52 + (Math.floor(i / 100) % 100) / 100] } };
+    if (i % 2 === 0) d.cardNumber = "C" + i;                                    // half the members have no card
+    if (i % 3 === 0) d.attrs = { color: colors[i % 3 === 0 ? (i / 3) % 3 : 0] };   // schemaless attributes
+    if (i % 5 === 0) d.attrs = Object.assign(d.attrs ?? {}, { size: "L" });
+    return d;
+  }), { ordered: false });
+}
+console.log("members:", db.members.countDocuments(), "| with fines:", db.members.countDocuments({ fines: { $gt: 0 } }), "| with cardNumber:", db.members.countDocuments({ cardNumber: { $exists: true } }));
+```
+
+```text
+members: 100000 | with fines: 2000 | with cardNumber: 50000
+```
 
 ## Multikey: indexing arrays
 
-When you index a field that holds an array, MongoDB automatically makes it a **multikey** index — it indexes every element of the array separately, so a query for any one element seeks straight to the matching documents. You do not ask for multikey; it happens because the field's values are arrays. Index the `borrowed` array of book titles:
+When you index a field that holds arrays, MongoDB makes it a **multikey** index automatically: one entry per array element, so a query for one title seeks straight to its owners. Nothing to configure - the values decide.
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex({ borrowed: 1 })
+    // mongosh/types-multikey.js
+    console.log(db.members.createIndex({ borrowed: 1 }));
+    console.log("borrowed = book42:", plan(db.members.find({ borrowed: "book42" })));
+    const st = db.members.find({ borrowed: "book42" }).explain().queryPlanner.winningPlan.inputStage;
+    console.log({ isMultiKey: st.isMultiKey, multiKeyPaths: st.multiKeyPaths });
+    console.log("index entries vs documents:", db.members.aggregate([{ $indexStats: {} }]).toArray().length, "indexes;",
+      "borrowed_1 holds ~", db.members.countDocuments() * 3, "keys for", db.members.countDocuments(), "documents");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex({ borrowed: 1 });
+    // app/types-multikey.mjs
+    const c = db.collection("members");
+    await c.insertMany(Array.from({ length: 1000 }, (_, i) => ({ borrowed: ["book" + (i % 50), "book" + ((i * 7) % 50)] })));
+    console.log(await c.createIndex({ borrowed: 1 }));
+    const e = await c.find({ borrowed: "book7" }).explain("executionStats");
+    console.log("keys", e.executionStats.totalKeysExamined, "docs", e.executionStats.totalDocsExamined, "returned", e.executionStats.nReturned);
+    if (e.executionStats.totalDocsExamined !== e.executionStats.nReturned) throw new Error("multikey index not used");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -34,10 +78,9 @@ When you index a field that holds an array, MongoDB automatically makes it a **m
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{Keys: bson.D{{Key: "borrowed", Value: 1}}},
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "borrowed", Value: 1}},
+    })
     if err != nil {
         return err
     }
@@ -53,43 +96,101 @@ When you index a field that holds an array, MongoDB automatically makes it a **m
   </TabItem>
 </Tabs>
 
-A query like finding everyone who borrowed `"Compilers"` now seeks instead of scans, even though the value sits inside an array.
+```text
+borrowed_1
+borrowed = book42: FETCH > IXSCAN(borrowed_1)  returned=600 keys=600 docs=600
+{ isMultiKey: true, multiKeyPaths: { borrowed: [ 'borrowed' ] } }
+index entries vs documents: 2 indexes; borrowed_1 holds ~ 300000 keys for 100000 documents
+```
+
+```text
+borrowed_1
+keys 40 docs 40 returned 40
+```
+
+600 members borrowed `book42` and 600 keys and documents were read - a perfect ratio - though the price is size: about three entries per document. A compound index may contain **at most one array field**, since two arrays would multiply into every combination:
+
+```js
+// mongosh/types-parallel.js
+db.pairs.insertOne({ borrowed: ["a", "b"], tags: "single" });
+console.log(db.pairs.createIndex({ borrowed: 1, tags: 1 }));            // fine: only one of the two is an array
+try { db.pairs.insertOne({ borrowed: ["a", "b"], tags: ["x", "y"] }); } // both arrays in one document
+catch (e) { console.log("code", e.code + ":", e.message); }
+console.log("documents in pairs:", db.pairs.countDocuments());
+```
+
+```text
+borrowed_1_tags_1
+code 171: cannot index parallel arrays [tags] [borrowed]
+documents in pairs: 1
+```
 
 ## Text: searching words
 
-A **text index** tokenizes string fields so you can search for words with the `$text` operator instead of matching exact strings. Index the `notes` field of each member as text, then query it:
+A **text index** tokenizes and stems string fields so `$text` can match words. The lesson used to say results are ranked by relevance; they are not, unless you ask. The server keeps the score and you must project and sort by `{ $meta: "textScore" }`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex({ notes: "text" })
-    db.members.find({ $text: { $search: "overdue reminder" } })
+    // mongosh/types-text.js
+    db.tickets.insertMany([
+      { n: 1, notes: "overdue" },
+      { n: 2, notes: "reminder" },
+      { n: 3, notes: "returned on time" },
+      { n: 4, notes: "overdue reminder sent" },
+      { n: 5, notes: "reminder: overdue, overdue again, overdue notice, reminder" },
+    ]);
+    console.log(db.tickets.createIndex({ notes: "text" }));
+    const plain = db.tickets.find({ $text: { $search: "overdue reminder" } }).toArray().map((d) => d.n);
+    console.log("no sort (index order)   :", plain);
+    const ranked = db.tickets.find({ $text: { $search: "overdue reminder" } }, { score: { $meta: "textScore" } }).sort({ score: { $meta: "textScore" } }).toArray();
+    console.log("sorted by textScore     :", ranked.map((d) => d.n + ":" + d.score.toFixed(2)).join("  "));
+    console.log("plan                    :", plan(db.tickets.find({ $text: { $search: "overdue reminder" } })));
+    try { db.tickets.createIndex({ other: "text" }); } catch (e) { console.log(e.codeName + ":", e.message.slice(0, 110)); }
+    assert.strictEqual(JSON.stringify(ranked.slice(0, 2).map((d) => d.n)), "[5,4]");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex({ notes: "text" });
-    await db.collection("members")
-      .find({ $text: { $search: "overdue reminder" } })
-      .toArray();
+    // app/types-text.mjs
+    const c = db.collection("tickets");
+    await c.insertMany([{ notes: "reminder sent" }, { notes: "overdue overdue reminder" }, { notes: "returned" }]);
+    console.log(await c.createIndex({ notes: "text" }));
+    const rows = await c.find({ $text: { $search: "overdue reminder" } }).project({ score: { $meta: "textScore" }, notes: 1, _id: 0 }).sort({ score: { $meta: "textScore" } }).toArray();
+    console.log(rows.map((r) => r.notes + " " + r.score.toFixed(2)));
+    if (!rows[0].notes.startsWith("overdue")) throw new Error("best match should come first");
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     db.members.create_index([("notes", "text")])
-    list(db.members.find({"$text": {"$search": "overdue reminder"}}))
+    rows = list(
+        db.members.find(
+            {"$text": {"$search": "overdue reminder"}},
+            {"score": {"$meta": "textScore"}},
+        ).sort([("score", {"$meta": "textScore"})])
+    )
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{Keys: bson.D{{Key: "notes", Value: "text"}}},
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "notes", Value: "text"}},
+    })
     if err != nil {
         return err
     }
-    cur, err := coll.Find(ctx, bson.M{"$text": bson.M{"$search": "overdue reminder"}})
+    opts := options.Find().
+        SetProjection(bson.M{"score": bson.M{"$meta": "textScore"}}).
+        SetSort(bson.M{"score": bson.M{"$meta": "textScore"}})
+    cur, err := coll.Find(ctx, bson.M{"$text": bson.M{"$search": "overdue reminder"}}, opts)
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
+        return err
+    }
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -98,29 +199,52 @@ A **text index** tokenizes string fields so you can search for words with the `$
         IndexModel::builder().keys(doc! { "notes": "text" }).build(),
     )
     .await?;
-    let cur = coll.find(doc! { "$text": { "$search": "overdue reminder" } }).await?;
+    let mut cursor = coll
+        .find(doc! { "$text": { "$search": "overdue reminder" } })
+        .projection(doc! { "score": { "$meta": "textScore" } })
+        .sort(doc! { "score": { "$meta": "textScore" } })
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-The search matches either word and ranks results by relevance. A collection may hold only one text index, though it can span several string fields.
+```text
+notes_text
+no sort (index order)   : [ 5, 1, 4, 2 ]
+sorted by textScore     : 5:2.31  4:1.33  1:1.00  2:1.00
+plan                    : TEXT_MATCH(notes_text) > FETCH > OR  returned=4 keys=6 docs=4
+IndexOptionsConflict: An equivalent index already exists with a different name and options. Requested index: { v: 2, key: { _fts: "t
+```
+
+```text
+notes_text
+[ 'overdue overdue reminder 1.92', 'reminder sent 0.75' ]
+```
+
+Unsorted, the order was 5, 1, 4, 2 - document 1 (score 1.00) ahead of document 4 (1.33). Sorted by `textScore`: 5 (2.31), 4, then the ties. The plan is `TEXT_MATCH > FETCH > OR` because the query is an OR over the search terms. Only one text index is allowed per collection (a second attempt returned `IndexOptionsConflict`, since a text index always has the same internal key); put every searchable field into that one index. Text search is convenient but basic: no fuzzy matching or relevance tuning beyond `weights` - for those, look at Atlas Search.
 
 ## TTL: documents that expire
 
-A **TTL** (time to live) index deletes documents automatically once a date field is older than a set number of seconds. It is built by indexing a date field with an `expireAfterSeconds` option. Here, member session records expire one hour after their `createdAt` timestamp:
+A **TTL** index deletes documents once a date field is older than `expireAfterSeconds`. The field must be a BSON date (or an array containing dates): the manual states that you "specify an index field that is either a date type or an array that contains date type values", and that the background task "runs every 60 seconds" ([TTL indexes](https://www.mongodb.com/docs/manual/core/index-ttl/), consulted 2026-09-30). Creating it is one call; the first tab below also proves the type trap:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 })
+    // mongosh/types-ttl-type.js
+    db.sessions2.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 });
+    db.sessions2.insertMany([{ _id: "bug", createdAt: new Date().toISOString() }, { _id: "fix", createdAt: new Date() }]);
+    console.log(db.sessions2.aggregate([{ $project: { _id: 1, type: { $type: "$createdAt" } } }]).toArray());
+    assert.strictEqual(db.sessions2.findOne({ _id: "bug" }) !== null && db.sessions2.aggregate([{ $match: { _id: "bug" } }, { $project: { t: { $type: "$createdAt" } } }]).toArray()[0].t, "string");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("sessions").createIndex(
-      { createdAt: 1 },
-      { expireAfterSeconds: 3600 }
-    );
+    // app/types-ttl.mjs
+    const c = db.collection("sessions");
+    console.log(await c.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 }));
+    const spec = (await c.listIndexes().toArray()).find((i) => i.name === "createdAt_1");
+    console.log("expireAfterSeconds:", spec.expireAfterSeconds);
+    if (spec.expireAfterSeconds !== 3600) throw new Error("TTL not set");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -130,13 +254,10 @@ A **TTL** (time to live) index deletes documents automatically once a date field
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys:    bson.D{{Key: "createdAt", Value: 1}},
-            Options: options.Index().SetExpireAfterSeconds(3600),
-        },
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys:    bson.D{{Key: "createdAt", Value: 1}},
+        Options: options.Index().SetExpireAfterSeconds(3600),
+    })
     if err != nil {
         return err
     }
@@ -149,7 +270,7 @@ A **TTL** (time to live) index deletes documents automatically once a date field
             .keys(doc! { "createdAt": 1 })
             .options(
                 IndexOptions::builder()
-                    .expire_after(Duration::from_secs(3600))
+                    .expire_after(std::time::Duration::from_secs(3600))
                     .build(),
             )
             .build(),
@@ -159,27 +280,71 @@ A **TTL** (time to live) index deletes documents automatically once a date field
   </TabItem>
 </Tabs>
 
-A background task sweeps and removes expired documents. The sweep runs about once a minute, so deletion is prompt but not instant.
+```text
+[ { _id: 'bug', type: 'string' }, { _id: 'fix', type: 'date' } ]
+```
+
+```text
+createdAt_1
+expireAfterSeconds: 3600
+```
+
+To see the real timing, this run uses `expireAfterSeconds: 1` and polls. It is marked `@skip-verify` because it waits for the 60-second monitor and the course checker has a 90-second budget per lesson:
+
+```js
+// mongosh/types-ttl.js @skip-verify waits up to ~60 s for the TTL monitor (default sweep interval)
+db.sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 1 });
+const t0 = Date.now();
+db.sessions.insertMany([
+  { _id: "date", createdAt: new Date() },
+  { _id: "array", createdAt: [new Date(), new Date(Date.now() + 3600e3)] },
+  { _id: "string", createdAt: new Date().toISOString() },                 // the trap: a string, not a Date
+]);
+let gone = null;
+while (Date.now() - t0 < 125000) {
+  if (gone === null && db.sessions.countDocuments({ _id: { $in: ["date", "array"] } }) === 0) gone = Math.round((Date.now() - t0) / 1000);
+  sleep(1000);
+}
+console.log("Date and array-of-Date documents gone after", gone, "s (expireAfterSeconds was 1)");
+console.log("after 125 s still stored:", db.sessions.find().toArray().map((d) => d._id));
+```
+
+```text
+Date and array-of-Date documents gone after 14 s (expireAfterSeconds was 1)
+after 125 s still stored: [ 'string' ]
+```
+
+The Date and array-of-Date documents disappeared within the monitor's 60-second cycle (14 s in this run - the phase depends on when the cycle last fired), never instantly. The ISO-string document was still there after 125 seconds, and always will be: TTL silently ignores non-date values.
 
 ## Partial: indexing a subset
 
-A **partial** index covers only the documents that match a filter expression, which keeps the index small when you query just one slice of a collection. Index only members who actually owe fines, by attaching a `partialFilterExpression`:
+A **partial** index covers only documents matching a filter, so it stays small when you query one slice. Only 2% of members owe fines, so the index below holds 2 000 entries instead of 100 000:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex(
-      { fines: 1 },
-      { partialFilterExpression: { fines: { $gt: 0 } } }
-    )
+    // mongosh/types-partial.js
+    console.log(db.members.createIndex({ fines: 1 }, { partialFilterExpression: { fines: { $gt: 0 } }, name: "fines_owing" }));
+    const kb = (n) => Math.round(n / 1024);
+    db.members.createIndex({ fines: 1 }, { name: "fines_all" });
+    const sz = db.members.stats().indexSizes;
+    console.log("index sizes KB:", { fines_owing: kb(sz.fines_owing), fines_all: kb(sz.fines_all) });
+    db.members.dropIndex("fines_all");
+    console.log("fines > 2   :", plan(db.members.find({ fines: { $gt: 2 } })));
+    console.log("fines = 0   :", plan(db.members.find({ fines: 0 })));
+    console.log("fines >= 0  :", plan(db.members.find({ fines: { $gte: 0 } })));
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex(
-      { fines: 1 },
-      { partialFilterExpression: { fines: { $gt: 0 } } }
-    );
+    // app/types-partial.mjs
+    const c = db.collection("members");
+    await c.insertMany(Array.from({ length: 2000 }, (_, i) => (i % 2 ? { fines: i % 50 === 0 ? 3 : 0 } : { fines: i % 50 === 0 ? 3 : 0, cardNumber: "C" + i })));
+    console.log(await c.createIndex({ fines: 1 }, { partialFilterExpression: { fines: { $gt: 0 } } }));
+    console.log(await c.createIndex({ cardNumber: 1 }, { unique: true, partialFilterExpression: { cardNumber: { $exists: true } }, name: "card_unique" }));
+    const e = await c.find({ fines: { $gt: 2 } }).explain("executionStats");
+    console.log("fines > 2: keys", e.executionStats.totalKeysExamined, "docs", e.executionStats.totalDocsExamined);
+    if (e.executionStats.totalDocsExamined !== 40) throw new Error("partial index not used");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -188,19 +353,30 @@ A **partial** index covers only the documents that match a filter expression, wh
         [("fines", 1)],
         partialFilterExpression={"fines": {"$gt": 0}},
     )
+    db.members.create_index(
+        [("cardNumber", 1)],
+        unique=True,
+        name="card_unique",
+        partialFilterExpression={"cardNumber": {"$exists": True}},
+    )
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys: bson.D{{Key: "fines", Value: 1}},
-            Options: options.Index().SetPartialFilterExpression(
-                bson.M{"fines": bson.M{"$gt": 0}},
-            ),
-        },
-    )
+    _, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "fines", Value: 1}},
+        Options: options.Index().SetPartialFilterExpression(
+            bson.D{{Key: "fines", Value: bson.D{{Key: "$gt", Value: 0}}}},
+        ),
+    })
+    if err != nil {
+        return err
+    }
+    _, err = coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+        Keys: bson.D{{Key: "cardNumber", Value: 1}},
+        Options: options.Index().SetUnique(true).SetName("card_unique").
+            SetPartialFilterExpression(bson.D{{Key: "cardNumber", Value: bson.D{{Key: "$exists", Value: true}}}}),
+    })
     if err != nil {
         return err
     }
@@ -219,101 +395,15 @@ A **partial** index covers only the documents that match a filter expression, wh
             .build(),
     )
     .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-Members with zero fines never enter the index, so it stays lean and serves the "who owes money" query without indexing everyone.
-
-## Unique and sparse
-
-A **unique** index rejects any insert or update that would duplicate an indexed value — the way you guarantee, say, that no two members share a `cardNumber`:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ cardNumber: 1 }, { unique: true })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex({ cardNumber: 1 }, { unique: true });
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("cardNumber", 1)], unique=True)
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
-            Options: options.Index().SetUnique(true),
-        },
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    coll.create_index(
-        IndexModel::builder()
-            .keys(doc! { "cardNumber": 1 })
-            .options(IndexOptions::builder().unique(true).build())
-            .build(),
-    )
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-A **sparse** index goes one step further by skipping documents that lack the indexed field entirely, rather than indexing them with a null. Pairing sparse with unique lets many documents omit `cardNumber` while still forbidding duplicates among those that have one:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members.createIndex({ cardNumber: 1 }, { unique: true, sparse: true })
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").createIndex(
-      { cardNumber: 1 },
-      { unique: true, sparse: true }
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.create_index([("cardNumber", 1)], unique=True, sparse=True)
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := coll.Indexes().CreateOne(
-        ctx,
-        mongo.IndexModel{
-            Keys:    bson.D{{Key: "cardNumber", Value: 1}},
-            Options: options.Index().SetUnique(true).SetSparse(true),
-        },
-    )
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
     coll.create_index(
         IndexModel::builder()
             .keys(doc! { "cardNumber": 1 })
             .options(
-                IndexOptions::builder().unique(true).sparse(true).build(),
+                IndexOptions::builder()
+                    .unique(true)
+                    .name("card_unique".to_string())
+                    .partial_filter_expression(doc! { "cardNumber": { "$exists": true } })
+                    .build(),
             )
             .build(),
     )
@@ -322,39 +412,179 @@ A **sparse** index goes one step further by skipping documents that lack the ind
   </TabItem>
 </Tabs>
 
-**In Compass:** the **Create Index** dialog in the **Indexes** tab exposes these as options — you can tick **Unique**, set a **TTL** value, or supply a **Partial Filter Expression** without leaving the GUI.
+```text
+fines_owing
+index sizes KB: { fines_owing: 28, fines_all: 360 }
+fines > 2   : FETCH > IXSCAN(fines_owing)  returned=1428 keys=1428 docs=1428
+fines = 0   : COLLSCAN  returned=98000 keys=0 docs=100000
+fines >= 0  : COLLSCAN  returned=100000 keys=0 docs=100000
+```
+
+```text
+fines_1
+card_unique
+fines > 2: keys 40 docs 40
+```
+
+The partial index is 28 KB against 360 KB for a full index on the same field. It serves `fines > 2` (1 428 keys for 1 428 results) but not `fines = 0` or `fines >= 0`: the planner uses a partial index only when the query is guaranteed to fall inside its filter, and those two can match members that were never indexed.
+
+## Unique, and why sparse is the wrong tool
+
+A **unique** index rejects duplicates. The catch is optional fields: a missing field is indexed as `null`, and two `null`s are duplicates. The old lesson ran `unique`, then `unique + sparse` on the same key, which fails (same index name). The whole sequence, with real errors:
+
+```js
+// mongosh/types-unique.js
+try { db.members.createIndex({ cardNumber: 1 }, { unique: true }); }              // half the members have no cardNumber
+catch (e) { console.log("1. unique alone     :", e.codeName, "-", e.message.slice(e.message.indexOf("E11000"))); }
+console.log("2. unique + sparse  :", db.members.createIndex({ cardNumber: 1 }, { unique: true, sparse: true }));
+try { db.members.createIndex({ cardNumber: 1 }, { unique: true, partialFilterExpression: { cardNumber: { $exists: true } } }); }
+catch (e) { console.log("3. switch to partial (same name):", e.codeName); }
+db.members.dropIndex("cardNumber_1");
+console.log("4. partial + unique :", db.members.createIndex({ cardNumber: 1 }, { unique: true, partialFilterExpression: { cardNumber: { $exists: true } }, name: "card_unique" }));
+db.members.insertMany([{ name: "no card 1" }, { name: "no card 2" }]);
+try { db.members.insertOne({ name: "dup", cardNumber: "C2" }); } catch (e) { console.log("   duplicate card     : code", e.code, JSON.stringify(e.keyValue)); }
+console.log("   members without a card inserted:", db.members.countDocuments({ name: /^no card / }));
+```
+
+```text
+1. unique alone     : DuplicateKey - E11000 duplicate key error collection: b2_e5a3dc.members index: cardNumber_1 dup key: { cardNumber: null }
+2. unique + sparse  : cardNumber_1
+3. switch to partial (same name): IndexKeySpecsConflict
+4. partial + unique : card_unique
+   duplicate card     : code 11000 {"cardNumber":"C2"}
+   members without a card inserted: 2
+```
+
+Step 1 fails on the 50 000 members without a card (`dup key: { cardNumber: null }`). Step 2 works, but it is the wrong tool: a **sparse** index skips documents that lack the field, and a sparse index that the planner is forced to use for a sort returns incomplete results:
+
+```js
+// mongosh/types-sparse.js
+db.cards.insertMany([{ n: 1, card: "b" }, { n: 2 }, { n: 3, card: "a" }]);
+db.cards.createIndex({ card: 1 }, { sparse: true, name: "card_sparse" });
+console.log("plain sort           :", db.cards.find().sort({ card: 1 }).toArray().map((d) => d.n));
+console.log("sort with sparse hint:", db.cards.find().sort({ card: 1 }).hint("card_sparse").toArray().map((d) => d.n), "<- document 2 is missing");
+assert.strictEqual(db.cards.find().sort({ card: 1 }).hint("card_sparse").toArray().length, 2);
+```
+
+```text
+plain sort           : [ 2, 3, 1 ]
+sort with sparse hint: [ 3, 1 ] <- document 2 is missing
+```
+
+Document 2 has no `card`, so the hinted plan drops it (2 of 3 documents); without the hint the planner refuses the sparse index and returns all three. The manual says the same: "MongoDB does not select the sparse index to fulfill the query in order to return complete results", and "Partial indexes can function as sparse indexes, but also support filter expressions ... Use a partial index for greater control" ([sparse indexes](https://www.mongodb.com/docs/manual/core/index-sparse/), consulted 2026-09-30). Step 4 above is the recommended shape: `unique` plus `partialFilterExpression: { cardNumber: { $exists: true } }` allows any number of card-less members and rejects a duplicate card. Switching an existing index to different options needs a drop first (step 3 returned `IndexKeySpecsConflict`).
+
+## Three more you will meet
+
+**Wildcard** - one index over a subtree whose keys you do not know in advance (`attrs.$**`). It is convenient for schemaless attributes but indexes every path, so it is larger and slower than a targeted index; note the conjunction below still used the one wildcard path and filtered the rest (11 112 keys for 2 223 results):
+
+```js
+// mongosh/types-wildcard.js
+console.log(db.members.createIndex({ "attrs.$**": 1 }));
+console.log("attrs.color = red :", plan(db.members.find({ "attrs.color": "red" })));
+console.log("attrs.size  = L   :", plan(db.members.find({ "attrs.size": "L" })));
+console.log("size = L AND color:", plan(db.members.find({ "attrs.size": "L", "attrs.color": "red" })));
+```
+
+```text
+attrs.$**_1
+attrs.color = red : FETCH > IXSCAN(attrs.$**_1)  returned=11112 keys=11112 docs=11112
+attrs.size  = L   : FETCH > IXSCAN(attrs.$**_1)  returned=20000 keys=20000 docs=20000
+size = L AND color: FETCH > IXSCAN(attrs.$**_1)  returned=2223 keys=11112 docs=11112
+```
+
+**Hashed** - stores a hash of the value: perfect for equality and for hash-based sharding, useless for ranges and sorts:
+
+```js
+// mongosh/types-hashed.js
+console.log(db.members.createIndex({ name: "hashed" }));
+console.log("name = m4242 :", plan(db.members.find({ name: "m4242" })));
+console.log("name range   :", plan(db.members.find({ name: { $gte: "m4242", $lt: "m4243" } })));
+console.log("sort by name :", plan(db.members.find().sort({ name: 1 }).limit(3)));
+```
+
+```text
+name_hashed
+name = m4242 : FETCH > IXSCAN(name_hashed)  returned=1 keys=1 docs=1
+name range   : COLLSCAN  returned=11 keys=0 docs=100002
+sort by name : SORT > COLLSCAN  returned=3 keys=0 docs=100002
+```
+
+**2dsphere** - GeoJSON positions on a sphere, for `$near`, `$geoWithin` and friends. The plan stage is `GEO_NEAR_2DSPHERE`:
+
+```js
+// mongosh/types-geo.js
+console.log(db.members.createIndex({ location: "2dsphere" }));
+const near = { location: { $near: { $geometry: { type: "Point", coordinates: [13.5, 52.5] }, $maxDistance: 2000 } } };
+console.log("$near 2 km :", plan(db.members.find(near)));
+console.log("nearest 3  :", db.members.find(near, { name: 1, _id: 0 }).limit(3).toArray().map((d) => d.name));
+```
+
+```text
+location_2dsphere
+$near 2 km : GEO_NEAR_2DSPHERE(location_2dsphere)  returned=150 keys=383 docs=250
+nearest 3  : [ 'm5050', 'm25050', 'm65050' ]
+```
+
+**In Compass:** the **Create Index** dialog in the **Indexes** tab exposes these as options - tick **Unique**, set a **TTL** value or supply a **Partial Filter Expression** without leaving the GUI.
 
 ## Tips and gotchas
 
-- Multikey indexes have a limit: a compound index can include at most one array field, because indexing two arrays together would multiply out into an explosion of index entries.
-- TTL deletion is approximate in timing. The background sweep runs roughly once a minute, so an expired document may linger for up to a minute past its deadline before it is removed.
-- A partial index serves a query only when the query is guaranteed to fall inside the index's filter. A query that could match excluded documents cannot use the partial index, even for the part that overlaps.
-- A unique index counts a missing field as a `null` value, so without `sparse` it allows only one document with the field absent. Add `sparse` when many documents will lack the field.
+- A compound index can hold at most one array field (`cannot index parallel arrays`, code 171), and the error can appear later at insert time.
+- `$text` does not rank unless you project and sort `textScore`; only one text index per collection.
+- TTL deletes only BSON dates, within about 60 seconds, not instantly; a string date is never deleted.
+- Prefer partial over sparse; a partial index serves only queries guaranteed to fall inside its filter.
+- A unique index treats a missing field as `null`; without a partial filter only one document may lack it.
 
 <Callout title="Pick the index that fits the shape of the data">
-Most queries want a plain index, but arrays want multikey, words want text, expiring data wants TTL, a queried subset wants partial, one-of-a-kind values want unique, and optional fields want sparse. Match the type to the job and the index stays small and fast.
+Most queries want a plain index, but arrays want multikey, words want text (and a score sort), expiring data wants TTL on a real date, a queried subset wants partial, optional unique values want partial + unique, unknown keys want wildcard, and locations want 2dsphere.
 </Callout>
+
+## Reading AI-generated code
+
+Asked to "expire login sessions after an hour", an assistant writes:
+
+<SpotTheBug lang="js" code={`// AI comment: "TTL index deletes sessions one hour after creation"
+await sessions.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 });
+await sessions.insertOne({ userId, createdAt: new Date().toISOString() });`}>
+
+`toISOString()` produces a **string**, and a TTL index only looks at BSON dates and arrays of dates. The index is created without complaint and the documents are never deleted (the earlier run kept the string for 125 seconds while the Date documents vanished within a minute). The fix is to store `new Date()`, as the `fix` row of the `$type` check (the first tab above) shows:
+
+```text
+[ { _id: 'bug', type: 'string' }, { _id: 'fix', type: 'date' } ]
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Every special index type is the same B-tree with a different rule for **which entries go in** (multikey: each array element; partial/sparse: only some documents; wildcard: every path; hashed: the hash; TTL: a date the server watches) and **which questions it can answer** (text: word match plus score; 2dsphere: distance; hashed: equality only). If a query needs an entry that was never written, the index cannot help.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Text index | Convenient full-text word search, no regex needed | A collection can have only one text index |
-| TTL index | Automatically deletes expired documents, no separate job to write | Deletion timing is imprecise, since the background sweep runs roughly once a minute |
-| Partial index | Smaller than a full index, since it only covers documents matching the filter | Only helps a query guaranteed to fall within the index's filter |
-| Unique index | Guarantees data uniqueness at the database level | An insert or update that would duplicate a value is rejected immediately — you need extra error-handling code |
+| Multikey | Seek by any array element | ~3 entries per document here; one array field per compound index |
+| Text | Word search with a score | One per collection; unranked unless you sort by textScore |
+| TTL | Self-cleaning data, no cron | Up to ~60 s late; only real dates |
+| Partial | 28 KB instead of 360 KB | Only queries inside the filter can use it |
+| Unique (+ partial) | Database-level uniqueness with optional fields | Duplicate writes are rejected: handle E11000 |
+| Wildcard | No need to know the keys | Indexes every path; weaker than a targeted index |
+| Hashed | Even distribution, cheap equality | No ranges, no sort |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Creating two text indexes on the same collection** — MongoDB allows only one text index per collection, even if it needs to cover several fields. Combine every searchable field into that single index.
-- **Expecting a TTL index to delete documents at the exact moment** — the background sweep runs roughly once a minute, so a document can linger up to a minute past its deadline. Do not rely on TTL for a use case needing second-level precision.
-- **Forgetting to pair `sparse` with `unique` when a field is optional** — a unique index treats every missing value as the same `null`, so without `sparse` only one document is allowed to lack that field.
+- **"`$text` results come back ranked."** - unsorted order was 5, 1, 4, 2; sorted by score 5, 4, 1, 2.
+- **"TTL works on any timestamp-looking field."** - the ISO string survived 125 s; only dates are deleted.
+- **"unique + sparse is how you make an optional field unique."** - use a partial filter; sparse loses documents on sorts.
+- **"A partial index speeds up every query on the field."** - `fines = 0` and `fines >= 0` were COLLSCAN.
+- **"A hashed index also helps ranges and sorts."** - both were COLLSCAN over 100 000 documents.
+- **"TTL deletes at the exact second."** - within the 60-second monitor cycle, never instantly.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A SaaS platform storing temporary sessions/tokens** — uses a TTL index on an `expiresAt` field so expired sessions delete themselves with no separate cron job needed to clean up old data.
->
-> **A support ticket system doing full-text search over ticket content** — uses a text index combining the `subject` and `body` fields, so agents can search tickets by keyword without needing a separate search engine like Elasticsearch for a moderate volume of data.
+> The MongoDB manual itself steers you away from sparse: "Partial indexes can function as sparse indexes, but also support filter expressions for conditions beyond whether a field exists" ([sparse indexes](https://www.mongodb.com/docs/manual/core/index-sparse/), consulted 2026-09-30), and warns that expired documents "may exist for some time beyond the 60 second period between runs of the background task" on a busy server ([TTL indexes](https://www.mongodb.com/docs/manual/core/index-ttl/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the multikey, text, TTL, partial and unique `createIndex` calls succeeded) but they are not executed by the course's automated checker._
 
 export const quizTypes = [
   {
@@ -366,26 +596,62 @@ export const quizTypes = [
       'When the collection has more than one index',
     ],
     answer: 1,
+    explain: 'borrowed_1 reported isMultiKey: true and held about 300 000 entries for 100 000 documents; a compound index on two array fields failed with "cannot index parallel arrays".',
   },
   {
-    q: 'What does a TTL index do?',
+    q: 'How do you get $text results ranked by relevance?',
     options: [
-      'Caches query results for a fixed time',
-      'Deletes documents automatically once a date field passes the configured age',
-      'Limits how long a query may run',
-      'Compresses old documents to save space',
+      '$text always returns best matches first',
+      'Project { $meta: "textScore" } and sort by it',
+      'Add a weights option only',
+      'Use a regex instead',
     ],
     answer: 1,
+    explain: 'Without the sort the order was 5, 1, 4, 2; sorted by textScore it was 5 (2.31), 4 (1.33), then the ties 1 and 2 (1.00).',
   },
   {
-    q: 'Why combine a unique index with sparse?',
+    q: 'A TTL index on createdAt never deletes anything. What is the most likely cause?',
     options: [
-      'To make the index faster to build',
-      'To allow many documents to omit the field while still forbidding duplicate values among those that have it',
-      'To index two array fields at once',
-      'To enable full-text search on the field',
+      'The field holds ISO strings, not BSON Dates',
+      'expireAfterSeconds must be at least 60',
+      'TTL only works on capped collections',
+      'TTL needs a replica set',
+    ],
+    answer: 0,
+    explain: '$type showed "string" for the ISO-string document, which survived 125 s while the Date and array-of-Date documents were deleted (first seen gone after 14 s).',
+  },
+  {
+    q: 'Why prefer a partial unique index over unique + sparse for an optional cardNumber?',
+    options: [
+      'Sparse is deprecated syntax',
+      'Partial can express any filter, and a sparse index gives incomplete results when used for a sort',
+      'Partial indexes are never used by queries',
+      'Unique cannot be combined with sparse',
     ],
     answer: 1,
+    explain: 'Sort with the sparse index returned 2 of 3 documents; the MongoDB manual recommends partial indexes for greater control.',
+  },
+  {
+    q: 'A partial index on { fines: 1 } with filter { fines: { $gt: 0 } }: which query uses it?',
+    options: [
+      '{ fines: 0 }',
+      '{ fines: { $gte: 0 } }',
+      '{ fines: { $gt: 2 } }',
+      'Every query on fines',
+    ],
+    answer: 2,
+    explain: 'Only { fines: { $gt: 2 } } is guaranteed to fall inside the filter: IXSCAN with 1 428 keys; the other two were COLLSCAN. The partial index was 28 KB against 360 KB for the full one.',
+  },
+  {
+    q: 'Which of these can a hashed index serve?',
+    options: [
+      'Range queries on the field',
+      'Sorting by the field',
+      'Equality lookups on the field',
+      'Text search',
+    ],
+    answer: 2,
+    explain: 'name = "m4242" was an IXSCAN of 1 key; the range and the sort were COLLSCAN over 100 000 documents.',
   },
 ]
 
