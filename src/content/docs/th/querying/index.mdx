@@ -9,6 +9,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 การใส่ข้อมูลเข้าไปนั้นง่าย ทักษะที่แยกคนที่แค่ *เก็บ* document ออกจากคนที่ใช้ฐานข้อมูลได้จริงคือการอ่านข้อมูลกลับมาอย่างแม่นยำ การ query คือศิลปะของการอธิบายอย่างเจาะจงและไม่เกินจำเป็นว่าคุณสนใจ document ชุดย่อยกลุ่มไหน — แล้วจัดรูปสิ่งที่ส่งกลับมาให้คุณได้รับเฉพาะ field ที่ต้องการ ในลำดับที่ต้องการ แบ่งเป็นหน้าเล็กพอที่จะจัดการได้ โมดูลนี้พูดถึงครึ่งหลังของฐานข้อมูลทั้งหมด นั่นคือการอ่าน
@@ -33,10 +34,33 @@ export const queryOverviewDiagram = `flowchart LR
 เมื่อคุณ query MongoDB คุณไม่เคยเขียนลูป คุณส่ง **filter document** ให้ server ที่ *อธิบาย* document ที่คุณต้องการ แล้ว server จะหาให้ filter อย่างด้านล่างอ่านได้ว่า "สมาชิกทุกคนที่เข้าร่วมในปี 2023 และตอนนี้ไม่ค้างค่าปรับเลย"
 
 ```js
+// mongosh/q-first-filter.js
 db.members.find({ joined: 2023, fines: 0 })
 ```
 
-filter ที่เรียบง่ายที่สุดจับคู่ชื่อ field กับค่าหนึ่งค่า และหลายคู่ใน filter เดียวกันคือ AND โดยปริยาย จากจุดนั้นการ query เติบโตได้สี่ทิศทาง และโมดูลนี้จะพาไปทีละทิศทาง
+filter ที่เรียบง่ายที่สุดจับคู่ชื่อ field กับค่าหนึ่งค่า และหลายคู่ใน filter เดียวกันคือ AND โดยปริยาย จากจุดนั้นการ query เติบโตได้สี่ทิศทาง และโมดูลนี้จะพาไปทีละทิศทาง นี่คือการตัดสินใจทั้งสี่ในการอ่านที่รันได้หนึ่งครั้ง — document ไหน, field ไหน, ลำดับอย่างไร, จำนวนเท่าไร (mongo 8.3.11, mongosh 2.11.1, Node driver 7.7.0, Mac เครื่องเดียว; แต่ละบทในโมดูลนี้ seed ข้อมูลของตัวเอง):
+
+```js
+// mongosh/q-overview.js
+db.members.insertMany([
+  { name: "Ada",      joined: 2023, fines: 0, borrowed: ["Compilers"] },
+  { name: "Grace",    joined: 2021, fines: 3, borrowed: ["Compilers", "Algorithms"] },
+  { name: "Linus",    joined: 2023, fines: 5, borrowed: [] },
+  { name: "Margaret", joined: 2023, fines: 0, borrowed: ["Algorithms"] },
+  { name: "Edsger",   joined: 2022, fines: 1, borrowed: ["Databases"] },
+]);
+const page = db.members
+  .find({ joined: { $gte: 2022 }, fines: { $lte: 1 } }, { _id: 0, name: 1, joined: 1 })   // which documents, which fields
+  .sort({ joined: -1, name: 1 })                                                            // in what order
+  .limit(2)                                                                                 // how many
+  .toArray();
+console.log(page);
+assert.strictEqual(page.map((d) => d.name).join(), "Ada,Margaret");
+```
+
+```text
+[ { name: 'Ada', joined: 2023 }, { name: 'Margaret', joined: 2023 } ]
+```
 
 ## โมดูลนี้ครอบคลุมอะไรบ้าง
 
@@ -45,32 +69,124 @@ filter ที่เรียบง่ายที่สุดจับคู่�
 - **การ query nested document** document ซ้อนกันได้ dot notation ช่วยให้คุณเข้าถึง field ที่ฝังลึกอยู่ใน object และมีความแตกต่างสำคัญระหว่างการจับคู่ทั้ง sub-document แบบตรงเป๊ะกับการ match แค่ field เดียวข้างใน
 - **Projection, การ sort และการแบ่งหน้า** เมื่อคุณได้ document ที่ถูกต้องแล้ว คุณตัดสินใจว่าจะส่ง field ไหนกลับมา จะมาในลำดับใด และจะแบ่งผลลัพธ์ก้อนใหญ่ออกเป็นหน้าที่จัดการได้อย่างไร — และทำไมลูกเล่นการแบ่งหน้ายอดนิยมตัวหนึ่งถึงช้าลงเมื่อข้อมูลใหญ่ขึ้น
 
-ทุกบทเรียนแสดง query เดียวกันห้าแบบ — ใน `mongosh` แล้วตามด้วย driver ของ Node.js, Python, Go และ Rust — คู่กับ JSON document ที่จะส่งกลับมา เพื่อให้คุณอ่านรูปร่างของคำตอบได้ ไม่ใช่แค่ตัวคำสั่ง
+ทุกบทเรียนแสดง query เดียวกันห้าแบบ — ใน `mongosh` แล้วตามด้วย driver ของ Node.js, Python, Go และ Rust — คู่กับ output จริงที่ได้เมื่อเรารัน เพื่อให้คุณอ่านรูปร่างของคำตอบได้ ไม่ใช่แค่ตัวคำสั่ง
 
 <Callout title="การอ่านคือครึ่งของฐานข้อมูลที่คุณจะใช้มากที่สุด">
 โค้ดแอปพลิเคชันส่วนใหญ่อ่านมากกว่าเขียนหลายเท่า เวลาที่ใช้เรียนรู้การเขียน filter ที่แม่นยำและ projection ที่กระชับจะคืนทุนทุกครั้งที่โหลดหน้า — query ที่ดีส่งกลับมาเฉพาะ document และ field ที่คุณต้องการ และไม่มีอะไรที่คุณต้องทิ้งไปฝั่ง client
 </Callout>
 
+## index, regex และ `$where`: query ราคาเท่าไร
+
+คำเตือนเก่าแก่สองข้อของโมดูลนี้ถูกกล่าวโดยไม่มีหลักฐาน เราวัดบนสมาชิก 20 000 คนที่มี index บน `name` (`explain("executionStats")` โดย keys examined คือจำนวนรายการใน index ที่อ่าน):
+
+```js
+// mongosh/q-regex-explain.js
+db.people.insertMany(Array.from({ length: 20000 }, (_, i) => ({ name: "m" + i, joined: 2020 + (i % 6) })));
+db.people.createIndex({ name: 1 });
+const stage = (p) => (p.inputStage ? p.stage + " > " + stage(p.inputStage) : p.stage);
+const stats = (label, cursor) => {
+  const e = cursor.explain("executionStats"), es = e.executionStats, wp = e.queryPlanner.winningPlan;
+  console.log(label.padEnd(34), stage(wp.queryPlan ?? wp).padEnd(15), "| returned", String(es.nReturned).padStart(4), "| keys", String(es.totalKeysExamined).padStart(5), "| docs", String(es.totalDocsExamined).padStart(5));
+  return es;
+};
+stats("name = 'm19'", db.people.find({ name: "m19" }));
+const anchored = stats("/^m19/   (anchored)", db.people.find({ name: /^m19/ }));
+const unanchored = stats("/m19/    (unanchored)", db.people.find({ name: /m19/ }));
+stats("/^M19/i  (case-insensitive)", db.people.find({ name: /^M19/i }));
+const rx = stats("$expr $regexMatch ^m19", db.people.find({ $expr: { $regexMatch: { input: "$name", regex: "^m19" } } }));
+assert.strictEqual(anchored.totalKeysExamined, 1112);
+assert.strictEqual(unanchored.totalKeysExamined, 20000);
+assert.strictEqual(rx.totalDocsExamined, 20000);
+```
+
+```text
+name = 'm19'                       FETCH > IXSCAN  | returned    1 | keys     1 | docs     1
+/^m19/   (anchored)                FETCH > IXSCAN  | returned 1111 | keys  1112 | docs  1111
+/m19/    (unanchored)              FETCH > IXSCAN  | returned 1111 | keys 20000 | docs  1111
+/^M19/i  (case-insensitive)        FETCH > IXSCAN  | returned 1111 | keys 20000 | docs  1111
+$expr $regexMatch ^m19             COLLSCAN        | returned 1111 | keys     0 | docs 20000
+```
+
+นี่แก้ถ้อยคำเก่า ("regex ที่ไม่ anchor สแกนทุก *document*"): planner **ใช้** index แต่สำหรับ `/m19/` และ `/^M19/i` ที่ไม่สนตัวพิมพ์ มันไม่มี prefix ให้สร้างช่วง จึงอ่าน **ทั้ง 20 000 รายการใน index** และ fetch เฉพาะ 1 111 document ที่ตรง — เป็นการสแกน *index* เต็ม ส่วน `/^m19/` ที่ anchor กลายเป็นช่วงแคบ (1 112 key) และ `$expr` กับ `$regexMatch` ใช้ index ไม่ได้เลย: ตรวจทั้ง 20 000 document reference ของ `$regex` ใน MongoDB บอกเช่นกัน: prefix expression ให้ MongoDB "construct a 'range' from that prefix" และ index แบบไม่สนตัวพิมพ์ "do not improve performance for `$regex` queries" ([$regex](https://www.mongodb.com/docs/manual/reference/operator/query/regex/), เรียกอ่านเมื่อ 2026-09-30)
+
+`$where` รัน JavaScript **ต่อ document** collection เดียวกัน คำตอบ 1 111 รายการเดียวกัน:
+
+```js
+// mongosh/q-where.js @skip-verify takes about 3-4 seconds on 20 000 documents; output below from a real run
+let t = Date.now();
+const viaRegex = db.people.find({ name: /^m19/ }).toArray().length;
+console.log("/^m19/ :", viaRegex, "docs in", Date.now() - t, "ms");
+t = Date.now();
+const viaWhere = db.people.find({ $where: "this.name.startsWith('m19')" }).toArray().length;
+console.log("$where :", viaWhere, "docs in", Date.now() - t, "ms");
+console.log("$where plan:", db.people.find({ $where: "this.name.startsWith('m19')" }).explain("executionStats").queryPlanner.winningPlan.stage);
+```
+
+```text
+/^m19/ : 1111 docs in 19 ms
+$where : 1111 docs in 4186 ms
+$where plan: COLLSCAN
+```
+
+`$where` ใช้เวลาราว 4 วินาที (3.6 ถึง 4.2 วินาทีในสี่การรัน) เทียบ 19 มิลลิวินาทีของ regex และเป็น `COLLSCAN` ที่ใช้ index ไม่ได้ — ต่างกันราว 200 เท่า คู่มือระบุว่า "`$where` evaluates JavaScript and cannot take advantage of indexes" และแนะนำ `$expr` กับ aggregation operator ที่ไม่ใช้ JavaScript ซึ่ง "faster than `$where` because it does not execute JavaScript"; และยังบอกวิธีปิด JavaScript ฝั่ง server ด้วย `security.javascriptEnabled: false` / `--noscripting` ([$where](https://www.mongodb.com/docs/manual/reference/operator/query/where/), เรียกอ่านเมื่อ 2026-09-30) — ควรทำถ้าไม่มีอะไรในแอปต้องใช้ เพราะ `$where` กับ input ของผู้ใช้คือช่องโหว่ code injection
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอ "ค้นหาชื่อเร็ว ๆ ด้วย index" มักเขียนการค้นหาแบบมีคำ ไม่สนตัวพิมพ์ แล้วปลอบใจเรื่อง index:
+
+<SpotTheBug lang="js" code={`// AI comment: "indexed search - name has an index so this is fast"
+const hits = await db.collection("people")
+  .find({ name: /M19/i })
+  .toArray();`}>
+
+query ทำงานและคืน document ที่ถูก — จึงไม่มีใครสังเกต แต่ `/M19/i` ไม่มี prefix ที่สนตัวพิมพ์ planner จึงอ่าน **ทุกรายการของ index `name`** (ตรวจ 20 000 key เพื่อคืน 1 111 document) เหมือนกับ `/m19/`: index ถูกใช้แต่แทบไม่ได้ประโยชน์ และต้นทุนโตเป็นเส้นตรงตาม collection ถ้าเจตนาคือ "ขึ้นต้นด้วย" ให้เก็บหรือ query ในตัวพิมพ์เดียวและ anchor นิพจน์:
+
+```js
+// mongosh/q-regex-fix.js
+const before = db.people.find({ name: /M19/i }).explain("executionStats").executionStats;
+const after = db.people.find({ name: /^m19/ }).explain("executionStats").executionStats;
+console.log("case-insensitive contains:", before.totalKeysExamined, "keys");
+console.log("anchored prefix          :", after.totalKeysExamined, "keys");
+assert.strictEqual(before.totalKeysExamined, 20000);
+assert.strictEqual(after.totalKeysExamined, 1112);
+```
+
+```text
+case-insensitive contains: 20000 keys
+anchored prefix          : 1112 keys
+```
+
+(สำหรับการค้นหา "มีคำนี้" กับข้อมูลจำนวนมากจริง ๆ text index หรือ Atlas Search คือเครื่องมือที่ถูก; โมดูล indexes ครอบคลุม `$text`)
+
+</SpotTheBug>
+
+## Mental Model
+
+query มีสองต้นทุน: **การเลือก** (server ต้องดูรายการ index หรือ document กี่รายการเพื่อตัดสิน?) และ **การส่งมอบ** (กี่ document และกี่ไบต์ถึงคุณ?) filter, projection, sort และ limit ต่างกระทบอย่างใดอย่างหนึ่ง สี่บทที่ตามมาคือ ตามลำดับ เรื่องการเขียนการเลือกที่ server ตอบได้ถูก (operator, array, path ซ้อน) และการตัดการส่งมอบ (projection, sort, pagination) `explain` แสดงทั้งสองตัวเลข
+
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Filter อย่างเดียว ไม่ระบุ projection | เขียนเร็ว ใช้ query ได้ทันที | ส่ง field ที่ไม่ได้ใช้กลับมาทุกครั้ง เปลืองแบนด์วิดท์และ memory ฝั่ง client |
-| Filter + projection ที่ระบุ field ชัดเจน | ลดขนาดข้อมูลที่ส่งผ่านเครือข่าย บังคับให้ทีมเห็นรายการ field ที่แอปพึ่งพาจริง | ต้องดูแล field list ให้ตรงกับ schema ที่เปลี่ยนไปเรื่อย ๆ |
-| filter แบบจับคู่ตรงเป๊ะ | เร็วและ index ได้เสมอ | ตอบคำถามเชิงช่วง/เซ็ต/นิพจน์ซับซ้อนไม่ได้ |
-| filter ที่ซับซ้อนด้วย operator หลายตัวและ `$and`/`$or` | ตอบคำถามได้ละเอียดขึ้นมาก | อ่านยากขึ้น และเสี่ยงบังคับให้ query planner เลือก index ที่ไม่เหมาะสม |
+| filter อย่างเดียว ไม่ระบุ projection | เขียนเร็ว query ทำงานทันที | คืน field ที่ไม่ใช้ทุกครั้ง เปลืองแบนด์วิดท์และหน่วยความจำฝั่ง client |
+| filter + projection ที่ระบุ field ชัดเจน | ลดข้อมูลที่ส่งผ่านเครือข่าย บังคับให้ทีมเห็น field ที่แอปพึ่งพาจริง | ต้องดูแลให้ตรงกันเมื่อ schema วิวัฒน์ |
+| filter แบบจับคู่ตรงเป๊ะ | เร็วและ index ได้เสมอ | ตอบคำถามช่วง/เซ็ต/นิพจน์ซับซ้อนไม่ได้ |
+| filter ซับซ้อนที่มีหลาย operator และ `$and`/`$or` | ตอบคำถามที่ละเอียดกว่ามาก | อ่านยากขึ้น; กิ่ง `$or` ที่ไม่มี index ส่งทั้ง query ไปสแกนทั้ง collection (ตรวจ 20 000 document ในบท comparison) |
+| filter แบบ regex | จับคู่รูปแบบได้โดยไม่ต้องมี index ชนิดใหม่ | เฉพาะ prefix ที่ anchor และสนตัวพิมพ์เท่านั้นที่ใช้ index เป็นช่วง (1 112 key); นอกนั้นสแกน index เต็ม (20 000 key) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ `$where` เพื่อเขียนเงื่อนไขที่ operator มาตรฐานทำไม่ได้** — `$where` รัน JavaScript ต่อ document จึงช้ามาก ใช้ index ไม่ได้เลย และเปิดช่องให้เกิดปัญหาด้าน security หากรับ input จากผู้ใช้ ให้มองหา operator มาตรฐานหรือ aggregation ก่อนเสมอ
-- **เขียน regex แบบไม่ยึด anchor เช่น `/foo/` แทน `/^foo/`** — regex ที่ไม่มี `^` บังคับให้ MongoDB สแกนทุก document ในคอลเลกชัน ใช้ index ไม่ได้แม้ field นั้นจะมี index อยู่ก็ตาม ถ้าต้องการค้นแบบ "ขึ้นต้นด้วย" ให้ anchor ที่จุดเริ่มต้นเสมอ
-- **คิดว่าการไม่ระบุ projection ไม่มีต้นทุน** — ทุก field ที่ไม่ได้ตัดออกจะวิ่งข้ามเครือข่ายมา แล้วฝั่งแอปต้อง serialize ทั้งหมด สำหรับ document ที่มี field ใหญ่ (description ยาว ๆ หรือ array ขนาดใหญ่) การลืม projection คือสาเหตุ latency ที่พบบ่อย
+- **"`$where` ก็แค่ operator อีกตัว"** — มันใช้ราว 4 วินาทีเทียบ 19 ms ของ regex บน 20 000 document ใช้ index ไม่ได้ และประเมิน JavaScript (ช่องโหว่ injection กับ input ผู้ใช้) ให้ใช้ operator มาตรฐานหรือ `$expr`
+- **"regex ที่ไม่ anchor สแกนทุก document"** — มันสแกนทุก *รายการใน index* เมื่อมี index (20 000 key, fetch 1 111 document); ถ้าไม่มี index ก็คือสแกน collection ไม่ว่าแบบไหน ให้ anchor ด้วย `^` สำหรับ "ขึ้นต้นด้วย"
+- **"regex ไม่สนตัวพิมพ์ใช้ index ได้ดี"** — `/^M19/i` ตรวจ 20 000 key; แบบที่ anchor และสนตัวพิมพ์ตรวจ 1 112
+- **"projection เป็นแค่ของตกแต่ง"** — ทุก field ที่ไม่ตัดเดินทางผ่านเครือข่าย (บท projection แสดง exclusion projection รั่ว field)
+- **"แต่ละโมดูลแยกอิสระ"** — บทหลังพึ่งกฎที่เรียนก่อน (field ที่ขาด, null, ชนิดข้อมูล)
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **หน้า filter สินค้าของอีคอมเมิร์ซ** — sidebar ที่กรองตามหมวดหมู่ ช่วงราคา แบรนด์ และ rating ผูกตรงกับ comparison/logical operator (`$gte`, `$lte`, `$in`) และใช้ projection ส่งกลับเฉพาะ field ที่การ์ดสินค้าต้องใช้ (ชื่อ ราคา รูปหลัก) ไม่ใช่ document เต็ม
->
-> **แผง search ฝั่ง admin** — เครื่องมือค้นหาผู้ใช้หรือ order ภายในองค์กรมักเผลอเปิดช่องให้ผู้ใช้พิมพ์ regex เองแล้วส่งตรงเข้า query โดยไม่ anchor ทำให้หน้าค้นหาช้าลงเรื่อย ๆ เมื่อข้อมูลโตขึ้น
+> หน้า `$where` ของคู่มือ MongoDB ระบุ trade-off ตรง ๆ: "`$where` evaluates JavaScript and cannot take advantage of indexes ... Using `$where` alone requires a collection scan" และแนะนำ `$expr` แทน ([$where](https://www.mongodb.com/docs/manual/reference/operator/query/where/), เรียกอ่านเมื่อ 2026-09-30); การวัด 4 วินาทีด้านบนคือประโยคนั้นในรูปตัวเลข
+
+_แท็บ Python/Go/Rust ในโมดูลนี้สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node และแต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch (ดูแต่ละบท); ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizIndex = [
   {
@@ -78,25 +194,50 @@ export const quizIndex = [
     options: [
       'ลูปที่คุณเขียนเพื่อสแกนทุก document',
       'document ที่อธิบายว่าคุณต้องการ document ไหน',
-      'รายชื่อ field ที่จะส่งกลับมา',
-      'ลำดับการ sort ที่ใช้กับผลลัพธ์',
+      'ลิสต์ชื่อ field ที่จะคืน',
+      'ลำดับการเรียงที่ใช้กับผลลัพธ์',
     ],
     answer: 1,
+    explain: 'filter คือ document; server เป็นคนค้นหา (และใช้ index ช่วยได้)',
   },
   {
-    q: 'filter ที่มีคู่ field/value สองคู่ เช่น joined และ fines หมายความว่าอย่างไร?',
+    q: 'filter ที่มีสองคู่ field/ค่า เช่น joined และ fines หมายถึงอะไร?',
     options: [
-      'จับคู่ document ที่เงื่อนไขใดเงื่อนไขหนึ่งเป็นจริง',
-      'จับคู่ document ที่ทั้งสองเงื่อนไขเป็นจริง (AND โดยปริยาย)',
-      'จับคู่ document ที่ไม่มีเงื่อนไขใดเป็นจริง',
-      'ไม่ถูกต้อง อนุญาตเพียงคู่เดียวเท่านั้น',
+      'ตรงกับ document ที่เงื่อนไขใดเงื่อนไขหนึ่งเป็นจริง',
+      'ตรงกับ document ที่ทั้งสองเงื่อนไขเป็นจริง (AND โดยปริยาย)',
+      'ตรงกับ document ที่ไม่มีเงื่อนไขใดเป็นจริง',
+      'ใช้ไม่ได้; อนุญาตเพียงหนึ่งคู่',
     ],
     answer: 1,
+    explain: 'หลายคู่ใน filter เดียวคือ AND โดยปริยาย; query ภาพรวมคืนเฉพาะสมาชิกที่ตรงทั้งสองขอบ',
   },
   {
-    q: 'ข้อใดไม่ใช่หนึ่งในสี่การตัดสินใจที่คำขออ่านรวมเข้าด้วยกัน?',
-    options: ['document ไหน (filter)', 'field ไหน (projection)', 'document ถูกเก็บบนดิสก์อย่างไร', 'ในลำดับใดและจำนวนเท่าไร (sort, limit, skip)'],
+    q: 'ข้อใดไม่ใช่หนึ่งในสี่การตัดสินใจที่คำขออ่านรวมกัน?',
+    options: ['document ไหน (filter)', 'field ไหน (projection)', 'document ถูกเก็บบนดิสก์อย่างไร', 'ลำดับใดและกี่รายการ (sort, limit, skip)'],
     answer: 2,
+    explain: 'รูปแบบการเก็บไม่ใช่ส่วนของ query; filter, projection, sort และ limit/skip ต่างหาก',
+  },
+  {
+    q: 'มี index บน name explain แสดงอะไรสำหรับ find({ name: /m19/ }) บน 20 000 document?',
+    options: [
+      'COLLSCAN ตรวจ 20 000 document',
+      'IXSCAN ที่อ่านทั้ง 20 000 key ของ index และ fetch 1 111 document',
+      'IXSCAN ที่อ่าน 1 112 key',
+      'error: regex ต้องใช้ $text',
+    ],
+    answer: 1,
+    explain: 'เมื่อไม่มี prefix ที่ anchor ก็ไม่มีช่วง: สแกนทั้ง index (20000 key) แต่ fetch เพียง 1111 document ส่ง /^m19/ ที่ anchor อ่าน 1112 key',
+  },
+  {
+    q: 'ทำไมควรเลี่ยง $where สำหรับเงื่อนไขอย่าง name.startsWith("m19")?',
+    options: [
+      'เป็นไวยากรณ์ที่เลิกใช้และไม่รันแล้ว',
+      'รัน JavaScript ต่อ document ใช้ index ไม่ได้ (COLLSCAN ราว 4 วินาทีที่นี่) และเป็นช่องโหว่ injection กับ input ผู้ใช้',
+      'ใช้ได้เฉพาะบน primary',
+      'คืน document ในลำดับสุ่ม',
+    ],
+    answer: 1,
+    explain: 'วัดได้: 1111 document ใช้ราว 4186 ms ด้วย COLLSCAN เทียบ 19 ms สำหรับ /^m19/',
   },
 ]
 

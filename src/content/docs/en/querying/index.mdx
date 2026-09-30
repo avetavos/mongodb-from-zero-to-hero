@@ -9,6 +9,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 Inserting data is easy. The skill that separates someone who *stores* documents from someone who actually *uses* a database is reading them back with precision. Querying is the art of describing, exactly and no more, the subset of documents you care about — and then shaping what comes back so you receive only the fields you need, in the order you want, in pages small enough to handle. This module is entirely about that second half of the database: reading.
@@ -33,10 +34,33 @@ export const queryOverviewDiagram = `flowchart LR
 When you query MongoDB you never write a loop. You hand the server a **filter document** that *describes* the documents you want, and the server finds them. A filter like the one below reads as "every member who joined in 2023 and currently owes nothing":
 
 ```js
+// mongosh/q-first-filter.js
 db.members.find({ joined: 2023, fines: 0 })
 ```
 
-The plainest filter pairs a field name with a value, and several pairs in the same filter are an implicit AND. From there, querying grows in four directions, and this module takes them one at a time.
+The plainest filter pairs a field name with a value, and several pairs in the same filter are an implicit AND. From there, querying grows in four directions, and this module takes them one at a time. Here are all four decisions in one runnable read - which documents, which fields, in what order, how many (mongo 8.3.11, mongosh 2.11.1, Node driver 7.7.0, one Mac; each lesson in this module seeds its own data):
+
+```js
+// mongosh/q-overview.js
+db.members.insertMany([
+  { name: "Ada",      joined: 2023, fines: 0, borrowed: ["Compilers"] },
+  { name: "Grace",    joined: 2021, fines: 3, borrowed: ["Compilers", "Algorithms"] },
+  { name: "Linus",    joined: 2023, fines: 5, borrowed: [] },
+  { name: "Margaret", joined: 2023, fines: 0, borrowed: ["Algorithms"] },
+  { name: "Edsger",   joined: 2022, fines: 1, borrowed: ["Databases"] },
+]);
+const page = db.members
+  .find({ joined: { $gte: 2022 }, fines: { $lte: 1 } }, { _id: 0, name: 1, joined: 1 })   // which documents, which fields
+  .sort({ joined: -1, name: 1 })                                                            // in what order
+  .limit(2)                                                                                 // how many
+  .toArray();
+console.log(page);
+assert.strictEqual(page.map((d) => d.name).join(), "Ada,Margaret");
+```
+
+```text
+[ { name: 'Ada', joined: 2023 }, { name: 'Margaret', joined: 2023 } ]
+```
 
 ## What this module covers
 
@@ -45,11 +69,100 @@ The plainest filter pairs a field name with a value, and several pairs in the sa
 - **Querying nested documents.** Documents nest. Dot notation lets you reach a field buried inside an embedded object, and there is an important difference between matching a whole sub-document exactly and matching just one of its fields.
 - **Projection, sorting, and pagination.** Once you have the right documents, you decide which fields to return, what order they arrive in, and how to slice a large result into manageable pages — and why one popular paging trick gets slow at scale.
 
-Every lesson shows the same query five ways — in `mongosh`, then the Node.js, Python, Go, and Rust drivers — alongside the JSON documents it would return, so you can read the shape of the answer, not just the call.
+Every lesson shows the same query five ways - in `mongosh`, then the Node.js, Python, Go, and Rust drivers - alongside the real output it returned when we ran it, so you can read the shape of the answer, not just the call.
 
 <Callout title="Reading is the half of the database you will use most">
 Most application code reads far more than it writes. Time spent learning to write precise filters and lean projections pays back on every page load — a good query returns exactly the documents and fields you need, and nothing you have to throw away on the client.
 </Callout>
+
+## Indexes, regexes and `$where`: what a query costs
+
+Two of the module's oldest warnings were stated without proof. We measured them on 20 000 members with an index on `name` (`explain("executionStats")`, keys examined is the number of index entries read):
+
+```js
+// mongosh/q-regex-explain.js
+db.people.insertMany(Array.from({ length: 20000 }, (_, i) => ({ name: "m" + i, joined: 2020 + (i % 6) })));
+db.people.createIndex({ name: 1 });
+const stage = (p) => (p.inputStage ? p.stage + " > " + stage(p.inputStage) : p.stage);
+const stats = (label, cursor) => {
+  const e = cursor.explain("executionStats"), es = e.executionStats, wp = e.queryPlanner.winningPlan;
+  console.log(label.padEnd(34), stage(wp.queryPlan ?? wp).padEnd(15), "| returned", String(es.nReturned).padStart(4), "| keys", String(es.totalKeysExamined).padStart(5), "| docs", String(es.totalDocsExamined).padStart(5));
+  return es;
+};
+stats("name = 'm19'", db.people.find({ name: "m19" }));
+const anchored = stats("/^m19/   (anchored)", db.people.find({ name: /^m19/ }));
+const unanchored = stats("/m19/    (unanchored)", db.people.find({ name: /m19/ }));
+stats("/^M19/i  (case-insensitive)", db.people.find({ name: /^M19/i }));
+const rx = stats("$expr $regexMatch ^m19", db.people.find({ $expr: { $regexMatch: { input: "$name", regex: "^m19" } } }));
+assert.strictEqual(anchored.totalKeysExamined, 1112);
+assert.strictEqual(unanchored.totalKeysExamined, 20000);
+assert.strictEqual(rx.totalDocsExamined, 20000);
+```
+
+```text
+name = 'm19'                       FETCH > IXSCAN  | returned    1 | keys     1 | docs     1
+/^m19/   (anchored)                FETCH > IXSCAN  | returned 1111 | keys  1112 | docs  1111
+/m19/    (unanchored)              FETCH > IXSCAN  | returned 1111 | keys 20000 | docs  1111
+/^M19/i  (case-insensitive)        FETCH > IXSCAN  | returned 1111 | keys 20000 | docs  1111
+$expr $regexMatch ^m19             COLLSCAN        | returned 1111 | keys     0 | docs 20000
+```
+
+This corrects the old wording ("an unanchored regex scans every *document*"): the planner **does** use the index, but for `/m19/` and for a case-insensitive `/^M19/i` it has no prefix to build a range from, so it reads **all 20 000 index entries** and fetches only the 1 111 documents that match - a full *index* scan. The anchored `/^m19/` becomes a tight range (1 112 keys). And `$expr` with `$regexMatch` cannot use the index at all: it examined all 20 000 documents. The MongoDB `$regex` reference says the same: a prefix expression lets MongoDB "construct a 'range' from that prefix", and case-insensitive indexes "do not improve performance for `$regex` queries" ([$regex](https://www.mongodb.com/docs/manual/reference/operator/query/regex/), consulted 2026-09-30).
+
+`$where` runs JavaScript **per document**. Same collection, same 1 111 answers:
+
+```js
+// mongosh/q-where.js @skip-verify takes about 3-4 seconds on 20 000 documents; output below from a real run
+let t = Date.now();
+const viaRegex = db.people.find({ name: /^m19/ }).toArray().length;
+console.log("/^m19/ :", viaRegex, "docs in", Date.now() - t, "ms");
+t = Date.now();
+const viaWhere = db.people.find({ $where: "this.name.startsWith('m19')" }).toArray().length;
+console.log("$where :", viaWhere, "docs in", Date.now() - t, "ms");
+console.log("$where plan:", db.people.find({ $where: "this.name.startsWith('m19')" }).explain("executionStats").queryPlanner.winningPlan.stage);
+```
+
+```text
+/^m19/ : 1111 docs in 19 ms
+$where : 1111 docs in 4186 ms
+$where plan: COLLSCAN
+```
+
+`$where` took about 4 seconds (3.6 to 4.2 s across four runs) against 19 milliseconds for the regex, and a `COLLSCAN` with no index possible - a factor of roughly 200. The manual says "`$where` evaluates JavaScript and cannot take advantage of indexes" and recommends `$expr` with non-JavaScript aggregation operators, which are "faster than `$where` because it does not execute JavaScript"; it also documents disabling server-side JavaScript with `security.javascriptEnabled: false` / `--noscripting` ([$where](https://www.mongodb.com/docs/manual/reference/operator/query/where/), consulted 2026-09-30) - worth doing if nothing in your application needs it, because `$where` with user input is a code-injection surface.
+
+## Reading AI-generated code
+
+Asked for "fast name search using the index", an assistant will often write a case-insensitive contains-search and reassure you about the index:
+
+<SpotTheBug lang="js" code={`// AI comment: "indexed search - name has an index so this is fast"
+const hits = await db.collection("people")
+  .find({ name: /M19/i })
+  .toArray();`}>
+
+The query works and returns the right documents - which is why nobody notices. But `/M19/i` has no case-sensitive prefix, so the planner reads **every entry of the `name` index** (20 000 keys examined to return 1 111 documents), exactly as it would for `/m19/`: the index is used but gives almost no benefit, and the cost grows linearly with the collection. If the intent is "starts with", store or query in one case and anchor the expression:
+
+```js
+// mongosh/q-regex-fix.js
+const before = db.people.find({ name: /M19/i }).explain("executionStats").executionStats;
+const after = db.people.find({ name: /^m19/ }).explain("executionStats").executionStats;
+console.log("case-insensitive contains:", before.totalKeysExamined, "keys");
+console.log("anchored prefix          :", after.totalKeysExamined, "keys");
+assert.strictEqual(before.totalKeysExamined, 20000);
+assert.strictEqual(after.totalKeysExamined, 1112);
+```
+
+```text
+case-insensitive contains: 20000 keys
+anchored prefix          : 1112 keys
+```
+
+(For genuine "contains" search over lots of data, a text index or Atlas Search is the right tool; the indexes module covers `$text`.)
+
+</SpotTheBug>
+
+## Mental Model
+
+A query has two costs: the **selection** (how many index entries or documents must the server look at to decide?) and the **delivery** (how many documents and bytes reach you?). Filter, projection, sort and limit each affect one of them. The four lessons that follow are, in order, about writing selections the server can answer cheaply (operators, arrays, nested paths) and about trimming delivery (projection, sort, pagination). `explain` shows both numbers.
 
 ## Trade-offs
 
@@ -58,19 +171,22 @@ Most application code reads far more than it writes. Time spent learning to writ
 | Filter only, no projection specified | Fast to write, query works right away | Returns unused fields every time, wasting bandwidth and client-side memory |
 | Filter + a projection listing explicit fields | Reduces data sent over the network, forces the team to see the exact fields the app relies on | Must be kept in sync as the schema evolves |
 | An exact-match filter | Always fast and indexable | Cannot answer range/set/complex expression questions |
-| A complex filter with several operators and `$and`/`$or` | Answers much more detailed questions | Harder to read, and risks pushing the query planner toward the wrong index |
+| A complex filter with several operators and `$and`/`$or` | Answers much more detailed questions | Harder to read; an `$or` branch with no index sends the whole query to a collection scan (20 000 documents examined in the comparison lesson) |
+| A regex filter | Pattern matching without a new index type | Only an anchored, case-sensitive prefix uses the index as a range (1 112 keys); otherwise a full index scan (20 000 keys) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using `$where` to write a condition standard operators cannot express** — `$where` runs JavaScript per document, so it is very slow, cannot use an index at all, and opens a security risk if it takes user input. Always look for a standard operator or aggregation first.
-- **Writing an unanchored regex like `/foo/` instead of `/^foo/`** — a regex without `^` forces MongoDB to scan every document in the collection, unable to use an index even if that field has one. If you mean "starts with," always anchor at the start.
-- **Assuming skipping the projection has no cost** — every field you do not exclude travels over the network, and the application must serialize all of it. For documents with large fields (a long description, or a big array), a forgotten projection is a common cause of latency.
+- **"`$where` is just another operator."** - it ran about 4 s against 19 ms for a regex on 20 000 documents, cannot use an index, and evaluates JavaScript (an injection risk with user input). Prefer standard operators or `$expr`.
+- **"An unanchored regex scans every document."** - it scans every *index entry* when an index exists (20 000 keys, 1 111 documents fetched); without an index it is a collection scan. Either way, anchor with `^` for "starts with".
+- **"A case-insensitive regex can use my index well."** - `/^M19/i` examined 20 000 keys; the anchored case-sensitive form examined 1 112.
+- **"A projection is optional polish."** - every field you do not trim travels over the network (the projection lesson shows an exclusion projection leaking a field).
+- **"Each module is independent."** - later lessons lean on the comparison rules learned first (missing fields, null, types).
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An e-commerce product filter page** — a sidebar filtering by category, price range, brand, and rating maps directly onto comparison/logical operators (`$gte`, `$lte`, `$in`), and uses a projection to return only the fields a product card needs (name, price, main image), not the whole document.
->
-> **An internal admin search panel** — a tool for searching users or orders internally often accidentally lets users type their own regex straight into the query with no anchor, making the search page get slower and slower as the data grows.
+> The MongoDB manual's `$where` page states the trade-off plainly: "`$where` evaluates JavaScript and cannot take advantage of indexes ... Using `$where` alone requires a collection scan", and recommends `$expr` instead ([$where](https://www.mongodb.com/docs/manual/reference/operator/query/where/), consulted 2026-09-30); the 4-second measurement above is that sentence in numbers.
+
+_Python/Go/Rust tabs in this module mirror the verified shell/Node behaviour and were each run once in scratch programs (see each lesson); they are not executed by the course's automated checker._
 
 export const quizIndex = [
   {
@@ -82,6 +198,7 @@ export const quizIndex = [
       'A sort order applied to results',
     ],
     answer: 1,
+    explain: 'A filter is a document; the server does the searching (and can use an index to do it).',
   },
   {
     q: 'A filter with two field/value pairs, such as joined and fines, means what?',
@@ -92,11 +209,35 @@ export const quizIndex = [
       'It is invalid; only one pair is allowed',
     ],
     answer: 1,
+    explain: 'Several pairs in one filter are an implicit AND; the overview query returned only members matching both bounds.',
   },
   {
     q: 'Which of these is NOT one of the four decisions a read request combines?',
     options: ['Which documents (filter)', 'Which fields (projection)', 'How the documents are stored on disk', 'In what order and how many (sort, limit, skip)'],
     answer: 2,
+    explain: 'Storage layout is not part of a query; filter, projection, sort and limit/skip are.',
+  },
+  {
+    q: 'An index exists on name. What does explain show for find({ name: /m19/ }) on 20 000 documents?',
+    options: [
+      'A COLLSCAN examining 20 000 documents',
+      'An IXSCAN that reads all 20 000 index keys and fetches 1 111 documents',
+      'An IXSCAN reading 1 112 keys',
+      'An error: regex needs $text',
+    ],
+    answer: 1,
+    explain: 'Without an anchored prefix there is no range: the whole index is scanned (20000 keys) but only 1111 documents are fetched. The anchored /^m19/ read 1112 keys.',
+  },
+  {
+    q: 'Why avoid $where for a condition like name.startsWith("m19")?',
+    options: [
+      'It is deprecated syntax that no longer runs',
+      'It runs JavaScript per document, cannot use an index (COLLSCAN, about 4 s here), and is an injection risk with user input',
+      'It only works on the primary',
+      'It returns documents in random order',
+    ],
+    answer: 1,
+    explain: 'Measured: 1111 documents in about 4186 ms with a COLLSCAN, versus 19 ms for /^m19/.',
   },
 ]
 
