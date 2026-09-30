@@ -1,6 +1,6 @@
 ---
-title: Security และ Atlas
-description: พื้นฐาน security ใน production — authentication และ roles, TLS, การจำกัดเครือข่าย และ encryption at rest — และวิธีที่ MongoDB Atlas มอบสิ่งเหล่านี้ในรูปแบบ managed service
+title: Security and Atlas
+description: พื้นฐานความปลอดภัยของ production — authentication และ role, keyfile, TLS, network binding และ encryption at rest — พิสูจน์บน container ชั่วคราว (เปิดโล่งโดยค่าเริ่มต้น, error "requires authentication" ตัวจริง, การปฏิเสธตาม role, authSource, TLS ล้มเหลว) โดยข้ออ้างเรื่อง Atlas มาจากเอกสารของมัน
 sidebar:
   order: 5
 ---
@@ -9,15 +9,14 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-`mongod` ใหม่ที่เริ่มด้วยการตั้งค่าเริ่มต้นไม่มี authentication และคอยฟังการเชื่อมต่อ บนเครื่องแล็ปท็อปของคุณที่ผูกกับ localhost นั่นไม่มีอันตราย แต่บน server ที่มี public IP นี่คือข้อมูลรั่วที่รอวันเกิด — และตลอดหลายปีที่ผ่านมา MongoDB instances ที่ไม่ปลอดภัยได้ทำให้ข้อมูลปริมาณมหาศาลรั่วไหลด้วยวิธีนี้เป๊ะ ๆ 
+`mongod` ใหม่ที่สตาร์ทด้วยค่าเริ่มต้นไม่มี authentication บนแล็ปท็อปของคุณที่ bind กับ localhost ไม่เป็นอันตราย แต่บน server ที่มี public IP มันคือการรั่วไหลที่รอเกิด — และ MongoDB ที่ไม่มีการป้องกันทำข้อมูลจำนวนมหาศาลรั่วมาแล้วด้วยวิธีนี้ ความปลอดภัยใน production คือชั้นป้องกันสั้น ๆ ที่แต่ละชั้นปิดประตูคนละบาน: การเชื่อมต่อมาจากที่ไหนได้, เชื่อมต่ออย่างไรให้ปลอดภัย, คุณเป็นใคร, ทำอะไรได้ และอะไรอยู่บนดิสก์
 
-Security ใน production ไม่ใช่ฟีเจอร์เดียวจบ แต่เป็นชั้นป้องกันสั้น ๆ ที่ซ้อนกัน แต่ละชั้นปิดประตูคนละบาน: ใครเชื่อมต่อได้, การเชื่อมต่อได้รับการปกป้องอย่างไร, การเชื่อมต่อได้รับอนุญาตให้มาจากที่ไหนบ้าง และเกิดอะไรขึ้นกับ bytes บนดิสก์
+ทุกอย่างที่ระบุ *lab* รันบนเครื่อง Mac นี้ บน container `mongo:8.3.11` ชั่วคราว (`mongodb-b3-sec` จำกัด 512 MB ลบทิ้งหลังใช้; CA และ server certificate ชั่วคราวที่สร้างด้วย `openssl`, keyfile แบบสุ่ม; ไม่มีอะไรออกจากเครื่องและไม่เกี่ยวข้องกับบัญชีคลาวด์) ตัวตรวจอัตโนมัติของคอร์สรัน fence เหล่านี้ไม่ได้ (ต้องมี server แบบ `--auth` หรือ TLS) output จึงบันทึกจากการรันจริง รหัสผ่านในบทนี้เป็น placeholder เช่น `<your-password>` — อย่าวางของจริงลงใน snippet แท็บ Python/Go/Rust สะท้อนการเรียกของ Node ที่ตรวจแล้วและไม่ได้ถูกรันโดยตัวตรวจ
 
 ## ชั้นของการป้องกัน
-
-ลองมอง request เป็นสิ่งที่ต้องผ่านประตูหลายบานก่อนจะแตะข้อมูลของคุณ เครือข่ายตัดสินว่าการเชื่อมต่อได้รับอนุญาตเลยหรือไม่ TLS ปกป้อง bytes ระหว่างทาง Authentication ตรวจสอบว่าคุณเป็นใคร และ authorization ตรวจสอบว่าคุณได้รับอนุญาตให้ทำอะไรได้บ้าง:
 
 export const securityFlow = `flowchart LR
   Client["Application"] --> Net["Network gate — firewall, bind IP, VPC"]
@@ -26,54 +25,127 @@ export const securityFlow = `flowchart LR
   Auth --> RBAC["Authorization — what may you do"]
   RBAC --> Data["Data — encrypted at rest on disk"]`
 
-<Mermaid code={securityFlow} title="แต่ละประตูปิดคนละบาน: เครือข่าย แล้วการเข้ารหัสระหว่างขนส่ง แล้วตัวตน แล้วสิทธิ์ แล้ว encryption at rest" />
+<Mermaid code={securityFlow} title="แต่ละประตูปิดช่องทางต่างกัน: เครือข่าย จากนั้นการเข้ารหัสระหว่างส่ง แล้วตัวตน แล้วสิทธิ์ แล้วการเข้ารหัสข้อมูลที่เก็บ" />
 
-ไม่มีชั้นเดียวที่เพียงพอ Authentication โดยไม่มีการจำกัดเครือข่ายก็ยังเชื้อเชิญความพยายามแบบ brute-force; เครือข่ายที่ล็อกแน่นแต่ไม่มี auth ก็เชื่อใจทุกคนที่อยู่ข้างใน Defense in depth หมายถึงการเปิดทุกชั้น
+ไม่มีชั้นเดียวที่เพียงพอ authentication ที่ไม่มีการจำกัดเครือข่ายยังเชิญ brute force; เครือข่ายที่ล็อกแน่นแต่ไม่มี auth เชื่อใจทุกคนภายใน
 
-## Authentication และ roles (RBAC)
+## ขั้น 0 — ค่าเริ่มต้นคือเปิดโล่ง
 
-ก้าวแรกคือการกำหนดให้ต้องมี **authentication** เพื่อไม่ให้ใครเชื่อมต่อแบบไม่ระบุตัวตนได้ จากนั้น MongoDB ควบคุมว่าผู้ใช้แต่ละคนทำอะไรได้ผ่าน **role-based access control** — RBAC คุณสร้างผู้ใช้และมอบ roles ให้พวกเขา และ role คือชุดของ permissions หลักการคือ *least privilege*: แอปพลิเคชันที่อ่าน reports เพียงอย่างเดียวได้ role แบบอ่านอย่างเดียว ไม่ใช่กุญแจของผู้ดูแลระบบ คุณเปิด auth ในไฟล์ config แล้วจึงสร้างผู้ใช้
+container `mongo:8.3.11` ธรรมดา ไม่มี flag (publish บน loopback ของ host เท่านั้น):
 
-```yaml
-# mongod.conf — require authentication
-security:
-  authorization: enabled
+```bash
+# scripts/sec-stage1.sh
+docker run -d --name mongo-open --memory 512m -p 127.0.0.1:27304:27017 mongo:8 mongod --wiredTigerCacheSizeGB 0.25
+docker exec mongo-open mongosh --quiet --file /tmp/open.js   # the script below
 ```
 
 ```js
-// Create an app user limited to read and write on one database
-db.getSiblingDB("admin").createUser({
-  user: "library_app",
-  pwd: passwordPrompt(),
-  roles: [{ role: "readWrite", db: "library" }]
-})
+// mongosh/sec-open.js @skip-verify lab: needs a plain throwaway mongod (real output below)
+console.log(db.adminCommand({ listDatabases: 1 }).databases.map((d) => d.name));
+db.getSiblingDB("library").members.insertOne({ name: "anyone" });
+console.log("insert with no credentials: ok");
+console.log(db.serverCmdLineOpts().argv);
 ```
 
-เมื่อเปิด auth แล้ว ทุกการเชื่อมต่อต้องแสดง credentials driver ส่ง credentials ไปใน connection string หรือแยกเป็น option ก็ได้:
+```text
+[ 'admin', 'config', 'local' ]
+insert with no credentials: ok
+[ 'mongod', '--wiredTigerCacheSizeGB', '0.25', '--bind_ip_all' ]
+
+```
+
+ไม่มี credential แต่แสดงรายการ database และเขียนข้อมูลได้ สังเกตบรรทัดสุดท้าย: image ทางการสตาร์ท `mongod` ด้วย `--bind_ip_all` ซึ่งต่างจาก binary เปล่าที่ตาม manual "bind[s] to localhost by default" ([MongoDB configuration hardening](https://www.mongodb.com/docs/manual/core/security-hardening/), ตรวจเมื่อ 2026-09-30) container ที่เข้าถึงได้ผ่าน port ที่ publish จึงเข้าถึงได้โดยทุกคนที่ไปถึง port นั้น: publish บน `127.0.0.1` เท่านั้นดังข้างบน
+
+## Authentication และ role (RBAC)
+
+**Authentication** พิสูจน์ว่าคุณเป็นใคร; **role-based access control** จำกัดสิ่งที่คุณทำได้ หลักการคือ *least privilege* image สร้าง user แรก (root) จาก environment variable ให้ได้ บน data directory ที่ว่างเท่านั้น และสตาร์ทด้วย `--auth`:
+
+```bash
+# scripts/sec-stage2.sh
+docker run -d --name mongo-auth --memory 512m -p 127.0.0.1:27304:27017 \
+  -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD='<your-root-password>' \
+  mongo:8 mongod --auth --wiredTigerCacheSizeGB 0.25
+```
+
+ทีนี้ client แบบไม่ระบุตัวตน `ping` ยังใช้ได้ ที่เหลือถูกปฏิเสธด้วยข้อความที่ผู้ดูแลระบบทุกคนจำได้:
+
+```js
+// mongosh/sec-anonymous.js @skip-verify lab: needs the --auth container (real output below)
+console.log(db.runCommand({ ping: 1 }));
+for (const op of [() => db.getSiblingDB("library").members.find().toArray(), () => db.adminCommand({ listDatabases: 1 })]) {
+  try { op(); } catch (e) { console.log(e.name, e.codeName, e.code, "-", e.message); }
+}
+```
+
+```text
+{ ok: 1 }
+MongoServerError Unauthorized 13 - Command find requires authentication
+MongoServerError Unauthorized 13 - Command listDatabases requires authentication
+
+```
+
+สร้าง user แบบ least-privilege (ในฐานะ `root`; รหัสผ่านมาจาก environment variable — `passwordPrompt()` ใช้ได้เฉพาะใน shell แบบ interactive จึงต้องไม่ปรากฏในสคริปต์) แล้วดูว่า user แบบอ่านอย่างเดียวทำอะไรไม่ได้:
+
+```js
+// mongosh/sec-users.js @skip-verify lab: run as root against the --auth container (real output below)
+const admin = db.getSiblingDB("admin");
+admin.createUser({ user: "library_app", pwd: process.env.APP_PW, roles: [{ role: "readWrite", db: "library" }] });
+admin.createUser({ user: "library_reader", pwd: process.env.APP_PW, roles: [{ role: "read", db: "library" }] });
+console.log(admin.getUsers().users.filter((u) => u.user.startsWith("library_")).map((u) => ({ user: u.user, roles: u.roles })));
+
+const app = new Mongo("mongodb://library_app:" + process.env.APP_PW + "@localhost:27017/library?authSource=admin");
+app.getDB("library").members.insertOne({ name: "Ada" });
+const reader = new Mongo("mongodb://library_reader:" + process.env.APP_PW + "@localhost:27017/library?authSource=admin");
+console.log("reader can read:", reader.getDB("library").members.countDocuments());
+try { reader.getDB("library").members.insertOne({ name: "x" }); } catch (e) { console.log(e.codeName, e.code, "-", e.message); }
+```
+
+```text
+[
+  {
+    user: 'library_app',
+    roles: [ { role: 'readWrite', db: 'library' } ]
+  },
+  {
+    user: 'library_reader',
+    roles: [ { role: 'read', db: 'library' } ]
+  }
+]
+reader can read: 1
+Unauthorized 13 - not authorized on library to execute command { insert: "members", documents: [ { name: "x", _id: ObjectId('6abcd5da1041bb9cb750d769') } ], ordered: true, lsid: { id: UUID("8927124f-ce75-486b-b03c-c18d8c4052ed") }, $db: "library" }
+
+```
+
+driver ส่ง credential ใน connection string **database ใน path ของ URI ไม่ใช่ที่ที่ user อยู่:** หากไม่ระบุ `authSource` driver จะ authenticate กับ database ที่ระบุใน path และ user เหล่านี้อยู่ใน `admin`
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```bash
-    mongosh "mongodb://library_app@host:27017/library?authSource=admin&tls=true"
+    # scripts/sec-connect.sh
+    mongosh "mongodb://library_app@localhost:27017/library?authSource=admin" --password "$APP_PW"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const uri =
-      "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    // app/sec-connect.mjs @skip-verify lab: needs the --auth container on 127.0.0.1:27304
+    import { MongoClient } from "mongodb";
+
+    const uri = `mongodb://library_app:${process.env.APP_PW}@127.0.0.1:27304/library?authSource=admin`;
     const client = new MongoClient(uri);
     await client.connect();
+    console.log(await client.db("library").collection("members").countDocuments());
+    await client.close();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    uri = "mongodb://library_app:<your-password>@host:27017/library?authSource=admin&tls=true"
     client = MongoClient(uri)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    uri := "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    uri := "mongodb://library_app:<your-password>@host:27017/library?authSource=admin&tls=true"
     client, err := mongo.Connect(options.Client().ApplyURI(uri))
     if err != nil {
         return err
@@ -82,103 +154,241 @@ db.getSiblingDB("admin").createUser({
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    let uri = "mongodb://library_app:<your-password>@host:27017/library?authSource=admin&tls=true";
     let client = Client::with_uri_str(uri).await?;
     ```
   </TabItem>
 </Tabs>
 
-## TLS, network rules และ encryption at rest
+## Keyfile, TLS และ `mongod.conf`
 
-อีกสามชั้นทำให้ภาพสมบูรณ์ **TLS** เข้ารหัส traffic ระหว่าง client และ server เพื่อให้ credentials และข้อมูลไม่ถูกอ่านออกจากสายส่งได้; คุณชี้ `mongod` ไปที่ certificate แล้วบังคับให้ต้องใช้
+อีกสามชิ้น รวมกันในไฟล์ config เดียวและสตาร์ทจริง **TLS** เข้ารหัสการเชื่อมต่อ (และเมื่อมี CA file ให้ client ตรวจสอบ server ได้); **keyfile** คือความลับร่วมที่สมาชิก replica set ใช้ยืนยันตัวตนซึ่งกันและกัน (และเปิด authorization ด้วย); `net.bindIp` ตัดสินว่า `mongod` ฟังบน interface ไหน certificate authority ชั่วคราว, server certificate (ใช้ได้กับ `localhost` และ `127.0.0.1`) และ keyfile สร้างแบบนี้ — ตัวไฟล์ไม่เคยลงใน repository:
 
-```yaml
-# mongod.conf — require TLS and restrict where it listens
-net:
-  bindIp: 10.0.1.5,localhost
-  tls:
-    mode: requireTLS
-    certificateKeyFile: /etc/ssl/mongodb.pem
+```bash
+# scripts/sec-certs.sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=lab-ca"
+openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost"
+printf "subjectAltName=DNS:localhost,IP:127.0.0.1" > san.ext
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.crt -days 2 -extfile san.ext
+cat server.key server.crt > server.pem
+openssl rand -base64 756 > keyfile
 ```
 
-snippet เดียวกันนั้นแสดงประตู **network** การตั้งค่า `bindIp` ควบคุมว่า `mongod` รับการเชื่อมต่อบน interface ไหน — ให้ผูกกับ address ภายใน ไม่ใช่ `0.0.0.0` บน host สาธารณะ ในระบบคลาวด์คุณห่อ server ไว้ใน VPC หรือ private subnet และใช้ firewall หรือ security group เพื่อให้มีเพียง server แอปพลิเคชันของคุณเท่านั้นที่เข้าถึงพอร์ต `27017` ได้เลย สุดท้าย **encryption at rest** สลับไฟล์ข้อมูลบนดิสก์ เพื่อให้ดิสก์หรือ backup volume ที่ถูกขโมยไปไร้ประโยชน์หากไม่มีกุญแจ; ใน deployment ที่จัดการเองนี่เป็นฟีเจอร์ระดับ storage-engine หรือ filesystem ที่คุณเปิดใช้เอง ส่วนใน managed service เปิดมาให้ตั้งแต่ต้น
+```yaml
+# mongod.conf
+security:
+  authorization: enabled
+  keyFile: /etc/mongo-lab/keyfile
+net:
+  port: 27017
+  bindIp: 0.0.0.0
+  tls:
+    mode: requireTLS
+    certificateKeyFile: /etc/mongo-lab/server.pem
+    CAFile: /etc/mongo-lab/ca.pem
+    allowConnectionsWithoutCertificates: true
+replication:
+  replSetName: rs0
+storage:
+  wiredTiger:
+    engineConfig:
+      cacheSizeGB: 0.25
+```
 
-## MongoDB Atlas: เส้นทางที่ง่าย
+`allowConnectionsWithoutCertificates: true` สำคัญ: เมื่อกำหนด `CAFile` แล้ว `mongod` จะขอ certificate จาก *client* ด้วย (mutual TLS); ถ้าไม่มีบรรทัดนี้ client ที่ไม่มี certificate จะถูกตัดการเชื่อมต่อ และใน lab มันหน้าตาเหมือนความล้มเหลวของ plain-TCP ด้านล่างเป๊ะ (`connection ... closed`) `bindIp: 0.0.0.0` ถูกต้องเฉพาะ *ภายใน container* ที่ port ที่ publish (loopback บน host) คือประตูจริง; บน host คุณควรระบุ address ส่วนตัว ไม่ใช่ `0.0.0.0` บน interface สาธารณะ keyfile ต้องเป็นของผู้ใช้ที่ `mongod` รันด้วย โดยไม่มีสิทธิ์ของ group/other การสตาร์ทด้วย keyfile ที่ใครก็อ่านได้ล้มทันที (บรรทัด log จริง):
 
-การทำทั้งหมดนี้ด้วยมือ — การ provision replica set, สร้างใบรับรอง, ตั้งค่า firewall, หมุนเวียนกุญแจ, จัดตาราง backup — เป็นงานจริงและทำผิดเล็ก ๆ น้อย ๆ ได้ง่าย **MongoDB Atlas** คือ managed cloud service ของ MongoDB ที่มีอยู่เพื่อให้คุณไม่ต้องทำงานพวกนี้เอง Atlas cluster มาแบบปลอดภัยโดยค่าเริ่มต้น: ต้องมี authentication, TLS เปิดอยู่เสมอ, encryption at rest เปิดใช้งาน และฐานข้อมูล *ไม่* สามารถเข้าถึงได้จนกว่าคุณจะเพิ่ม entry ลงใน **IP access list** เอง นอกจากนั้นยังได้ **backup** อัตโนมัติพร้อม point-in-time restore และแดชบอร์ด **monitoring** ที่มี Performance Advisor จากบทเรียนที่แล้วฝังอยู่ในตัว
+```bash
+# scripts/sec-keyfile-perms.sh
+docker run --rm --entrypoint bash -v "$PWD/certs:/certs:ro" mongo:8 -c \
+  'mkdir /etc/mongo-lab && cp /certs/* /etc/mongo-lab/ && chmod 444 /etc/mongo-lab/keyfile && exec gosu mongodb mongod --config /etc/mongo-lab/mongod.conf'
+```
 
-**ใน Compass / Atlas:** คุณเชื่อมต่อ Compass กับ Atlas cluster ด้วย connection string ที่คัดลอกมาจาก Atlas UI ซึ่งรวม TLS และผู้ใช้ฐานข้อมูลของคุณไว้แล้ว ใน Atlas เอง Database Access จัดการผู้ใช้และ roles, Network Access จัดการ IP allow-list และแท็บ Backup จัดการ snapshots — สี่ชั้นเดียวกัน นำเสนอเป็นฟอร์มแทนที่จะเป็นไฟล์ config
+```text
+{"c":"ACCESS","id":20254,"msg":"Read security file failed","attr":{"error":{"code":30,"codeName":"InvalidPath","errmsg":"permissions on /etc/mongo-lab/keyfile are too open"}}}
+{"s":"F","c":"CONTROL","id":20575,"msg":"Error creating service context","attr":{"error":"Location5579201: Unable to acquire security key[s]"}}
+
+```
+
+เมื่อ permission ถูกต้อง (`chown mongodb`, `chmod 400`) server สตาร์ทได้ user แรกถูกสร้างผ่าน *localhost exception* หลัง `rs.initiate()`:
+
+```bash
+# scripts/sec-stage3.sh
+docker run -d --name mongo-secure --hostname sec-host --memory 512m -p 127.0.0.1:27305:27017 \
+  --entrypoint bash -v "$PWD/certs:/certs:ro" mongo:8 -c \
+  'mkdir /etc/mongo-lab && cp /certs/* /etc/mongo-lab/ && chown -R mongodb:mongodb /etc/mongo-lab && chmod 400 /etc/mongo-lab/* && exec gosu mongodb mongod --config /etc/mongo-lab/mongod.conf'
+URI="mongodb://localhost/?tls=true&tlsCAFile=/etc/mongo-lab/ca.pem&directConnection=true"
+docker exec mongo-secure mongosh --quiet "$URI" --eval 'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
+docker exec -e ROOT_PW='<your-root-password>' mongo-secure mongosh --quiet "$URI" --eval 'db.getSiblingDB("admin").createUser({ user: "root", pwd: process.env.ROOT_PW, roles: ["root"] })'
+```
+
+จากนั้นสิ่งที่คุณจะเจอใน production ตามลำดับ: (1) TCP ธรรมดากับ server แบบ `requireTLS`, (2) TLS พร้อม CA แต่ไม่มี credential, (3) TLS บวก credential, (4) ชื่อที่ certificate ไม่ครอบคลุม และ (5) สิ่งที่ไฟล์ config สร้างขึ้นจริง (output จริง รันกับ container ข้างบน):
+
+```bash
+# scripts/sec-tls-checks.sh
+M="docker exec -e ROOT_PW=<your-root-password> mongo-secure mongosh --quiet"
+CA="tlsCAFile=/etc/mongo-lab/ca.pem"
+echo "== 1) plain TCP to a requireTLS server"
+$M "mongodb://localhost/?directConnection=true&serverSelectionTimeoutMS=3000" --eval 'db.hello().ok' 2>&1 | tail -2
+echo "== 2) TLS, anonymous"
+$M "mongodb://localhost/?tls=true&$CA&directConnection=true" --eval 'try { db.getSiblingDB("library").members.find().toArray() } catch (e) { console.log(e.codeName, e.code, "-", e.message) }'
+echo "== 3) TLS + credentials"
+$M "mongodb://root:<your-root-password>@localhost/?tls=true&$CA&authSource=admin&directConnection=true" --eval 'console.log("authenticated as", db.runCommand({ connectionStatus: 1 }).authInfo.authenticatedUsers[0].user)'
+echo "== 4) a name that is not in the certificate"
+$M "mongodb://sec-host/?tls=true&$CA&directConnection=true&serverSelectionTimeoutMS=3000" --eval 'db.hello().ok' 2>&1 | tail -2
+echo "== 4b) same, verification switched off"
+$M "mongodb://sec-host/?tls=true&$CA&directConnection=true&tlsAllowInvalidHostnames=true" --eval 'console.log("connected:", db.hello().ok === 1)' 2>&1 | tail -1
+echo "== 5) what the config file produced"
+$M "mongodb://root:<your-root-password>@localhost/?tls=true&$CA&authSource=admin&directConnection=true" --eval 'const p = db.serverCmdLineOpts().parsed; printjson({ security: p.security, net: p.net, replication: p.replication })'
+```
+
+```text
+== 1) plain TCP to a requireTLS server
+MongoServerSelectionError: connection <monitor> to 127.0.0.1:27017 closed
+== 2) TLS, anonymous
+Unauthorized 13 - Command find requires authentication
+== 3) TLS + credentials
+authenticated as root
+== 4) name not in the certificate
+MongoServerSelectionError: Hostname/IP does not match certificate's altnames: Host: sec-host. is not in the cert's altnames: DNS:localhost, IP Address:127.0.0.1
+== 4b) same, verification switched off
+connected: true
+== 5) what the config file produced
+{
+  security: {
+    authorization: 'enabled',
+    keyFile: '/etc/mongo-lab/keyfile'
+  },
+  net: {
+    bindIp: '0.0.0.0',
+    port: 27017,
+    tls: {
+      CAFile: '/etc/mongo-lab/ca.pem',
+      allowConnectionsWithoutCertificates: true,
+      certificateKeyFile: '/etc/mongo-lab/server.pem',
+      mode: 'requireTLS'
+    }
+  },
+  replication: {
+    replSetName: 'rs0'
+  }
+}
+
+```
+
+อ่านให้ละเอียด client ที่ไม่ใช้ TLS ถูกตัดก่อนที่จะพูดอะไรได้; client TLS ที่ไม่มี credential ได้ error `requires authentication` เดียวกับก่อนหน้า การตรวจ hostname *ทำงาน* — และ `tlsAllowInvalidHostnames` (หรือ `tlsAllowInvalidCertificates`) ทำให้ error หายไปด้วยการปิดการป้องกันนั่นเอง มันจึงเป็นเครื่องมือวินิจฉัยที่ต้องเอาออก ไม่ใช่วิธีแก้ที่เก็บไว้
+
+## Encryption at rest, เครือข่าย และ Atlas
+
+TLS ปกป้องข้อมูล *ระหว่างส่ง*; encryption at rest ปกป้องไฟล์บนดิสก์ ใน MongoDB ที่ดูแลเอง encrypted storage engine "is available in MongoDB Enterprise only" ([Encryption at rest](https://www.mongodb.com/docs/manual/core/security-encryption-at-rest/), ตรวจเมื่อ 2026-09-30) ดังนั้นบน Community server ทางเลือกคือการเข้ารหัสระดับดิสก์หรือ filesystem ที่แพลตฟอร์มของคุณให้ บนคลาวด์ ให้ครอบ server ด้วย private network (VPC) และใช้ firewall หรือ security group ให้เฉพาะ application server เข้า port ได้
+
+**MongoDB Atlas** คือบริการที่จัดการให้ และเอกสารของมันให้คำมั่นเหล่านี้ (ตรวจเมื่อ 2026-09-30): "Atlas requires TLS to encrypt the connections to your databases" ([Set up cluster security](https://www.mongodb.com/docs/atlas/setup-cluster-security/)); "Atlas only allows client connections to the cluster from entries in the project's IP access list" ([IP access list](https://www.mongodb.com/docs/atlas/security/ip-access-list/)); ต้องสร้าง database user เพื่อเชื่อมต่อ; และ encryption at rest เปิดอยู่บน cluster ของมัน ([Encryption at rest](https://www.mongodb.com/docs/manual/core/security-encryption-at-rest/) — ระบุไว้สำหรับ cluster แบบ Atlas Infinite) คอร์สนี้ไม่ได้รันอะไรบน Atlas (ไม่มีบัญชี); ทุกอย่างในย่อหน้านี้คือเอกสาร ไม่ใช่การวัด
+
+**ใน Compass / Atlas:** คุณเชื่อม Compass ด้วย connection string ที่คัดลอกจาก UI ของ Atlas (ซึ่งมี TLS อยู่แล้ว); ใน Atlas, Database Access จัดการ user และ role และ Network Access จัดการ IP access list — ชั้นเดียวกันในรูปแบบฟอร์ม
 
 ## เคล็ดลับและข้อควรระวัง
 
-- **อย่าเปิดพอร์ต 27017 สู่อินเทอร์เน็ตโดยไม่มี authentication เด็ดขาด** นี่คือกฎเหล็ก เพราะข้อมูลรั่วครั้งดัง ๆ เกิดจากเรื่องนี้ทั้งนั้น ผูกกับ interface ส่วนตัวและกำหนดให้ต้องมี auth ก่อนสิ่งอื่นใด
-- ใช้ **least privilege** ให้ผู้ใช้แอปพลิเคชันแต่ละคนได้เฉพาะ roles ที่จำเป็นบนเฉพาะฐานข้อมูลที่ใช้ อย่ามอบ role admin ให้กับโค้ดของแอป
-- TLS ปกป้องข้อมูล *ระหว่างขนส่ง*; encryption at rest ปกป้อง *บนดิสก์* คนละชั้นกัน — เปิดทั้งคู่ ไม่ใช่เลือกอย่างเดียว
-- การจัดการทั้งหมดนี้เองทำได้แต่มีโอกาสผิดพลาด หากคุณไม่มีเหตุผลที่หนักแน่นพอที่จะรัน cluster ของตัวเอง Atlas ให้การป้องกันเหล่านี้ที่ตั้งค่าถูกต้องมาให้พร้อมใช้
+- **อย่าเปิด port 27017 โดยไม่มี authentication** container ที่เปิดโล่งข้างบนรับ insert จากทุกคนที่เข้าถึงได้
+- **Least privilege** user แบบอ่านอย่างเดียวอ่านได้และถูกปฏิเสธ insert; ให้แต่ละบริการมี user ของตัวเอง
+- **ใส่ `authSource=admin` ใน URI** เมื่อ user อยู่ใน `admin`
+- **อย่าวาง `tlsAllowInvalidCertificates=true`** เพื่อให้ error หายไป — มันปิดการตรวจที่ป้องกันผู้ปลอมตัว
+- TLS คือระหว่างส่ง, encryption at rest คือบนดิสก์; ต้องมีทั้งสอง keyfile ใช้ยืนยันตัวตนระหว่างสมาชิก
 
-<Callout title="ปลอดภัยด้วยความลึก หรือให้ Atlas จัดการให้">
-Security ใน production คือสี่ชั้น: ล็อกเครือข่าย, กำหนดให้ต้องมี TLS, กำหนดให้ต้องมี authentication และมอบ roles แบบ least-privilege — บวกกับ encryption at rest บนดิสก์ อย่าวาง MongoDB ที่ไม่มี authentication ไว้บน address สาธารณะเด็ดขาด หากคุณไม่อยากประกอบทั้งหมดนี้ด้วยตัวเอง MongoDB Atlas จัดมาให้ครบและปลอดภัยตั้งแต่ค่า default
+<Callout title="ปลอดภัยด้วยความลึก หรือให้ Atlas ทำ">
+bind กับ interface ส่วนตัว บังคับ TLS บังคับ authentication ให้ role แบบ least-privilege และเข้ารหัสดิสก์ อย่าวาง MongoDB ที่ไม่มี authentication บน address สาธารณะ Atlas ระบุในเอกสารว่า TLS, authentication และ IP access list เป็นค่าเริ่มต้นที่คุณไม่ต้องประกอบเอง
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกบอกว่า app user ถูกสร้าง "ใน admin database" เขียน connection string แบบตรงไปตรงมา:
+
+<SpotTheBug lang="js" code={`// AI comment: "credentials are in the URI, so this authenticates as library_app"
+const client = new MongoClient("mongodb://library_app:" + pw + "@127.0.0.1:27304/library");
+await client.connect();
+await client.db("library").collection("members").findOne();`}>
+
+หากไม่มี `authSource` driver authenticate กับ database ใน URI path (`library`) ซึ่ง `library_app` ไม่มีอยู่ การรันจริงกับ container `--auth`:
+
+```js
+// app/sec-authsource.mjs @skip-verify lab: needs the --auth container on 127.0.0.1:27304 (real output below)
+import { MongoClient } from "mongodb";
+const pw = process.env.APP_PW;
+for (const [label, query] of [["bug (no authSource)", ""], ["fix (authSource=admin)", "?authSource=admin"]]) {
+  const client = new MongoClient(`mongodb://library_app:${pw}@127.0.0.1:27304/library${query}`);
+  try {
+    await client.connect();
+    console.log(label, "->", await client.db("library").collection("members").countDocuments());
+  } catch (e) { console.log(label, "->", e.name, e.codeName, e.code, "-", e.message); }
+  await client.close();
+}
+```
+
+```text
+bug (no authSource) -> MongoServerError AuthenticationFailed 18 - Authentication failed.
+fix (authSource=admin) -> 1
+
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+ความปลอดภัยคือ **แถวของประตูอิสระ** เครือข่ายตัดสินว่าใครเคาะประตูได้; TLS ตัดสินว่าเสียงเคาะถูกแอบฟังหรือปลอมได้ไหม; authentication ตัดสินว่าคุณคือใคร; role ตัดสินว่าตัวตนนั้นแตะอะไรได้; encryption at rest ตัดสินว่าดิสก์ที่ถูกขโมยมีค่าเท่าไร ทุกความล้มเหลวข้างบนคือประตูหนึ่งบานที่ปิดถูกต้อง — และทุก "วิธีแก้" ที่เปิดมันอีกครั้ง (`--bind_ip_all` บน port สาธารณะ, `tlsAllowInvalid*`, root ให้ทุกบริการ) คือการเอาประตูออก ไม่ใช่การแก้ปัญหา
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| Self-hosted MongoDB | ควบคุม infrastructure และ config ได้เต็มที่ | ต้องรับผิดชอบ patch, TLS certificate rotation, backup และ security audit เองทั้งหมด |
-| MongoDB Atlas | Security เปิดโดยค่าเริ่มต้น, backup และ patch จัดการให้, ลดภาระ ops | ควบคุมรายละเอียดระดับ low-level ได้น้อยกว่า, ต้นทุนเป็นแบบ usage-based ต่างจาก self-hosted |
+| MongoDB ที่ดูแลเอง | ควบคุมโครงสร้างพื้นฐานและ config ได้เต็มที่ | คุณดูแล certificate และการหมุน, keyfile, user, patch, backup และ audit; encryption at rest ต้องใช้ Enterprise หรือแพลตฟอร์ม |
+| MongoDB Atlas | TLS, authentication และ IP access list เป็นค่าเริ่มต้นตามเอกสาร; งานดูแลน้อยลง | ควบคุมระดับล่างได้น้อยลง; ค่าใช้จ่ายตามการใช้งาน; ไม่ได้วัดที่นี่ |
+| หนึ่ง user ต่อบริการและ environment | รั่วหนึ่งบริการกระทบหนึ่งบริการ | user ที่ต้องจัดการมากขึ้น |
+| `requireTLS` กับ private CA | client ตรวจสอบ server ได้; ตัดการเชื่อมต่อธรรมดา | ต้องออกและหมุน certificate |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ database user เดียวกันสำหรับทุก service หรือทุก environment** — ถ้า credential ของ user ตัวเดียวรั่ว ทุก service ที่ใช้ user เดียวกันถูกกระทบหมด ควรแยก user ต่อ service และต่อ environment (dev/staging/prod) เพื่อจำกัดผลกระทบเมื่อเกิดปัญหา
-- **เข้าใจว่า TLS ปกป้อง data ทั้งหมดแล้วเลยข้าม encryption at rest** — TLS ปกป้องเฉพาะข้อมูลระหว่างขนส่งเท่านั้น ถ้า disk หรือ backup snapshot ถูกขโมยไปโดยไม่ได้เข้ารหัส at rest ข้อมูลก็ยังอ่านได้ตรง ๆ
-- **ตั้ง IP access list ใน Atlas เป็นเปิดกว้างทุก address เพื่อความสะดวกตอน develop แล้วลืมจำกัดก่อนขึ้น production** — เปิดกว้างขนาดนั้นเท่ากับปิด network layer ทิ้งไปทั้งอัน authentication เพียงอย่างเดียวไม่ได้ทดแทน network restriction ที่หายไป
+- **"`mongod` เริ่มต้นปลอดภัยเพราะต้องใช้รหัสผ่าน"** — container ที่เปิดโล่งแสดงรายการ database และรับ insert โดยไม่มี credential
+- **"database ใน URI คือที่ที่ค้นหา user"** — มันคือ `authSource` เริ่มต้น; user ที่สร้างใน `admin` ต้องใช้ `?authSource=admin` (ไม่เช่นนั้น error code 18)
+- **"`passwordPrompt()` ใส่ในสคริปต์ได้"** — ใช้ได้เฉพาะใน shell แบบ interactive; สคริปต์อ่านความลับจาก environment หรือ secret manager
+- **"TLS แปลว่าข้อมูลของฉันเข้ารหัสแล้ว"** — ระหว่างส่งเท่านั้น; ดิสก์ต้องมี encryption at rest ซึ่งเป็นฟีเจอร์ Enterprise สำหรับ MongoDB ที่ดูแลเอง
+- **"`tlsAllowInvalidHostnames` แก้ error ของ certificate"** — มันปิดการตรวจที่ล้มเหลวนั่นเอง
+- **"image ทางการ bind กับ localhost เหมือน binary"** — มันสตาร์ทด้วย `--bind_ip_all`; publish port บน `127.0.0.1` หรือใช้ firewall
 
-> 💡 ตัวอย่างจากของจริง
->
-> **เหตุการณ์ MongoDB instance ที่เปิด public โดยไม่มี authentication** ที่เป็นข่าวหลายครั้งในอดีต — โดยเฉพาะคลื่นโจมตีเรียกค่าไถ่เดือนมกราคม 2017 ที่ instance หลายหมื่นเครื่องถูกลบข้อมูลและเรียกค่าไถ่ เป็นตัวอย่างว่าการข้ามแค่ authentication layer เดียวสร้างความเสียหายได้มากแค่ไหน ([Krebs on Security, "Extortionists Wipe Thousands of Databases, Victims Who Pay Up Get Stiffed", ม.ค. 2017](https://krebsonsecurity.com/2017/01/extortionists-wipe-thousands-of-databases-victims-who-pay-up-get-stiffed/))
->
-> **ทีมสตาร์ทอัพที่ย้ายจาก self-hosted ไป Atlas** — ใช้ Database Access และ Network Access ของ Atlas แทนการจัดการ `mongod.conf` และ firewall rule เองทุกเครื่อง ลดเวลาที่ทีมเล็ก ๆ ต้องใช้ดูแล security ให้เหลือแค่การตั้งค่าในหน้า UI
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่ตรวจแล้วใน shell/Node; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizSecurity = [
   {
-    q: 'กฎเหล็กด้าน security ใน production สำหรับ MongoDB คืออะไร?',
-    options: [
-      'รันบนพอร์ตเริ่มต้นเสมอ',
-      'อย่าเปิดพอร์ต 27017 สู่อินเทอร์เน็ตโดยไม่มี authentication เด็ดขาด',
-      'ปิด TLS เพื่อปรับปรุง performance',
-      'มอบ role admin ให้ผู้ใช้ทุกคนเพื่อความสะดวก',
-    ],
+    q: 'คุณสตาร์ท image mongo ทางการโดยไม่มี flag และ publish port client ที่ไม่ระบุตัวตนทำอะไรได้?',
+    options: ['ไม่ได้อะไร: authentication เปิดเป็นค่าเริ่มต้น', 'แสดงรายการ database และเขียนข้อมูลได้: authentication ปิดเป็นค่าเริ่มต้น', 'อ่านอย่างเดียว', 'เชื่อมต่อได้แต่รันคำสั่งไม่ได้'],
     answer: 1,
+    explain: 'lab แสดงรายการ database และ insert document โดยไม่มี credential; image ยังสตาร์ท mongod ด้วย --bind_ip_all',
   },
   {
-    q: 'role-based access control (RBAC) ให้อะไร?',
-    options: [
-      'การเข้ารหัสไฟล์ข้อมูลบนดิสก์',
-      'การควบคุมว่าผู้ใช้ที่ผ่าน authentication แต่ละคนได้รับอนุญาตให้ทำอะไร',
-      'การ failover อัตโนมัติระหว่าง replicas',
-      'การบีบอัด traffic ของเครือข่าย',
-    ],
+    q: 'เมื่อเปิด --auth client ที่ไม่ระบุตัวตนรัน find error คืออะไร?',
+    options: ['ECONNREFUSED', 'MongoServerError Unauthorized (13): Command find requires authentication', 'Authentication failed (18)', 'ไม่มีอะไร: อนุญาตให้อ่าน'],
     answer: 1,
+    explain: 'นั่นคือข้อความจริงในการรันแบบไม่ระบุตัวตน; อนุญาตเฉพาะ ping',
   },
   {
-    q: 'TLS และ encryption at rest ปกป้องสิ่งที่แตกต่างกัน อันไหนคืออันไหน?',
-    options: [
-      'ทั้งคู่ปกป้องข้อมูลเฉพาะตอนอยู่ในหน่วยความจำ',
-      'TLS ปกป้องข้อมูลระหว่างขนส่งบนเครือข่าย; encryption at rest ปกป้องข้อมูลบนดิสก์',
-      'TLS ปกป้องดิสก์; encryption at rest ปกป้องเครือข่าย',
-      'เป็นสองชื่อของฟีเจอร์เดียวกัน',
-    ],
+    q: 'user ถูกสร้างใน database admin URI ของคุณคือ mongodb://user:pw@host/library โดยไม่มี authSource เกิดอะไรขึ้น?',
+    options: ['authenticate กับ admin โดยอัตโนมัติ', 'AuthenticationFailed (18): driver มองหา user ใน library', 'เชื่อมต่อแบบอ่านอย่างเดียว', 'ถามรหัสผ่าน'],
     answer: 1,
+    explain: 'การรันที่มีบั๊กล้มด้วย code 18; การเพิ่ม ?authSource=admin ทำให้ credential เดิมใช้ได้',
   },
   {
-    q: 'MongoDB Atlas ช่วยเรื่อง security โดยค่าเริ่มต้นอย่างไร?',
+    q: 'user ที่มี role read บน library เรียก insertOne ผลคืออะไร?',
+    options: ['insert สำเร็จ', 'Unauthorized (13): not authorized on library to execute the insert command', 'insert ถูกเข้าคิว', 'user ถูกลบ'],
+    answer: 1,
+    explain: 'reader นับ document ได้และถูกปฏิเสธ insert ซึ่งคือ least privilege ที่ทำงาน',
+  },
+  {
+    q: 'client ได้ TLS error เรื่อง hostname ไม่ตรง การกระทำไหนแก้ที่ต้นเหตุ แทนที่จะซ่อนมัน?',
     options: [
-      'ปิด authentication เพื่อให้ต่อง่ายขึ้น',
-      'บังคับ auth และ TLS เข้ารหัส at rest และล็อก cluster ไว้จนกว่าคุณจะเพิ่ม IP ลงใน access list',
-      'เปิด cluster สู่สาธารณะให้ client ไหนก็ต่อได้',
-      'ทำให้ไม่ต้องใช้ connection string อีกต่อไป',
+      'เพิ่ม tlsAllowInvalidCertificates=true',
+      'เชื่อมต่อด้วยชื่อที่อยู่ใน subjectAltName ของ certificate (หรือออก certificate ใหม่ที่มีชื่อนั้น)',
+      'เปลี่ยนไปใช้ port ที่ไม่ใช้ TLS',
+      'เอา CA file ออก',
     ],
     answer: 1,
+    explain: 'การเชื่อมต่อผ่าน sec-host ไม่ผ่านการตรวจ altname; การปิดการตรวจทำให้ error หายโดยไม่ทำให้การเชื่อมต่อน่าเชื่อถือ',
   },
 ]
 

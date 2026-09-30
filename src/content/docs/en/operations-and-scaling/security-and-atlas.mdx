@@ -1,6 +1,6 @@
 ---
 title: Security and Atlas
-description: The production security basics — authentication and roles, TLS, network restrictions, and encryption at rest — and how MongoDB Atlas provides them as a managed service.
+description: The production security basics — authentication and roles, keyfile, TLS, network binding and encryption at rest — proven on a throwaway container (open by default, the exact "requires authentication" error, role denial, authSource, TLS failures), with Atlas claims taken from its documentation.
 sidebar:
   order: 5
 ---
@@ -9,13 +9,14 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-A fresh `mongod` started with default settings has no authentication and listens for connections. On your laptop, bound to localhost, that is harmless. On a server with a public IP, it is a breach waiting to happen — and over the years, unsecured MongoDB instances have leaked enormous amounts of data exactly this way. Production security is not one feature but a short stack of defenses, each closing a different door: who can connect, how the connection is protected, where connections are even allowed from, and what happens to the bytes on disk.
+A fresh `mongod` started with default settings has no authentication. On your laptop, bound to localhost, that is harmless; on a server with a public IP it is a breach waiting to happen — and unsecured MongoDB instances have leaked enormous amounts of data exactly this way. Production security is a short stack of defenses, each closing a different door: where connections may come from, how they are protected, who you are, what you may do, and what is on disk.
+
+Everything marked *lab* ran on this Mac on throwaway `mongo:8.3.11` containers (`mongodb-b3-sec`, capped at 512 MB, removed afterwards; a throwaway CA and server certificate made with `openssl`, a random keyfile; nothing left the machine and no cloud account was involved). The course's automated checker cannot run these fences (they need `--auth` or TLS servers), so their outputs are recorded from the real run. Passwords in this lesson are placeholders such as `<your-password>` — never paste real ones into a snippet. Python/Go/Rust tabs mirror the verified Node call and are not executed by the checker.
 
 ## The layers of protection
-
-Think of a request as passing through a series of gates before it ever touches your data. The network decides whether the connection is allowed at all. TLS protects the bytes in flight. Authentication checks who you are, and authorization checks what you are allowed to do:
 
 export const securityFlow = `flowchart LR
   Client["Application"] --> Net["Network gate — firewall, bind IP, VPC"]
@@ -26,52 +27,125 @@ export const securityFlow = `flowchart LR
 
 <Mermaid code={securityFlow} title="Each gate closes a different door: network, then transport encryption, then identity, then permissions, then encryption at rest" />
 
-No single layer is sufficient. Authentication without network limits still invites brute-force attempts; a locked-down network without auth trusts everyone inside it. Defense in depth means turning on all of them.
+No single layer is sufficient. Authentication without network limits still invites brute force; a locked-down network without auth trusts everyone inside it.
 
-## Authentication and roles (RBAC)
+## Step 0 — the default is open
 
-The first move is to require **authentication** so that no one can connect anonymously. MongoDB then governs what each user may do through **role-based access control** — RBAC. You create users and grant them roles, and a role is a bundle of permissions. The principle is *least privilege*: an application that only reads reports gets a read-only role, not an administrator's keys. You enable auth in the config file and then create users.
+The plain `mongo:8.3.11` container, no flags (published only on the host's loopback):
 
-```yaml
-# mongod.conf — require authentication
-security:
-  authorization: enabled
+```bash
+# scripts/sec-stage1.sh
+docker run -d --name mongo-open --memory 512m -p 127.0.0.1:27304:27017 mongo:8 mongod --wiredTigerCacheSizeGB 0.25
+docker exec mongo-open mongosh --quiet --file /tmp/open.js   # the script below
 ```
 
 ```js
-// Create an app user limited to read and write on one database
-db.getSiblingDB("admin").createUser({
-  user: "library_app",
-  pwd: passwordPrompt(),
-  roles: [{ role: "readWrite", db: "library" }]
-})
+// mongosh/sec-open.js @skip-verify lab: needs a plain throwaway mongod (real output below)
+console.log(db.adminCommand({ listDatabases: 1 }).databases.map((d) => d.name));
+db.getSiblingDB("library").members.insertOne({ name: "anyone" });
+console.log("insert with no credentials: ok");
+console.log(db.serverCmdLineOpts().argv);
 ```
 
-With auth enabled, every connection must present credentials. Drivers send them in the connection string or as separate options:
+```text
+[ 'admin', 'config', 'local' ]
+insert with no credentials: ok
+[ 'mongod', '--wiredTigerCacheSizeGB', '0.25', '--bind_ip_all' ]
+
+```
+
+No credentials, and it listed databases and wrote data. Note the last line: the official image starts `mongod` with `--bind_ip_all`, unlike the bare binary, which — per the manual — "bind[s] to localhost by default" ([MongoDB configuration hardening](https://www.mongodb.com/docs/manual/core/security-hardening/), consulted 2026-09-30). A container reachable on a published port is therefore reachable by anyone who can reach the port: publish it on `127.0.0.1` only, as above.
+
+## Authentication and roles (RBAC)
+
+**Authentication** proves who you are; **role-based access control** limits what you may do. The principle is *least privilege*. The image can create the first (root) user for you from environment variables, on an empty data directory only, and start with `--auth`:
+
+```bash
+# scripts/sec-stage2.sh
+docker run -d --name mongo-auth --memory 512m -p 127.0.0.1:27304:27017 \
+  -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD='<your-root-password>' \
+  mongo:8 mongod --auth --wiredTigerCacheSizeGB 0.25
+```
+
+Now an anonymous client. `ping` still works, everything else is refused with the exact message every operator learns to recognise:
+
+```js
+// mongosh/sec-anonymous.js @skip-verify lab: needs the --auth container (real output below)
+console.log(db.runCommand({ ping: 1 }));
+for (const op of [() => db.getSiblingDB("library").members.find().toArray(), () => db.adminCommand({ listDatabases: 1 })]) {
+  try { op(); } catch (e) { console.log(e.name, e.codeName, e.code, "-", e.message); }
+}
+```
+
+```text
+{ ok: 1 }
+MongoServerError Unauthorized 13 - Command find requires authentication
+MongoServerError Unauthorized 13 - Command listDatabases requires authentication
+
+```
+
+Create least-privilege users (as `root`; the password comes from an environment variable — `passwordPrompt()` works only in an interactive shell, so it must not appear in a script), then show what a read-only user may not do:
+
+```js
+// mongosh/sec-users.js @skip-verify lab: run as root against the --auth container (real output below)
+const admin = db.getSiblingDB("admin");
+admin.createUser({ user: "library_app", pwd: process.env.APP_PW, roles: [{ role: "readWrite", db: "library" }] });
+admin.createUser({ user: "library_reader", pwd: process.env.APP_PW, roles: [{ role: "read", db: "library" }] });
+console.log(admin.getUsers().users.filter((u) => u.user.startsWith("library_")).map((u) => ({ user: u.user, roles: u.roles })));
+
+const app = new Mongo("mongodb://library_app:" + process.env.APP_PW + "@localhost:27017/library?authSource=admin");
+app.getDB("library").members.insertOne({ name: "Ada" });
+const reader = new Mongo("mongodb://library_reader:" + process.env.APP_PW + "@localhost:27017/library?authSource=admin");
+console.log("reader can read:", reader.getDB("library").members.countDocuments());
+try { reader.getDB("library").members.insertOne({ name: "x" }); } catch (e) { console.log(e.codeName, e.code, "-", e.message); }
+```
+
+```text
+[
+  {
+    user: 'library_app',
+    roles: [ { role: 'readWrite', db: 'library' } ]
+  },
+  {
+    user: 'library_reader',
+    roles: [ { role: 'read', db: 'library' } ]
+  }
+]
+reader can read: 1
+Unauthorized 13 - not authorized on library to execute command { insert: "members", documents: [ { name: "x", _id: ObjectId('6abcd5da1041bb9cb750d769') } ], ordered: true, lsid: { id: UUID("8927124f-ce75-486b-b03c-c18d8c4052ed") }, $db: "library" }
+
+```
+
+Drivers send credentials in the connection string. **The database in the URI path is not where the user lives:** without `authSource`, the driver authenticates against the database named in the path, and these users live in `admin`.
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```bash
-    mongosh "mongodb://library_app@host:27017/library?authSource=admin&tls=true"
+    # scripts/sec-connect.sh
+    mongosh "mongodb://library_app@localhost:27017/library?authSource=admin" --password "$APP_PW"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const uri =
-      "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    // app/sec-connect.mjs @skip-verify lab: needs the --auth container on 127.0.0.1:27304
+    import { MongoClient } from "mongodb";
+
+    const uri = `mongodb://library_app:${process.env.APP_PW}@127.0.0.1:27304/library?authSource=admin`;
     const client = new MongoClient(uri);
     await client.connect();
+    console.log(await client.db("library").collection("members").countDocuments());
+    await client.close();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    uri = "mongodb://library_app:<your-password>@host:27017/library?authSource=admin&tls=true"
     client = MongoClient(uri)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    uri := "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true"
+    uri := "mongodb://library_app:<your-password>@host:27017/library?authSource=admin&tls=true"
     client, err := mongo.Connect(options.Client().ApplyURI(uri))
     if err != nil {
         return err
@@ -80,103 +154,261 @@ With auth enabled, every connection must present credentials. Drivers send them 
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let uri = "mongodb://library_app:secret@host:27017/library?authSource=admin&tls=true";
+    let uri = "mongodb://library_app:<your-password>@host:27017/library?authSource=admin&tls=true";
     let client = Client::with_uri_str(uri).await?;
     ```
   </TabItem>
 </Tabs>
 
-## TLS, network rules, and encryption at rest
+## Keyfile, TLS and `mongod.conf`
 
-Three more layers complete the picture. **TLS** encrypts traffic between client and server so credentials and data cannot be read off the wire; you point `mongod` at a certificate and require it.
+Three more pieces, put together in one config file and started for real. **TLS** encrypts the connection (and, with a CA file, lets the client verify the server); a **keyfile** is the shared secret replica-set members use to authenticate each other (it also turns on authorization); `net.bindIp` decides which interfaces `mongod` listens on. The throwaway certificate authority, server certificate (valid for `localhost` and `127.0.0.1`) and keyfile were generated like this — the files themselves never go in a repository:
 
-```yaml
-# mongod.conf — require TLS and restrict where it listens
-net:
-  bindIp: 10.0.1.5,localhost
-  tls:
-    mode: requireTLS
-    certificateKeyFile: /etc/ssl/mongodb.pem
+```bash
+# scripts/sec-certs.sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj "/CN=lab-ca"
+openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost"
+printf "subjectAltName=DNS:localhost,IP:127.0.0.1" > san.ext
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.crt -days 2 -extfile san.ext
+cat server.key server.crt > server.pem
+openssl rand -base64 756 > keyfile
 ```
 
-That same snippet shows the **network** gate. The `bindIp` setting controls which interfaces `mongod` accepts connections on — bind it to private addresses, never `0.0.0.0` on a public host. In the cloud you wrap the server in a VPC or private subnet and use a firewall or security group so only your application servers can reach port `27017` at all. Finally, **encryption at rest** scrambles the data files on disk, so a stolen disk or backup volume is useless without the key; in self-managed deployments this is a storage-engine or filesystem-level feature you enable, and in managed services it is on by default.
+```yaml
+# mongod.conf
+security:
+  authorization: enabled
+  keyFile: /etc/mongo-lab/keyfile
+net:
+  port: 27017
+  bindIp: 0.0.0.0
+  tls:
+    mode: requireTLS
+    certificateKeyFile: /etc/mongo-lab/server.pem
+    CAFile: /etc/mongo-lab/ca.pem
+    allowConnectionsWithoutCertificates: true
+replication:
+  replSetName: rs0
+storage:
+  wiredTiger:
+    engineConfig:
+      cacheSizeGB: 0.25
+```
 
-## MongoDB Atlas: the easy path
+`allowConnectionsWithoutCertificates: true` matters: once a `CAFile` is set, `mongod` also asks *clients* for a certificate (mutual TLS); without this line a client that presents none is dropped, and in the lab it looked exactly like the plain-TCP failure below (`connection ... closed`). `bindIp: 0.0.0.0` is right only *inside a container*, where the published port (loopback on the host) is the real gate; on a host you would list private addresses, never `0.0.0.0` on a public interface. The keyfile must be owned by the user `mongod` runs as with no group/other access. Starting with a world-readable keyfile fails on the spot (real log line):
 
-Doing all of this by hand — provisioning a replica set, generating certificates, configuring firewalls, rotating keys, scheduling backups — is real work and easy to get subtly wrong. **MongoDB Atlas** is MongoDB's managed cloud service, and it exists largely so you do not have to. An Atlas cluster ships secure by default: authentication is required, TLS is always on, encryption at rest is enabled, and the database is *not* reachable until you explicitly add an entry to its **IP access list**. On top of that it gives you automated **backups** with point-in-time restore, and **monitoring** dashboards with the Performance Advisor from the previous lesson built in.
+```bash
+# scripts/sec-keyfile-perms.sh
+docker run --rm --entrypoint bash -v "$PWD/certs:/certs:ro" mongo:8 -c \
+  'mkdir /etc/mongo-lab && cp /certs/* /etc/mongo-lab/ && chmod 444 /etc/mongo-lab/keyfile && exec gosu mongodb mongod --config /etc/mongo-lab/mongod.conf'
+```
 
-**In Compass / Atlas:** you connect Compass to an Atlas cluster with a connection string copied from the Atlas UI, which already includes TLS and your database user. In Atlas itself, Database Access manages users and roles, Network Access manages the IP allow-list, and the Backup tab manages snapshots — the same four layers, presented as forms instead of config files.
+```text
+{"c":"ACCESS","id":20254,"msg":"Read security file failed","attr":{"error":{"code":30,"codeName":"InvalidPath","errmsg":"permissions on /etc/mongo-lab/keyfile are too open"}}}
+{"s":"F","c":"CONTROL","id":20575,"msg":"Error creating service context","attr":{"error":"Location5579201: Unable to acquire security key[s]"}}
+
+```
+
+With correct permissions (`chown mongodb`, `chmod 400`) the server starts. The first user is created through the *localhost exception*, after `rs.initiate()`:
+
+```bash
+# scripts/sec-stage3.sh
+docker run -d --name mongo-secure --hostname sec-host --memory 512m -p 127.0.0.1:27305:27017 \
+  --entrypoint bash -v "$PWD/certs:/certs:ro" mongo:8 -c \
+  'mkdir /etc/mongo-lab && cp /certs/* /etc/mongo-lab/ && chown -R mongodb:mongodb /etc/mongo-lab && chmod 400 /etc/mongo-lab/* && exec gosu mongodb mongod --config /etc/mongo-lab/mongod.conf'
+URI="mongodb://localhost/?tls=true&tlsCAFile=/etc/mongo-lab/ca.pem&directConnection=true"
+docker exec mongo-secure mongosh --quiet "$URI" --eval 'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
+docker exec -e ROOT_PW='<your-root-password>' mongo-secure mongosh --quiet "$URI" --eval 'db.getSiblingDB("admin").createUser({ user: "root", pwd: process.env.ROOT_PW, roles: ["root"] })'
+```
+
+Then the things you will meet in production, in order: (1) plain TCP to a `requireTLS` server, (2) TLS with the CA but no credentials, (3) TLS plus credentials, (4) a name the certificate does not cover, and (5) what the config file actually produced (real output, run against the container above):
+
+```bash
+# scripts/sec-tls-checks.sh
+M="docker exec -e ROOT_PW=<your-root-password> mongo-secure mongosh --quiet"
+CA="tlsCAFile=/etc/mongo-lab/ca.pem"
+echo "== 1) plain TCP to a requireTLS server"
+$M "mongodb://localhost/?directConnection=true&serverSelectionTimeoutMS=3000" --eval 'db.hello().ok' 2>&1 | tail -2
+echo "== 2) TLS, anonymous"
+$M "mongodb://localhost/?tls=true&$CA&directConnection=true" --eval 'try { db.getSiblingDB("library").members.find().toArray() } catch (e) { console.log(e.codeName, e.code, "-", e.message) }'
+echo "== 3) TLS + credentials"
+$M "mongodb://root:<your-root-password>@localhost/?tls=true&$CA&authSource=admin&directConnection=true" --eval 'console.log("authenticated as", db.runCommand({ connectionStatus: 1 }).authInfo.authenticatedUsers[0].user)'
+echo "== 4) a name that is not in the certificate"
+$M "mongodb://sec-host/?tls=true&$CA&directConnection=true&serverSelectionTimeoutMS=3000" --eval 'db.hello().ok' 2>&1 | tail -2
+echo "== 4b) same, verification switched off"
+$M "mongodb://sec-host/?tls=true&$CA&directConnection=true&tlsAllowInvalidHostnames=true" --eval 'console.log("connected:", db.hello().ok === 1)' 2>&1 | tail -1
+echo "== 5) what the config file produced"
+$M "mongodb://root:<your-root-password>@localhost/?tls=true&$CA&authSource=admin&directConnection=true" --eval 'const p = db.serverCmdLineOpts().parsed; printjson({ security: p.security, net: p.net, replication: p.replication })'
+```
+
+```text
+== 1) plain TCP to a requireTLS server
+MongoServerSelectionError: connection <monitor> to 127.0.0.1:27017 closed
+== 2) TLS, anonymous
+Unauthorized 13 - Command find requires authentication
+== 3) TLS + credentials
+authenticated as root
+== 4) name not in the certificate
+MongoServerSelectionError: Hostname/IP does not match certificate's altnames: Host: sec-host. is not in the cert's altnames: DNS:localhost, IP Address:127.0.0.1
+== 4b) same, verification switched off
+connected: true
+== 5) what the config file produced
+{
+  security: {
+    authorization: 'enabled',
+    keyFile: '/etc/mongo-lab/keyfile'
+  },
+  net: {
+    bindIp: '0.0.0.0',
+    port: 27017,
+    tls: {
+      CAFile: '/etc/mongo-lab/ca.pem',
+      allowConnectionsWithoutCertificates: true,
+      certificateKeyFile: '/etc/mongo-lab/server.pem',
+      mode: 'requireTLS'
+    }
+  },
+  replication: {
+    replSetName: 'rs0'
+  }
+}
+
+```
+
+Read these carefully. A non-TLS client is dropped before it can say anything; a TLS client without credentials gets the same `requires authentication` error as before; the hostname check *works* — and `tlsAllowInvalidHostnames` (or `tlsAllowInvalidCertificates`) makes the error disappear precisely by disabling the protection, so it is a diagnostic to remove, not a fix to keep.
+
+## Encryption at rest, network and Atlas
+
+TLS protects data *in transit*; encryption at rest protects the files on disk. In self-managed MongoDB, the encrypted storage engine "is available in MongoDB Enterprise only" ([Encryption at rest](https://www.mongodb.com/docs/manual/core/security-encryption-at-rest/), consulted 2026-09-30), so on the Community server the alternatives are disk- or filesystem-level encryption provided by your platform. In the cloud, wrap the server in a private network (VPC) and use a firewall or security group so only your application servers reach the port.
+
+**MongoDB Atlas** is the managed service, and its documentation makes these commitments (consulted 2026-09-30): "Atlas requires TLS to encrypt the connections to your databases" ([Set up cluster security](https://www.mongodb.com/docs/atlas/setup-cluster-security/)); "Atlas only allows client connections to the cluster from entries in the project's IP access list" ([IP access list](https://www.mongodb.com/docs/atlas/security/ip-access-list/)); database users must be created to connect; and encryption at rest is enabled on its clusters ([Encryption at rest](https://www.mongodb.com/docs/manual/core/security-encryption-at-rest/) — stated for Atlas Infinite clusters). This course did not run anything on Atlas (no account); everything in this paragraph is documentation, not measurement.
+
+**In Compass / Atlas:** you connect Compass with a connection string copied from the Atlas UI (which already carries TLS); in Atlas, Database Access manages users and roles and Network Access manages the IP access list — the same layers as forms.
 
 ## Tips and gotchas
 
-- **Never expose port 27017 to the internet without authentication.** This is the cardinal rule; it is how the well-known data leaks happened. Bind to private interfaces and require auth before anything else.
-- Apply **least privilege**. Give each application user only the roles it needs on only the databases it uses. Do not hand out the admin role to app code.
-- TLS protects data *in transit*; encryption at rest protects it *on disk*. They are different layers — enable both, not one.
-- Self-managing all of this is doable but error-prone. If you do not have a strong reason to run your own clusters, Atlas gives you these defenses correctly configured out of the box.
+- **Never expose port 27017 without authentication.** The open container above took inserts from anyone who could reach it.
+- **Least privilege.** The read-only user could read and was refused the insert; give each service its own user.
+- **Put `authSource=admin` in the URI** when the user lives in `admin`.
+- **Do not paste `tlsAllowInvalidCertificates=true`** to make an error go away — it turns off the check that stops impostors.
+- TLS is in transit, encryption at rest is on disk; you need both. The keyfile is for member-to-member authentication.
 
 <Callout title="Secure by depth, or let Atlas do it">
-Production security is four layers: lock down the network, require TLS, require authentication, and grant least-privilege roles — plus encryption at rest on disk. Never put an unauthenticated MongoDB on a public address. If you would rather not assemble all of this yourself, MongoDB Atlas ships it secure by default.
+Bind to private interfaces, require TLS, require authentication, grant least-privilege roles, and encrypt the disk. Never put an unauthenticated MongoDB on a public address. Atlas documents TLS, authentication and an IP access list as defaults you do not assemble yourself.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant, told the app user was created "in the admin database", writes the obvious connection string:
+
+<SpotTheBug lang="js" code={`// AI comment: "credentials are in the URI, so this authenticates as library_app"
+const client = new MongoClient("mongodb://library_app:" + pw + "@127.0.0.1:27304/library");
+await client.connect();
+await client.db("library").collection("members").findOne();`}>
+
+Without `authSource`, the driver authenticates against the database in the URI path (`library`), where `library_app` does not exist. Real run against the `--auth` container:
+
+```js
+// app/sec-authsource.mjs @skip-verify lab: needs the --auth container on 127.0.0.1:27304 (real output below)
+import { MongoClient } from "mongodb";
+const pw = process.env.APP_PW;
+for (const [label, query] of [["bug (no authSource)", ""], ["fix (authSource=admin)", "?authSource=admin"]]) {
+  const client = new MongoClient(`mongodb://library_app:${pw}@127.0.0.1:27304/library${query}`);
+  try {
+    await client.connect();
+    console.log(label, "->", await client.db("library").collection("members").countDocuments());
+  } catch (e) { console.log(label, "->", e.name, e.codeName, e.code, "-", e.message); }
+  await client.close();
+}
+```
+
+```text
+bug (no authSource) -> MongoServerError AuthenticationFailed 18 - Authentication failed.
+fix (authSource=admin) -> 1
+
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Security is **a row of independent doors**. The network decides who can knock; TLS decides whether the knock can be overheard or faked; authentication decides who you are; roles decide what that identity may touch; encryption at rest decides what a stolen disk is worth. Every failure above was one door closing correctly — and each "fix" that opens it again (`--bind_ip_all` on a public port, `tlsAllowInvalid*`, root for every service) removes a door rather than solving a problem.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Self-hosted MongoDB | Full control over infrastructure and configuration | You own every patch, TLS certificate rotation, backup, and security audit yourself |
-| MongoDB Atlas | Secure by default, backup and patching handled for you, less operational burden | Less low-level control; usage-based cost instead of self-hosted's fixed infrastructure cost |
+| Self-hosted MongoDB | Full control of infrastructure and configuration | You own certificates and rotation, keyfiles, users, patching, backups and audits; encryption at rest needs Enterprise or the platform |
+| MongoDB Atlas | TLS, authentication and an IP access list are documented defaults; less operational work | Less low-level control; usage-based cost; not measured here |
+| One user per service and environment | A leak affects one service | More users to manage |
+| `requireTLS` with a private CA | Clients verify the server; plain connections dropped | Certificate issuance and rotation to run |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using the same database user across every service or environment** — if that one user's credentials leak, every service sharing it is affected. Separate users per service and per environment (dev/staging/prod) to limit the blast radius.
-- **Assuming TLS protects all your data, so skipping encryption at rest** — TLS only protects data in transit. If a disk or backup snapshot is stolen without at-rest encryption, the data is still readable directly.
-- **Leaving the Atlas IP access list wide open to any address for development convenience, then forgetting to restrict it before production** — that wide an opening effectively removes the network layer entirely; authentication alone does not substitute for the missing network restriction.
+- **"A default `mongod` is safe because it needs a password."** — the open container listed databases and accepted an insert without credentials.
+- **"The database in the URI is where the user is looked up."** — it is the default `authSource`; users created in `admin` need `?authSource=admin` (error code 18 otherwise).
+- **"`passwordPrompt()` belongs in a script."** — it only works in an interactive shell; scripts read the secret from the environment or a secret manager.
+- **"TLS means my data is encrypted."** — in transit only; disk needs encryption at rest, an Enterprise feature for self-managed MongoDB.
+- **"`tlsAllowInvalidHostnames` fixes the certificate error."** — it disables the very check that failed.
+- **"The official image binds to localhost like the binary."** — it starts with `--bind_ip_all`; publish ports on `127.0.0.1` or firewall them.
 
-> 💡 Real-world example
->
-> **The pattern of unauthenticated public MongoDB instances making the news** — most notably the January 2017 wave of ransom attacks that wiped and ransomed tens of thousands of exposed instances — shows how much damage skipping just one authentication layer can cause ([Krebs on Security, "Extortionists Wipe Thousands of Databases, Victims Who Pay Up Get Stiffed", Jan 2017](https://krebsonsecurity.com/2017/01/extortionists-wipe-thousands-of-databases-victims-who-pay-up-get-stiffed/)).
->
-> **A startup team moving from self-hosted to Atlas** — uses Atlas's Database Access and Network Access instead of managing `mongod.conf` and firewall rules on every machine themselves, cutting the time a small team spends on security down to configuration in a UI.
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; they are not executed by the course's automated checker._
 
 export const quizSecurity = [
   {
-    q: 'What is the cardinal production security rule for MongoDB?',
+    q: 'You start the official mongo image with no flags and publish its port. What can an anonymous client do?',
     options: [
-      'Always run on the default port',
-      'Never expose port 27017 to the internet without authentication',
-      'Disable TLS to improve performance',
-      'Give every user the admin role for convenience',
+      'Nothing: authentication is on by default',
+      'List databases and write data: authentication is off by default',
+      'Read only',
+      'Connect but not run commands',
     ],
     answer: 1,
+    explain: 'The lab listed databases and inserted a document with no credentials; the image also starts mongod with --bind_ip_all.',
   },
   {
-    q: 'What does role-based access control (RBAC) provide?',
+    q: 'With --auth on, an anonymous client runs a find. What is the error?',
     options: [
-      'Encryption of the data files on disk',
-      'Control over what each authenticated user is permitted to do',
-      'Automatic failover between replicas',
-      'Compression of network traffic',
+      'ECONNREFUSED',
+      'MongoServerError Unauthorized (13): Command find requires authentication',
+      'Authentication failed (18)',
+      'Nothing: reads are allowed',
     ],
     answer: 1,
+    explain: 'That is the exact message in the anonymous run; only ping was allowed.',
   },
   {
-    q: 'TLS and encryption at rest protect against different things. Which is which?',
+    q: 'A user was created in the admin database. Your URI is mongodb://user:pw@host/library with no authSource. What happens?',
     options: [
-      'Both protect data only while it is in memory',
-      'TLS protects data in transit on the network; encryption at rest protects data on disk',
-      'TLS protects the disk; encryption at rest protects the network',
-      'They are two names for the same feature',
+      'It authenticates against admin automatically',
+      'AuthenticationFailed (18): the driver looks for the user in library',
+      'It connects read-only',
+      'It prompts for the password',
     ],
     answer: 1,
+    explain: 'The bug run failed with code 18; adding ?authSource=admin made the same credentials work.',
   },
   {
-    q: 'How does MongoDB Atlas help with security by default?',
+    q: 'A user with the read role on library calls insertOne. What is the result?',
     options: [
-      'It disables authentication so connecting is easier',
-      'It requires auth and TLS, encrypts at rest, and keeps the cluster unreachable until you add an IP to the access list',
-      'It exposes the cluster publicly so any client can connect',
-      'It removes the need for a connection string',
+      'The insert succeeds',
+      'Unauthorized (13): not authorized on library to execute the insert command',
+      'The insert is queued',
+      'The user is deleted',
     ],
     answer: 1,
+    explain: 'The reader could count documents and was refused the insert, which is least privilege working.',
+  },
+  {
+    q: 'A client gets a hostname-mismatch TLS error. Which action fixes the cause rather than hiding it?',
+    options: [
+      'Add tlsAllowInvalidCertificates=true',
+      'Connect with a name that is in the certificate\'s subjectAltName (or reissue the certificate with that name)',
+      'Switch to a non-TLS port',
+      'Remove the CA file',
+    ],
+    answer: 1,
+    explain: 'Connecting via sec-host failed the altname check; switching verification off made the error disappear without making the connection trustworthy.',
   },
 ]
 
