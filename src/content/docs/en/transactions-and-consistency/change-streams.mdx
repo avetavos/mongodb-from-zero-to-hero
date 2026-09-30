@@ -1,6 +1,6 @@
 ---
 title: Change streams
-description: Subscribe to a live feed of inserts, updates, and deletes with watch(), built on the oplog, to drive event-driven applications, and resume reliably with resume tokens.
+description: Subscribe to a live feed of inserts, updates, and deletes with watch(), built on the oplog — including the lazy-open trap in the Node driver, real resume tokens, updateLookup, pre/post images, invalidate events and startAfter.
 sidebar:
   order: 5
 ---
@@ -9,32 +9,53 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-So far we have changed data and read it back ourselves. But many applications need to **react** to changes that other parts of the system make — send an email when a member is added, refresh a cache when a record changes, push an update to a dashboard the moment a fine is paid. Polling the collection over and over to spot changes is wasteful and slow. A **change stream** solves this directly: you open a stream with `watch()` and the database hands you each insert, update, and delete as it happens, in order, as a live feed.
+So far we have changed data and read it back ourselves. But many applications need to **react** to changes that other parts of the system make — send an email when a member is added, refresh a cache when a record changes, push an update to a dashboard the moment a fine is paid. Polling the collection over and over is wasteful and slow. A **change stream** solves this directly: you open a stream with `watch()` and the database hands you each insert, update, and delete as it happens, in order.
 
-Change streams are built on the **oplog**, the same internal log a replica set uses to copy writes from the primary to its secondaries. Because the oplog already records every change in order, a change stream is just a well-behaved reader of that log, which is why a change stream — like a transaction — needs a **replica set** to run.
+Change streams are built on the **oplog**, the same internal log a replica set uses to copy writes from the primary to its secondaries, which is why — like a transaction — a change stream needs a **replica set** (or sharded cluster). On a standalone server `watch()` fails with `MongoServerError 40573: The $changeStream stage is only supported on replica sets or mongos` (real output). Outputs below come from mongo 8.3.11 (one-node replica set), mongosh 2.11.1 and Node driver 7.7.0 on this Mac; ids and tokens differ on your machine. Python/Go/Rust tabs mirror the verified shell/Node call and are not executed by the course's automated checker; their loops block by design, so a service runs them in a worker — the runnable examples here read with a bounded `tryNext()` poll instead.
 
 ## Opening a stream on a collection
 
-Here we watch the `members` collection and react to every change. Each event the stream yields is a document describing what happened: its `operationType` (such as `insert` or `update`), the document key, and for updates a description of which fields changed. The loop below simply prints each event as it arrives and keeps listening:
+Each event is a document with an `operationType` (`insert`, `update`, `delete`, `replace`, `drop`, `invalidate`, ...), the `documentKey`, the namespace `ns`, and a resume token in `_id`. The infinite `while (stream.hasNext())` loop you often see blocks the shell forever waiting for the next event, so the examples poll with `tryNext()` (returns `null` when nothing is waiting) and stop:
+
+```js
+// mongosh/cs-seed.js
+db.createCollection("members");
+assert.strictEqual(db.members.countDocuments(), 0);
+```
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
+    // mongosh/cs-watch.js
     const stream = db.members.watch();
-    while (stream.hasNext()) {
-      const event = stream.next();
-      print(event.operationType, JSON.stringify(event.documentKey));
-    }
+    db.members.insertOne({ name: "Katherine", fines: 0 });
+
+    let event = null;
+    const end = Date.now() + 3000;
+    while (!event && Date.now() < end) event = stream.tryNext();
+    console.log(event.operationType, event.documentKey, event.fullDocument.name);
+    stream.close();
+    assert.strictEqual(event.operationType, "insert");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const stream = db.collection("members").watch();
-    for await (const event of stream) {
-      console.log(event.operationType, event.documentKey);
-    }
+    // app/cs-watch.mjs
+    const members = db.collection("members");
+    await db.createCollection("members");
+    const next = async (cs, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+
+    const stream = members.watch();
+    await stream.tryNext();                       // opens the stream on the server (see the trap below)
+    await members.insertOne({ name: "Katherine", fines: 0 });
+
+    const event = await next(stream);
+    console.log(event.operationType, event.documentKey, event.fullDocument.name);
+    await stream.close();
+    if (event.operationType !== "insert") throw new Error("expected the insert event");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -71,20 +92,17 @@ Here we watch the `members` collection and react to every change. Each event the
   </TabItem>
 </Tabs>
 
-When someone inserts a new member elsewhere, an event like this appears on the stream. The `_id` field is the **resume token** for this event — keep reading to see why it matters:
+```text
+insert { _id: ObjectId('6abccd0f5465aaa53d0dda5c') } Katherine
+```
 
-```json
-{
-  "_id": { "_data": "8265F0B3D4000000012B0229" },
-  "operationType": "insert",
-  "documentKey": { "_id": "65f0b3d4e4b0a1c2e4b0a1f0" },
-  "fullDocument": { "_id": "65f0b3d4e4b0a1c2e4b0a1f0", "name": "Katherine", "fines": 0 }
-}
+```text
+insert { _id: new ObjectId('6abccd113997625b550fdab1') } Katherine
 ```
 
 ## How the feed flows
 
-A write goes to the primary, gets recorded in the oplog, and from there the change stream picks it up and delivers it to every consumer that is watching. One write can fan out to many independent listeners, each processing it for its own purpose:
+A write goes to the primary, is recorded in the oplog, and the change stream reads it from there and delivers it to every consumer that is watching. One write fans out to many independent listeners:
 
 export const streamFlow = `flowchart LR
   W["A write on the primary"] --> O["Oplog records the change in order"]
@@ -95,19 +113,134 @@ export const streamFlow = `flowchart LR
 
 <Mermaid code={streamFlow} title="A write lands in the oplog, the change stream reads it, and fans the event out to every consumer that is watching" />
 
+## What an event contains
+
+A real insert event (Node), a real update event without and with `fullDocument: "updateLookup"`, and the resume token:
+
+```js
+// app/cs-events.mjs
+const members = db.collection("events_members");
+await db.createCollection("events_members");
+const next = async (cs, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+
+const plain = members.watch();
+await plain.tryNext();
+await members.insertOne({ name: "Grace", fines: 4 });
+const ins = await next(plain);
+console.log("insert keys:", Object.keys(ins));
+console.log("resume token: length", ins._id._data.length, "starts", ins._id._data.slice(0, 24) + "...");
+
+await members.updateOne({ name: "Grace" }, { $set: { fines: 3 } });
+const upd = await next(plain);
+console.log("update:", upd.updateDescription, "| has fullDocument:", "fullDocument" in upd);
+await plain.close();
+
+const lookup = members.watch([], { fullDocument: "updateLookup" });
+await lookup.tryNext();
+await members.updateOne({ name: "Grace" }, { $set: { fines: 2 } });
+const upd2 = await next(lookup);
+console.log("updateLookup fullDocument:", upd2.fullDocument);
+await lookup.close();
+if (ins._id._data.length !== 188 || "fullDocument" in upd || upd2.fullDocument.fines !== 2) throw new Error("unexpected event shape");
+```
+
+```text
+insert keys: [
+  '_id',
+  'operationType',
+  'clusterTime',
+  'wallTime',
+  'fullDocument',
+  'ns',
+  'documentKey'
+]
+resume token: length 188 starts 826ABCCD12000000012B042C...
+update: { updatedFields: { fines: 3 }, removedFields: [], truncatedArrays: [] } | has fullDocument: false
+updateLookup fullDocument: {
+  _id: new ObjectId('6abccd12c596e5cafe63b469'),
+  name: 'Grace',
+  fines: 2
+}
+```
+
+Three facts from that run. A real resume token is a 188-character hex string (`_data`), not a short toy value. A plain update event carries only the `updateDescription` delta — no `fullDocument` unless you ask for `updateLookup`, which fetches the *current* document at delivery time (so it can already contain later changes, or be `null` if the document was deleted meanwhile; see the [manual](https://www.mongodb.com/docs/manual/changeStreams/), consulted 2026-09-30). And each stream is only as fresh as the moment it was opened, as the next section shows.
+
+For the exact before/after state, enable pre- and post-images on the collection, then request them. Without enabling, requesting `required` makes the stream fail with a real `MongoServerError 47: ... the pre-image was not found for event`:
+
+```js
+// app/cs-images.mjs
+const next = async (cs, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+await db.createCollection("images_members", { changeStreamPreAndPostImages: { enabled: true } });
+const members = db.collection("images_members");
+await members.insertOne({ _id: 1, name: "Ada", fines: 4 });
+
+const stream = members.watch([], { fullDocument: "required", fullDocumentBeforeChange: "required" });
+await stream.tryNext();
+await members.updateOne({ _id: 1 }, { $inc: { fines: -2 } });
+const e = await next(stream);
+console.log("before:", e.fullDocumentBeforeChange, "| after:", e.fullDocument);
+await stream.close();
+if (e.fullDocumentBeforeChange.fines !== 4 || e.fullDocument.fines !== 2) throw new Error("expected the images");
+```
+
+```text
+before: { _id: 1, name: 'Ada', fines: 4 } | after: { _id: 1, name: 'Ada', fines: 2 }
+```
+
+Pre-images are stored (in `config.system.preimages`) and cost space; enable them per collection only when a consumer needs them ([manual](https://www.mongodb.com/docs/manual/changeStreams/)).
+
 ## Resuming where you left off
 
-Networks drop and processes restart, and an event-driven system cannot afford to miss the changes that happened while it was away. Every event carries a **resume token** in its `_id`. If you store the token of the last event you successfully handled, you can reopen the stream from exactly that point and receive every change since, with none skipped and none repeated. Here we resume after a known token:
+Networks drop and processes restart. Every event carries a **resume token** in `_id`; store the token of the last event you handled and reopen the stream from there to receive every change since. Below, a stream reads one event, closes, two more writes happen while nobody listens, and a new stream resumes from the saved token. Two failure modes follow: a made-up token, and resuming after an `invalidate` (the collection was dropped) — where `resumeAfter` is refused and `startAfter` is the tool:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    const stream = db.members.watch([], { resumeAfter: savedToken });
+    // mongosh/cs-resume.js
+    db.createCollection("resume_members");
+    const first = db.resume_members.watch();
+    db.resume_members.insertOne({ n: 1 });
+    let e1 = null;
+    for (const end = Date.now() + 3000; !e1 && Date.now() < end;) e1 = first.tryNext();
+    const savedToken = e1._id;                          // persist this
+    first.close();
+
+    db.resume_members.insertMany([{ n: 2 }, { n: 3 }]);   // nobody is listening
+    const again = db.resume_members.watch([], { resumeAfter: savedToken });
+    const got = [];
+    for (const end = Date.now() + 3000; got.length < 2 && Date.now() < end;) {
+      const e = again.tryNext();
+      if (e) got.push(e.fullDocument.n);
+    }
+    again.close();
+    console.log("resumed events:", got);
+    assert.deepStrictEqual(got, [2, 3]);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const stream = db.collection("members").watch([], { resumeAfter: savedToken });
+    // app/cs-resume.mjs
+    const members = db.collection("resume_members");
+    await db.createCollection("resume_members");
+    const next = async (cs, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+
+    const first = members.watch();
+    await first.tryNext();
+    await members.insertOne({ n: 1 });
+    const savedToken = (await next(first))._id;          // persist this
+    await first.close();
+
+    await members.insertMany([{ n: 2 }, { n: 3 }]);      // nobody is listening
+    const again = members.watch([], { resumeAfter: savedToken });
+    const got = [];
+    for (let i = 0; i < 2; i++) got.push((await next(again)).fullDocument.n);
+    await again.close();
+    console.log("resumed events:", got);
+
+    let fake = null;
+    try { await next(members.watch([], { resumeAfter: { _data: "8265F0B3D4000000012B0229" } })); } catch (e) { fake = e; }
+    console.log("made-up token:", fake.name, fake.code, fake.message);
+    if (got.join() !== "2,3" || fake.code !== 50793) throw new Error("resume did not behave as expected");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -135,37 +268,173 @@ Networks drop and processes restart, and an event-driven system cannot afford to
   </TabItem>
 </Tabs>
 
-**In Compass:** there is no dedicated change-stream view, but you can run the `watch()` loop in the embedded **mongosh** tab and then make an edit in the Documents tab in another window to see the event appear live.
+```text
+resumed events: [ 2, 3 ]
+```
+
+```text
+resumed events: [ 2, 3 ]
+made-up token: MongoServerError 50793 Resume Token does not contain txnOpIndex
+```
+
+Dropping the watched collection ends the stream with a `drop` event followed by `invalidate`. You cannot `resumeAfter` an invalidate; `startAfter` starts a fresh stream from it:
+
+```js
+// app/cs-startafter.mjs
+const next = async (cs, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+await db.createCollection("tmp_members");
+const c = db.collection("tmp_members");
+
+const s = c.watch();
+await s.tryNext();
+await c.drop();
+const kinds = [(await next(s)).operationType, null];
+const inv = await next(s);
+kinds[1] = inv.operationType;
+await s.close();
+console.log("events after drop:", kinds);
+
+await db.createCollection("tmp_members");
+let refused = null;
+try { await next(c.watch([], { resumeAfter: inv._id })); } catch (e) { refused = e; }
+console.log("resumeAfter invalidate:", refused.code, refused.message);
+
+const again = c.watch([], { startAfter: inv._id });
+await again.tryNext();
+await c.insertOne({ k: 2 });
+const e = await next(again);
+console.log("startAfter invalidate ->", e.operationType, e.fullDocument.k);
+await again.close();
+if (refused.code !== 260 || e.operationType !== "insert") throw new Error("expected resumeAfter refused, startAfter working");
+```
+
+```text
+events after drop: [ 'drop', 'invalidate' ]
+resumeAfter invalidate: 260 Attempting to resume a change stream using 'resumeAfter' is not allowed from an invalidate notification
+startAfter invalidate -> insert 2
+```
+
+## Filter at the source
+
+Pass an aggregation pipeline to `watch()` so the server only sends what you care about. This stream wants updates that drop `fines` below 3:
+
+```js
+// app/cs-filter.mjs
+const next = async (cs, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+await db.createCollection("filter_members");
+const members = db.collection("filter_members");
+await members.insertMany([{ _id: 1, fines: 4 }, { _id: 2, fines: 9 }]);
+
+const stream = members.watch([
+  { $match: { operationType: "update", "updateDescription.updatedFields.fines": { $lt: 3 } } },
+]);
+await stream.tryNext();
+await members.updateOne({ _id: 2 }, { $set: { fines: 8 } });   // filtered out
+await members.insertOne({ _id: 3, fines: 0 });                  // filtered out
+await members.updateOne({ _id: 1 }, { $set: { fines: 1 } });    // delivered
+const e = await next(stream);
+console.log(e.operationType, e.documentKey, e.updateDescription.updatedFields);
+await stream.close();
+if (e.documentKey._id !== 1) throw new Error("the filter should deliver only member 1");
+```
+
+```text
+update { _id: 1 } { fines: 1 }
+```
+
+## How far back can a token go?
+
+A token can only be resumed while the oplog still holds the operation ("The oplog must have enough history to locate the operation associated with the token", [manual](https://www.mongodb.com/docs/manual/changeStreams/)); once it has rolled off, the stream fails. So size the oplog for your longest expected consumer outage. The window is one line to check:
+
+```js
+// mongosh/cs-oplog.js
+const info = db.getReplicationInfo();
+console.log({ configuredLogSizeMB: Math.round(info.logSizeMB), usedMB: Math.round(info.usedMB), windowHours: Number((info.timeDiffHours).toFixed(2)) });
+assert.ok(info.logSizeMB > 0);
+```
+
+```text
+{ configuredLogSizeMB: 1292, usedMB: 1284, windowHours: 0.42 }
+```
+
+That harness server is shared and busy, so its window is only a fraction of an hour — a good reminder that the window shrinks as write volume grows.
+
+**In Compass:** there is no dedicated change-stream view, but you can run the `watch()` code in the embedded **mongosh** tab and make an edit in the Documents tab in another window.
 
 ## Tips and gotchas
 
-- **A change stream needs a replica set**, for the same reason a transaction does: it reads from the oplog, which only exists on a replica set.
-- **Filter at the source with a pipeline.** You can pass an aggregation pipeline to `watch()` — for example a `$match` on `operationType` or on a field — so the server only sends you the events you care about, rather than filtering them in your application.
-- **Persist the resume token.** Storing the last handled token durably is what makes a consumer crash-safe. Without it, a restart either misses events or has to reprocess from the beginning.
-- **Tokens expire with the oplog.** If a consumer is offline so long that its resume point has fallen off the end of the oplog, the stream cannot resume from there, and you must reconcile some other way.
+- **A change stream needs a replica set or sharded cluster**, for the same reason a transaction does.
+- **Persist the resume token** after each handled event; it is what makes a consumer crash-safe. Handlers must be idempotent, because a crash between handling and saving replays the event.
+- **Tokens expire with the oplog.** If the consumer is offline longer than the oplog window, the stream cannot resume and you must reconcile another way.
+- **Events are capped at 16 MiB**; with both pre- and post-images on big documents that matters ([manual](https://www.mongodb.com/docs/manual/changeStreams/)).
 
 <Callout title="Watch, do not poll">
-When your application needs to react to data changes, open a change stream instead of polling the collection on a timer. You get changes in order, the moment they happen, and a resume token to pick up exactly where you left off after any interruption.
+When your application needs to react to data changes, open a change stream instead of polling. Prime it (first read) before you write, store the resume token of every handled event, and size the oplog for your longest outage.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant writes a test for "the listener receives the insert" — open the stream, then write:
+
+<SpotTheBug lang="js" code={`// AI comment: "watch() subscribes immediately, so the insert below will be delivered"
+const stream = members.watch();
+await members.insertOne({ name: "Katherine" });
+for await (const event of stream) { console.log(event.operationType); break; }`}>
+
+In mongosh `watch()` opens the server cursor immediately, but the **Node driver opens the change stream lazily**, on the first read. The insert happens *before* the stream exists on the server, so it is never delivered, and the `for await` waits forever. Below the missed run (bounded to 2 s instead of hanging) and the fix — do a first read (`tryNext()`) so the stream is open before writing:
+
+```js
+// app/cs-lazy-open.mjs
+const members = db.collection("lazy_members");
+await db.createCollection("lazy_members");
+const next = async (cs, ms = 2000) => { const end = Date.now() + ms; while (Date.now() < end) { const e = await cs.tryNext(); if (e) return e; } return null; };
+
+const lazy = members.watch();
+await members.insertOne({ name: "Missed" });
+const missed = await next(lazy);
+await lazy.close();
+
+const primed = members.watch();
+await primed.tryNext();                         // FIX: opens the stream on the server
+await members.insertOne({ name: "Seen" });
+const seen = await next(primed);
+await primed.close();
+
+console.log({ lazy: missed?.operationType ?? "MISSED", primed: seen?.fullDocument.name });
+if (missed !== null || seen?.fullDocument.name !== "Seen") throw new Error("expected lazy=missed, primed=seen");
+```
+
+```text
+{ lazy: 'MISSED', primed: 'Seen' }
+```
+
+If you cannot prime, capture `startAtOperationTime` before writing, or resume from a saved token.
+
+</SpotTheBug>
+
+## Mental Model
+
+A change stream is a **tail of the oplog with a bookmark**. Each event is one entry, in commit order; the resume token is the bookmark. The stream only sees entries from the moment it is opened (or from a bookmark you give it), so the questions are always "where does my stream start?" (prime it, or pass a token) and "is the bookmark still in the log?" (oplog window). A stream tells you *what happened*, never *what the state is now*.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Change stream (`watch()`) | Real-time — get events the moment they happen, resume precisely with a resume token, filter at the source with a pipeline | Requires a replica set, you must manage the resume token yourself, and the token expires if a consumer stays offline too long |
-| Polling the collection periodically | Simple to understand and debug, no dependency on the oplog or a replica set | Higher latency waiting for the poll interval, wastes queries when nothing changed, and you must track "last checked" yourself, risking missed events |
+| Change stream (`watch()`) | Real-time events in commit order, resumable from a token, filterable at the source | Requires a replica set; you store the token; the token expires with the oplog; Node opens lazily |
+| `fullDocument: "updateLookup"` | The whole document on update events with no schema knowledge | An extra lookup per event; returns the *current* document (possibly later than the event, or `null` if deleted) |
+| Pre/post images (`required`) | Exact before/after state | Stored per collection (space) and the stream errors if an image is missing |
+| Polling | Simple, no oplog dependency | Latency = the interval, wasted queries, easy to miss updates |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Not handling resume when the token is invalidated** — assuming `resumeAfter` always works, but if a consumer is down long enough for the token to fall outside the oplog window, reopening the stream errors and you must fall back to a full re-sync instead. Without that logic ready, the consumer crash-loops.
-- **Processing an event fire-and-forget without acking before saving the resume token** — if the consumer crashes mid-processing before saving the new token, that event replays on restart. Design handlers to be idempotent rather than assuming a change stream delivers each event exactly once.
-- **Using a change stream in place of a normal query for something that needs current state** — a change stream only tells you "what happened," not "what the state is right now." A consumer that comes back online after being offline still needs to query current state to bootstrap, rather than relying on the stream alone to rebuild all state.
+- **"`watch()` is subscribed the moment it returns."** — not in the Node driver (lazy open); the insert made right after `watch()` was missed, and a first `tryNext()` fixed it.
+- **"A `while (hasNext())` loop is how you consume a stream."** — it blocks forever waiting for events; use `tryNext()` with a deadline in scripts, an async iterator in a service.
+- **"Update events contain the document."** — only the delta unless `updateLookup` or a post-image is requested.
+- **"`resumeAfter` works after any event."** — not after `invalidate` (code 260); use `startAfter`.
+- **"A resume token is a short opaque string."** — real ones are 188 hex characters, and a made-up one fails with code 50793.
+- **"A change stream tells you the current state."** — it tells you what happened; bootstrap state with a query.
 
-> 💡 Real-world example
->
-> **A typical e-commerce platform** — uses a change stream to sync inventory status to a search index and cache in real time the moment stock updates, instead of polling the database every few seconds.
->
-> **A typical ride-hailing / booking system** — uses a change-stream-style mechanism to push trip or order status changes to other services in an event-driven way, reducing the latency between the real state and when the downstream system learns about it.
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; they are not executed by the course's automated checker._
 
 export const quizStreams = [
   {
@@ -177,36 +446,51 @@ export const quizStreams = [
       'The query plan cache',
     ],
     answer: 1,
+    explain: 'A change stream reads the oplog, which only exists on a replica set; a standalone server answers with error 40573.',
   },
   {
-    q: 'What is a resume token used for?',
+    q: 'In the Node driver you call const s = coll.watch(), then insertOne, then read from s. What arrives?',
     options: [
-      'Authenticating to the database',
-      'Reopening a stream from exactly where you last left off',
-      'Setting the write concern of the stream',
-      'Limiting how many events are returned',
+      'The insert event',
+      'Nothing: the driver opens the stream lazily on the first read, after the insert',
+      'An error about the missing token',
+      'Every event since the collection was created',
     ],
     answer: 1,
+    explain: 'Real run: lazy=MISSED, primed (a first tryNext() before writing) = Seen. mongosh opens the cursor eagerly.',
   },
   {
-    q: 'How do you receive only the events you care about?',
+    q: 'A plain update event has no fullDocument. How do you get the whole document?',
     options: [
-      'Filter them in your application after receiving all of them',
-      'Pass an aggregation pipeline such as a $match to watch()',
-      'Open one stream per document',
+      'You cannot',
+      'Pass fullDocument: "updateLookup" (current document) or enable pre/post images and request "required"/"whenAvailable"',
       'Set a read concern of linearizable',
+      'Use a $match stage',
     ],
     answer: 1,
+    explain: 'The plain event carried only updateDescription; updateLookup returned { fines: 2 }, and the image run showed before fines 4 / after fines 2.',
   },
   {
-    q: 'What deployment does a change stream require?',
+    q: 'You store the token of an invalidate event and call watch([], { resumeAfter: token }). What happens?',
     options: [
-      'A standalone server',
-      'A replica set',
-      'A sharded cluster only',
-      'No special deployment',
+      'It resumes normally',
+      'MongoServerError 260: resumeAfter is not allowed from an invalidate notification; use startAfter',
+      'It replays the whole oplog',
+      'It returns the dropped collection',
     ],
     answer: 1,
+    explain: 'Real run: resumeAfter failed with code 260, startAfter delivered the next insert.',
+  },
+  {
+    q: 'What limits how long a consumer can be offline before its resume token becomes useless?',
+    options: [
+      'The size of the token',
+      'The oplog window: history must still contain the token\'s operation',
+      'transactionLifetimeLimitSeconds',
+      'The number of collections',
+    ],
+    answer: 1,
+    explain: 'The manual: the oplog must have enough history to locate the operation. rs.printReplicationInfo() shows the window.',
   },
 ]
 
