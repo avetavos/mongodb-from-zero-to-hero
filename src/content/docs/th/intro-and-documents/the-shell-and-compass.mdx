@@ -1,6 +1,6 @@
 ---
 title: shell และ Compass
-description: พื้นฐาน mongosh, ทัวร์ Compass GUI, และวิธีเชื่อมต่อกับ MongoDB จากแต่ละสภาพแวดล้อมทั้งห้า
+description: พื้นฐาน mongosh (interactive, --eval, --file), ทัวร์ GUI ของ Compass และวิธีเชื่อมต่อจากทั้งห้าสภาพแวดล้อม — พร้อมดู option ของ connection string จริง ๆ และเหตุผลที่ต้องใช้ client ร่วมกันตัวเดียว
 sidebar:
   order: 4
 ---
@@ -9,65 +9,134 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-มีสามวิธีที่คุณจะคุยกับ MongoDB: shell **mongosh** สำหรับคำสั่งที่รวดเร็วและเขียนสคริปต์ได้; **MongoDB Compass** ที่เป็น graphical client ทางการ สำหรับคลิกไปมาและสำรวจ; และ **driver** ในภาษาของแอปพลิเคชันคุณสำหรับงานจริง บทเรียนนี้ครอบคลุมทั้งสามอย่าง โดยจบด้วยวิธีเปิดการเชื่อมต่อจากแต่ละสภาพแวดล้อมทั้งห้าที่คอร์สนี้ใช้
+มีสามวิธีที่คุณจะคุยกับ MongoDB: shell **mongosh** สำหรับคำสั่งเร็ว ๆ ที่ทำเป็นสคริปต์ได้ **MongoDB Compass** ซึ่งเป็น graphical client ทางการ สำหรับคลิกสำรวจ และ **driver** ในภาษาของแอปพลิเคชันสำหรับงานจริง บทเรียนนี้ครอบคลุมทั้งสามอย่าง และปิดท้ายด้วยวิธีเปิดการเชื่อมต่อจากทั้งห้าสภาพแวดล้อมที่คอร์สนี้ใช้
 
-ทุกอันเชื่อมต่อด้วยที่อยู่ชนิดเดียวกัน — **connection string** — พอเข้าใจ connection string แล้ว การสลับไปมาระหว่างเครื่องมือก็ง่ายมาก
+ทุกตัวเชื่อมต่อด้วยที่อยู่ชนิดเดียวกัน — **connection string** — เมื่อเข้าใจสิ่งนี้แล้ว การสลับระหว่างเครื่องมือจึงง่ายมาก ทุกอย่างด้านล่างรันบน mongo 8.3.11 กับ mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว transcript แบบ interactive มาจาก container `mongo:8` ชั่วคราวที่มี database `library` ซึ่งมีสมาชิก 25 คน
 
 ## พื้นฐาน mongosh
 
-`mongosh` เป็น JavaScript shell แบบโต้ตอบ คุณพิมพ์คำสั่ง shell ส่งไปรันบน server แล้วพิมพ์ผลลัพธ์กลับมา คำสั่งจำนวนหยิบมือเดียวครอบคลุมเกือบทุกอย่างที่คุณทำในแต่ละวัน:
+`mongosh` คือ JavaScript shell แบบ interactive คุณพิมพ์คำสั่ง มันรันกับ server แล้วพิมพ์ผลลัพธ์ นี่คือ session จริง (prompt `test>` / `library>` เป็นของ shell เอง บรรทัดที่คุณพิมพ์ตามหลัง):
 
-```js
-show dbs
+```text
+test> show dbs
+admin    100.00 KiB
+config    12.00 KiB
+library    8.00 KiB
+local     40.00 KiB
+test> use library
+switched to db library
+library> db.members.find({}, { _id: 0, name: 1 })
+[
+  { name: 'Member 1' },  { name: 'Member 2' },
+  ...
+  { name: 'Member 19' }, { name: 'Member 20' }
+]
+Type "it" for more
+library> it
+[
+  { name: 'Member 21' },
+  { name: 'Member 22' },
+  { name: 'Member 23' },
+  { name: 'Member 24' },
+  { name: 'Member 25' }
+]
+library> it
+no cursor
 ```
 
-`show dbs` แสดงรายการ database บน server การจะเริ่มทำงานภายในอันใดอันหนึ่ง — เช่น database `library` — ให้ `use` เข้าไป โดย database ไม่ต้องมีอยู่ก่อน MongoDB จะสร้างให้ทันทีที่คุณเขียน document แรกลงไป:
+- `show dbs` แสดงรายการ database; `use library` เลือกอันหนึ่ง (ไม่จำเป็นต้องมีอยู่แล้ว — MongoDB สร้างให้ตอนเขียนครั้งแรก); `db.members.find()` อ่านข้อมูล
+- shell พิมพ์ **20 document** ต่อ batch (`config.get("displayBatchSize")` คืน `20`) แล้วพิมพ์ `Type "it" for more` `it` ย่อมาจาก **iterate** และเมื่อ cursor หมดจะตอบ `no cursor`
+
+`show`, `use` และ `it` เป็น **คำสั่งเฉพาะ shell** ไม่ใช่ JavaScript: ใช้ได้ที่ prompt แต่ไม่ใช่ในสคริปต์ สตริง `--eval` หรือ driver ทุกตัวมีคำเทียบเป็น JavaScript ธรรมดาที่ใช้ได้ทุกที่ และ fence นี้พิสูจน์ให้เห็น (มัน seed สมาชิก `library` ของตัวเองก่อน):
 
 ```js
-use library
+// mongosh/shell-equivalents.js
+db.members.insertMany(Array.from({ length: 25 }, (_, i) => ({ name: `Member ${i + 1}`, joined: 2020 + (i % 6), fines: i % 4 })));
+
+const lib = db.getSiblingDB("library_demo");          // like `use library_demo`
+lib.members.insertOne({ name: "Grace" });
+const names = db.getMongo().getDBNames();             // like `show dbs`
+console.log(names.includes("library_demo"));          // true: created by the first write
+
+const cursor = db.members.find({}, { _id: 0, name: 1 });
+console.log(cursor.next(), cursor.hasNext());         // like `it`, one document at a time
+console.log(db.members.find().toArray().length);      // or drain the whole cursor
+console.log(config.get("displayBatchSize"));          // the interactive page size
+
+assert.strictEqual(db.members.find().toArray().length, 25);
+assert.strictEqual(config.get("displayBatchSize"), 20);
+db.getSiblingDB("library_demo").dropDatabase();
 ```
 
-ตอนนี้ `db` อ้างถึง database `library` การอ่าน document ออกจาก collection คือ `db.<collection>.find()`:
+```text
+true
+{ name: 'Member 1' } true
+25
+20
+```
+
+### รัน mongosh โดยไม่ต้องพิมพ์: `--eval` และ `--file`
+
+สำหรับสคริปต์และ cron job คุณไม่ได้นั่งอยู่หน้า prompt `--eval` รันหนึ่ง expression, `--file` รันสคริปต์ และ `--quiet` ปิด banner ทั้งหมดนี้รันกับ container ชั่วคราว (พร้อม credentials ดูหัวข้อถัดไป):
+
+```bash
+# scripts/mongosh-eval-file.sh
+mongosh --quiet "mongodb://root:secret@localhost:27017/library?authSource=admin" \
+  --eval 'db.members.countDocuments({ fines: { $gt: 1 } })'
+
+mongosh --quiet "mongodb://root:secret@localhost:27017" --file report.js
+```
+
+```text
+12
+1 of 2 members owe fines
+```
+
+โดย `report.js` เป็นสคริปต์ธรรมดา — สังเกต `console.log` ไม่ใช่ `show`:
 
 ```js
-db.members.find()
+// mongosh/report.js
+const library = db.getSiblingDB("report_demo");
+library.members.insertMany([{ name: "Ada", fines: 0 }, { name: "Alan", fines: 3 }]);
+const total = library.members.countDocuments();
+const owing = library.members.countDocuments({ fines: { $gt: 0 } });
+console.log(`${owing} of ${total} members owe fines`);
+assert.strictEqual(owing, 1);
+library.dropDatabase();
 ```
-
-เมื่อ query คืน document มากกว่าที่จะพอบนหน้าจอ mongosh แสดง batch แรกและพิมพ์ `Type "it" for more` การพิมพ์ `it` ดึง batch ถัดมา — `it` ย่อมาจาก **iterate**:
-
-```js
-it
-```
-
-นั่นคือลูปหลัก: `show dbs` เพื่อดูว่ามีอะไรอยู่, `use` เพื่อเลือก database, `db.coll.find()` เพื่ออ่าน, และ `it` เพื่อแบ่งหน้าผ่านผลลัพธ์
 
 ## ทัวร์ Compass
 
-**MongoDB Compass** เป็น desktop GUI ทางการ และเป็นวิธีที่เป็นมิตรที่สุดในการสำรวจข้อมูลที่คุณยังไม่คุ้น คุณเชื่อมต่อโดยวาง connection string ลงในกล่องบนหน้าจอเริ่มต้น — สำหรับการตั้งค่า Docker บนเครื่องนั่นคืออะไรประมาณ `mongodb://localhost:27017` หรือ `mongodb://root:secret@localhost:27017` ถ้าคุณเปิดใช้ authentication — แล้วคลิก **Connect**
+**MongoDB Compass** คือ desktop GUI ทางการ และเป็นวิธีที่เป็นมิตรที่สุดในการสำรวจข้อมูลที่คุณยังไม่เข้าใจ คุณเชื่อมต่อโดยวาง connection string ลงในช่องบนหน้าจอเริ่มต้นแล้วกด **Connect** Compass ยังฝัง MongoDB shell ไว้ด้วย
 
-เมื่อเชื่อมต่อแล้ว แถบด้านข้างซ้ายแสดงรายการ **database** ของคุณ กางอันไหนออกก็จะเห็นรายการ **collection** ข้างใน คลิก collection แล้วจะเปิดขึ้นมา และตามด้านบนคุณจะได้แถวของ tab ที่ map เข้ากับสิ่งต่าง ๆ ที่คุณจะเรียนในคอร์สนี้:
+เมื่อเชื่อมต่อแล้ว sidebar จะแสดง **database** และ **collection** ของคุณ เอกสารของ Compass ([mongodb.com/docs/compass](https://www.mongodb.com/docs/compass/current/), เรียกอ่านเมื่อ 2026-09-30) ระบุ tab เหล่านี้สำหรับ collection:
 
-- tab **Documents** แสดง document จริง คุณเลื่อนดูได้ แก้ field ด้วยการดับเบิลคลิกที่ค่า และเพิ่ม document ใหม่ด้วยปุ่ม **ADD DATA** สีเขียวที่มุมขวาบน
-- tab **Schema** สุ่มตัวอย่าง collection และวาดภาพว่ามี field ใดอยู่บ้างและเก็บ type อะไร — เป็นวิธีที่รวดเร็วในการเข้าใจ collection ที่ไม่คุ้นเคยโดยไม่ต้องอ่านทุก document
-- tab **Aggregations** เป็นตัวสร้าง pipeline แบบ visual คุณเพิ่ม stage ทีละอันและเฝ้าดู document แปลงร่าง ซึ่งทำให้โมดูล aggregation ตามได้ง่ายขึ้นมาก
-- **Explain Plan** (มีให้เมื่อคุณรัน query) บอกว่า MongoDB รัน query นั้นอย่างไร ใช้ index หรือสแกนทั้งก้อน ที่เป็นหัวใจของโมดูล index
+- **Documents** — insert, เรียกดู และ query document; แก้ field ในที่ได้
+- **Aggregations** — pipeline builder แบบภาพ: เพิ่ม stage ทีละอัน แล้วดู document เปลี่ยนรูป (โมดูล aggregation พึ่งพามัน)
+- **Schema** — สุ่มตัวอย่าง collection แล้วแสดงว่ามี field ใดและเก็บ type อะไร
+- **Explain Plan** — MongoDB รัน query อย่างไร ใช้ index หรือสแกนทั้งหมด (หัวใจของโมดูล indexes)
+- **Indexes** — แสดง สร้าง และลบ index
+- **Validation** — กฎ schema validation
 
-Compass และ shell ส่งเสริมกัน: Compass สำหรับการดูและสำรวจ, shell สำหรับการทำซ้ำและเขียนสคริปต์ ไม่มีอันไหนแทนที่ driver ในโค้ดแอปพลิเคชันของคุณ
+Compass เป็นแอปเดสก์ท็อป เราจึงรันมันแบบอัตโนมัติเหมือนส่วนอื่นของบทนี้ไม่ได้ และหน้าตาเปลี่ยนไปตามรุ่น จึงให้เชื่อหน้าเอกสารมากกว่าภาพหน้าจอใด ๆ Compass และ shell เสริมกัน: Compass สำหรับมองและสำรวจ shell สำหรับทำซ้ำและเขียนสคริปต์ ไม่มีตัวใดแทน driver ในโค้ดแอปพลิเคชันของคุณได้
 
-## การเชื่อมต่อจากแต่ละสภาพแวดล้อม
+## เชื่อมต่อจากแต่ละสภาพแวดล้อม
 
-เมื่อถึงเวลาเขียนแอปพลิเคชัน คุณเชื่อมต่อด้วย **driver** connection string เหมือนเดิม ต่างกันแค่ API ที่ห่ออยู่รอบ ๆ นี่คือวิธีเปิดการเชื่อมต่อในทั้งห้าสภาพแวดล้อม โดย shell เริ่มจาก string ตรง ๆ ส่วน driver แต่ละตัวจะสร้าง client แล้วเช็กด้วย ping
+เมื่อถึงเวลาเขียนแอปพลิเคชัน คุณเชื่อมต่อด้วย **driver** connection string เหมือนกัน; ต่างกันแค่ API รอบ ๆ นี่คือวิธีเปิดการเชื่อมต่อในแต่ละห้าสภาพแวดล้อม **Python, Go, Rust และ Node พิมพ์ `connected` เมื่อเรารัน snippet ด้านล่างตรง ๆ กับ container `mongo:8` ธรรมดาที่พอร์ต 27017**
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
-    ```js
+    ```bash
+    # scripts/mongosh-connect.sh
     mongosh "mongodb://localhost:27017"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/connect.mjs @skip-verify ran verbatim against a throwaway mongo:8 on host port 27017
     import { MongoClient } from "mongodb";
 
     const client = new MongoClient("mongodb://localhost:27017");
@@ -109,9 +178,57 @@ Compass และ shell ส่งเสริมกัน: Compass สำหร�
   </TabItem>
 </Tabs>
 
-เมื่อ client ต่อติดแล้ว ให้ใช้ตัวเดิมซ้ำตลอดอายุของโปรแกรม การสร้าง client ใหม่ทุก request เป็นความผิดพลาดที่พบบ่อยและมีราคาแพง — client จัดการ pool ของการเชื่อมต่อที่ตั้งใจให้แชร์กัน
+(เวอร์ชันที่ใช้: PyMongo 4.18.2, Go driver v2.9.1, Rust driver 3.9.1, Node driver 7.7.0 แท็บ Python, Go และ Rust รันในโปรแกรม scratch ที่จัดหา `client`/`ctx` ให้รอบ snippet)
 
-## การเลือกเครื่องมือ
+### option ใน connection string ที่ทำให้สะดุด
+
+รูปแบบคือ `mongodb://[user:password@]host[:port][/database][?options]` มีสาม option ที่ตัดสิน "เมื่อวานยังใช้ได้" ส่วนใหญ่ เรารันแต่ละอันกับ server จริงด้วย `serverSelectionTimeoutMS` 2 วินาที:
+
+```js
+// app/connection-options.mjs @skip-verify needs a second, auth-enabled container on host port 27019
+import { MongoClient } from "mongodb";
+
+async function tryUri(label, uri) {
+  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+  try {
+    await client.connect();
+    await client.db("library").collection("members").findOne();
+    console.log(label, "-> ok");
+  } catch (e) {
+    console.log(label, "->", e.name + ":", e.message.split("\n")[0]);
+  } finally { await client.close(); }
+}
+await tryUri("no authSource   ", "mongodb://root:secret@localhost:27019/library");
+await tryUri("authSource=admin", "mongodb://root:secret@localhost:27019/library?authSource=admin");
+await tryUri("replicaSet=rs0  ", "mongodb://localhost:27117/?replicaSet=rs0");
+await tryUri("replicaSet=nope ", "mongodb://localhost:27117/?replicaSet=nope");
+await tryUri("directConnection", "mongodb://localhost:27117/?directConnection=true");
+```
+
+```text
+no authSource    -> MongoServerError: Authentication failed.
+authSource=admin -> ok
+replicaSet=rs0   -> ok
+replicaSet=nope  -> MongoServerSelectionError: Server selection timed out after 2000 ms
+directConnection -> ok
+```
+
+- **`authSource`** — root user ถูกสร้างใน database `admin` เมื่อ string ระบุ database (`/library`) และไม่มี `authSource` driver จะยืนยันตัวตน **กับ database นั้น** ซึ่งไม่มี user นั้นอยู่ credentials เดิม ได้ `Authentication failed.` จนกว่าจะเพิ่ม `?authSource=admin` ถ้าไม่มี database ใน path ค่าเริ่มต้นคือ `admin`
+- **`replicaSet`** — ต้องตรงกับชื่อจริงของ set; ชื่อผิดไม่มีวันหาสมาชิกที่ตรงกัน driver จึง timeout ด้วย server-selection error แทนที่จะบอกว่า "ชื่อผิด"
+- **`directConnection=true`** — ข้ามการ discovery แล้วคุยเฉพาะ address ที่คุณให้ (มีประโยชน์เมื่อ set ประกาศ hostname ที่เครื่องคุณเข้าไม่ถึง ดูบท Docker)
+
+## ใช้ client ร่วมกันตัวเดียว
+
+เมื่อ client เชื่อมต่อแล้ว คุณใช้มันซ้ำตลอดอายุของโปรแกรม client เป็นเจ้าของ connection pool (พร้อม connection สำหรับ monitor ไปยัง server) และถูกออกแบบมาให้ใช้ร่วมกัน เราวัดความต่างด้วย "request" ต่อเนื่อง 50 ครั้งบน server ในเครื่อง:
+
+```text
+50 requests, new client each, never closed: 203 ms, connections +100
+50 requests, one shared client:              33 ms, connections +2
+```
+
+(รันครั้งที่สอง: 162 ms เทียบ 36 ms; +100 เทียบ +2 ทั้งสองครั้ง) รั่ว connection ฝั่ง server สองตัวต่อ client และ latency มากขึ้นราวหกเท่า บน local socket ข้ามเครือข่ายที่มี TLS ช่องว่างยิ่งกว้างขึ้น
+
+## เลือกเครื่องมือ
 
 export const toolDiagram = `flowchart TD
   Q["What do you want to do"] --> S["Quick one-off command or a script"]
@@ -121,63 +238,122 @@ export const toolDiagram = `flowchart TD
   C --> CO["Compass GUI"]
   D --> DR["A driver in your language"]`
 
-<Mermaid code={toolDiagram} title="เลือก shell สำหรับเขียนสคริปต์ Compass สำหรับสำรวจ และ driver สำหรับโค้ดแอปพลิเคชัน" />
+<Mermaid code={toolDiagram} title="เลือก shell สำหรับสคริปต์ Compass สำหรับสำรวจ และ driver สำหรับโค้ดแอปพลิเคชัน" />
 
 ## เคล็ดลับและข้อควรระวัง
 
-- **รูปแบบของ connection string** คือ `mongodb://[user:password@]host:port[/database]` host และ port เป็นเพียงส่วนที่จำเป็น credential และ default database เป็น optional
-- **ใช้ shell vs Compass vs driver** ตามเจตนา: shell สำหรับคำสั่งที่เร็วและทำซ้ำได้, Compass สำหรับการสำรวจแบบ visual และการค้นพบ schema, และ driver สำหรับอะไรก็ตามที่แอปพลิเคชันของคุณทำบน production
-- **Authentication** เปลี่ยน string ไม่ใช่ workflow ถ้าคุณตั้ง root user ในบทเรียน Docker ให้ใส่ `root:secret@` ไว้ก่อน host ในทุกเครื่องมือ
-- **ใช้ client เดียวซ้ำ** driver ทั้งหมดถูกสร้างขึ้นรอบ ๆ object client ที่มีอายุยืนพร้อม connection pool ภายใน สร้างครั้งเดียวตอน start แล้วใช้ยาว
+- **รูปแบบ connection string** คือ `mongodb://[user:password@]host:port[/database][?options]` มีเพียง host เท่านั้นที่จำเป็น
+- **เลือก shell กับ Compass กับ driver** ตามเจตนา: shell สำหรับคำสั่งที่เร็วและทำซ้ำได้ Compass สำหรับการสำรวจด้วยภาพและค้นหา schema และ driver สำหรับทุกอย่างที่แอปพลิเคชันของคุณทำใน production
+- **Authentication** เปลี่ยน string ไม่ใช่ workflow ถ้าคุณตั้ง root user ในบท Docker ให้ใส่ `root:secret@` ก่อน host ในทุกเครื่องมือ และ `authSource=admin` เมื่อ path ระบุ database อื่น
+- **`show`, `use`, `it` ไม่ใช่ JavaScript** ในสคริปต์ให้ใช้ `db.getSiblingDB(...)`, `db.getMongo().getDBNames()` และเมธอดของ cursor
 
-<Callout title="หนึ่ง string สามประตู">
-shell, Compass, และทุก driver ล้วนเปิด database เดียวกันผ่าน connection string เดียวกัน เรียน string เพียงครั้งเดียวแล้วคุณก็เข้าถึง MongoDB ได้จากทุกที่
+<Callout title="หนึ่ง string, สามประตู">
+shell, Compass และ driver ทุกตัวเปิด database เดียวกันผ่าน connection string เดียวกัน เรียนรู้ string ครั้งเดียวแล้วคุณเข้าถึง MongoDB ได้จากทุกที่
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่เขียน endpoint ของ Express บน MongoDB มักจะ "ทำ handler ให้ครบในตัวเอง":
+
+<SpotTheBug lang="js" code={`// AI comment: "self-contained handler - connects, queries, done"
+app.get("/members/:name", async (req, res) => {
+  const client = new MongoClient(process.env.MONGO_URL);
+  const member = await client.db("library").collection("members").findOne({ name: req.params.name });
+  res.json(member);
+});`}>
+
+ทุก request สร้าง client **ใหม่** เชื่อมต่อ และไม่เคยปิด เรารัน loop นี้ 50 ครั้งกับ server ในเครื่อง: ใช้เวลา 203 ms (162 ms ในการรันครั้งที่สอง) เทียบกับ 33 ms สำหรับ client ร่วมตัวเดียว และจำนวน connection ของ server เพิ่มขึ้น **100** สองตัวต่อ client ที่ถูกทิ้ง (หนึ่งสำหรับ pool และหนึ่งสำหรับ monitor) ภายใต้ traffic จริง จำนวน connection จะไต่ขึ้นจนถึงขีดจำกัดของ server หรือ OS แล้ว request เริ่มล้มเหลว วิธีแก้คือ client ตัวเดียวที่สร้างครั้งเดียวตอนเริ่มระบบและใช้ซ้ำ (และปิดตอน shutdown):
+
+```js
+// app/shared-client.mjs
+// One client for the whole process: this is what the prelude's `client` is.
+const members = client.db("library").collection("members");
+await members.insertOne({ name: "Grace" });
+const member = await members.findOne({ name: "Grace" });   // called per request, same pool
+if (member?.name !== "Grace") throw new Error("expected Grace");
+console.log(member.name);
+```
+
+```text
+Grace
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+connection string คือ **ที่อยู่พร้อมคำสั่ง**: ไปเคาะที่ไหน (`host:port`) คุณคือใคร (`user:password`) บัญชีของคุณอยู่ที่ไหน (`authSource`) และคาดหวัง topology แบบไหน (`replicaSet`, `directConnection`) shell, Compass และ driver คือสาม front end ของประตูเดียวกัน object เดียวที่มี state คือ **client** — pool ของ connection อายุยาว — และนั่นคือเหตุผลที่สร้างมันครั้งเดียว
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| mongosh | เขียนสคริปต์และทำงานซ้ำ ๆ ได้เร็ว รันผ่าน SSH บน server ที่ไม่มี GUI ได้ และ automate เป็นไฟล์ `.js` ได้ | ต้องจำ syntax คำสั่งและชื่อ field เอง ไม่มีภาพช่วยตอนสำรวจข้อมูลที่ไม่คุ้นเคย |
-| Compass (GUI) | เห็นภาพ schema และ document จริงได้ทันที สร้าง aggregation pipeline แบบลากวางทีละ stage ทำให้เข้าใจข้อมูลใหม่ได้เร็ว | ต้องมีหน้าจอ ใช้ผ่าน SSH หรือ automate ในสคริปต์ไม่ได้ และเปิดแอปหนักกว่าการพิมพ์คำสั่งเดียวใน terminal |
+| mongosh | เขียนสคริปต์และทำซ้ำได้เร็ว รันผ่าน SSH บน server ที่ไม่มี GUI ได้ `--eval` / `--file` เหมาะกับ cron และ CI | ต้องจำไวยากรณ์คำสั่งและชื่อ field เอง; `show`/`use`/`it` ใช้นอก prompt ไม่ได้ |
+| Compass (GUI) | เห็น schema และ document จริงทันที สร้าง aggregation pipeline ทีละ stage เข้าใจข้อมูลใหม่เร็วขึ้น | ต้องมีหน้าจอ — ใช้ผ่าน SSH หรือทำอัตโนมัติไม่ได้ — และหนักกว่าคำสั่ง terminal เดียว |
+| driver client ร่วมตัวเดียว | 33 ms เทียบ 203 ms สำหรับ 50 request, +2 connection เทียบ +100 (วัดด้านบน) | ต้องจัดการ lifecycle ของมัน (สร้างตอนเริ่ม ปิดตอน shutdown) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ Compass เป็นเครื่องมือ automate งานประจำ** — Compass ออกแบบมาให้คลิกสำรวจ ไม่ใช่รันซ้ำเป็น pipeline อัตโนมัติ งานที่ต้องรันซ้ำทุกวันควรเป็นสคริปต์ mongosh หรือ driver แทน
-- **สร้าง client ใหม่ในโค้ดแอปพลิเคชันทุก request** — driver ตั้งใจให้สร้าง client อายุยืนแค่ครั้งเดียวแล้วใช้ connection pool ซ้ำ การสร้างใหม่ทุก request เปิด/ปิด connection โดยไม่จำเป็นและทำให้ช้าลงมาก
-- **คิดว่า mongosh กับ driver ใช้ syntax เดียวกัน 100%** — mongosh เป็น JavaScript shell ที่มี helper เฉพาะตัวอย่าง `use`, `show dbs`, `it` ซึ่งไม่มีใน driver จริง driver แต่ละภาษาต้องเรียก method ที่ตรงกับ API ของตัวเอง ไม่ใช่ copy คำสั่ง shell ไปวางตรง ๆ
+- **"Compass เป็นเครื่องมือที่ดีสำหรับทำงานประจำแบบอัตโนมัติ"** — มันสร้างมาเพื่อคลิกสำรวจ งานที่รันทุกวันควรเป็นสคริปต์ mongosh `--file` หรือโค้ด driver
+- **"client ใหม่ต่อ request ก็ได้ เพราะ driver มี pool อยู่แล้ว"** — pool อยู่ใน client; client ใหม่คือ pool ใหม่ วัดได้: `connections +100` สำหรับ 50 request
+- **"mongosh กับ driver ใช้ไวยากรณ์เหมือนกันทุกประการ"** — `use`, `show dbs`, `it` มีเฉพาะที่ prompt ของ shell driver ใช้ API ของตัวเอง
+- **"credentials เดียวกัน connection string แบบไหนก็ใช้ได้"** — ถ้าไม่มี `authSource=admin` string ด้านบนล้มเหลวด้วย `Authentication failed.`
+- **"ชื่อ `replicaSet` ผิดจะได้ error ที่ชัดเจน"** — ได้เป็น timeout ของ server-selection 2 วินาที
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ทีม on-call / SRE** — ต่อเข้า server production ผ่าน SSH แล้วใช้ mongosh รัน query ตรวจสอบสถานะเร็ว ๆ เพราะไม่มี GUI ให้ใช้และต้องการความเร็วตอนแก้ปัญหากลางดึก
->
-> **ทีม data / analyst** — ใช้ Compass เปิดดู collection ที่ไม่คุ้นเคยก่อน แล้วใช้ตัวสร้าง aggregation pipeline แบบ visual ประกอบ stage ทีละอันจนได้ pipeline ที่ถูกต้อง ก่อนค่อยคัดลอกไปฝังในโค้ดจริง
+> ตัว driver เองฝังกฎนี้ไว้: `MongoClient` ที่สร้างโดยไม่มี option รายงาน `maxPoolSize` 100 และ `minPoolSize` 0 (Node driver 7.7.0, `client.options`) เป็น pool ขนาดต่อ process — ไม่ใช่ต่อ request
 
 export const quizShell = [
   {
-    q: 'ใน mongosh พิมพ์ "it" ต่อจาก find() แล้วเกิดอะไรขึ้น?',
+    q: 'ใน mongosh การพิมพ์ "it" หลัง find() ทำอะไร?',
     options: [
-      'แทรก document ทดสอบ',
-      'iterate — ดึง batch ถัดไปของผลลัพธ์',
-      'สลับไปยัง database อื่น',
-      'ทำซ้ำคำสั่งล่าสุด',
+      'insert document ทดสอบ',
+      'iterate — ดึง batch ผลลัพธ์ถัดไป',
+      'สลับไปใช้ database อื่น',
+      'ทำคำสั่งล่าสุดซ้ำ',
     ],
     answer: 1,
+    explain: 'shell พิมพ์ 20 document ต่อ batch; `it` ดึง batch ถัดไป และตอบ "no cursor" เมื่อไม่เหลืออะไร',
   },
   {
-    q: 'แท็บไหนใน Compass ที่สุ่มตัวอย่าง collection แล้วบอกว่ามี field และ type อะไรบ้าง?',
+    q: 'tab ใดของ Compass สุ่มตัวอย่าง collection และแสดงว่ามี field และ type อะไรบ้าง?',
     options: ['Documents', 'Schema', 'Explain Plan', 'Indexes'],
     answer: 1,
+    explain: 'tab Schema สุ่มตัวอย่าง collection; Explain Plan แสดงว่า query รันอย่างไร และ Indexes จัดการ index',
   },
   {
-    q: 'client object ของ driver ควรมี lifecycle แบบไหน?',
+    q: 'lifecycle ที่แนะนำสำหรับ object client ของ driver คืออะไร?',
     options: [
-      'สร้าง client ใหม่สำหรับทุก request',
-      'สร้าง client อายุยืนอันเดียวตอนเริ่มต้นและใช้ซ้ำ',
+      'สร้าง client ใหม่ทุก request',
+      'สร้าง client อายุยาวตัวเดียวตอนเริ่มและใช้ซ้ำ',
       'สร้าง client เฉพาะเมื่อเกิด error',
-      'อย่าสร้าง client เลย ให้ shell จัดการ',
+      'ไม่ต้องสร้าง client เลย shell จัดการให้',
     ],
     answer: 1,
+    explain: 'วัดได้: 50 request ใช้ 203 ms และทิ้ง +100 connection เมื่อสร้าง client ใหม่ทุกครั้ง เทียบ 33 ms และ +2 กับ client ร่วมตัวเดียว',
+  },
+  {
+    q: 'root user ถูกสร้างใน `admin` string นี้ล้มเหลวด้วย "Authentication failed." แม้รหัสผ่านถูก: `mongodb://root:secret@localhost:27017/library` เพราะอะไร?',
+    options: [
+      'รหัสผ่านต้อง URL-encode',
+      'เมื่อมี database ใน path และไม่มี authSource driver จะยืนยันตัวตนกับ database นั้น ไม่ใช่ admin',
+      'library ยังไม่มีอยู่',
+      'mongosh ใช้ connection string ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'เพิ่ม ?authSource=admin แล้ว credentials เดิมใช้ได้; database ใน path เพียงเปลี่ยน auth database เริ่มต้น',
+  },
+  {
+    q: 'ข้อใดใช้ได้ภายในสคริปต์ mongosh --file?',
+    options: [
+      'show dbs',
+      'use library',
+      'db.getSiblingDB("library")',
+      'it',
+    ],
+    answer: 2,
+    explain: '`show`, `use` และ `it` เป็นคำสั่งเฉพาะ prompt; db.getSiblingDB() เป็น JavaScript ธรรมดาที่ใช้ได้ในสคริปต์ --eval และ driver',
   },
 ]
 

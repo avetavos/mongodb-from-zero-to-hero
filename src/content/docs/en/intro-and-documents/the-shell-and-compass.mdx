@@ -1,6 +1,6 @@
 ---
 title: The shell and Compass
-description: mongosh basics, a tour of the Compass GUI, and how to connect to MongoDB from each of the five environments.
+description: mongosh basics (interactive, --eval, --file), a tour of the Compass GUI, and how to connect from each of the five environments - with a real look at connection-string options and why one shared client matters.
 sidebar:
   order: 4
 ---
@@ -9,65 +9,134 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 There are three ways you will talk to MongoDB: the **mongosh** shell for quick, scriptable commands; **MongoDB Compass**, the official graphical client, for clicking around and exploring; and a **driver** in your application's language for the real work. This lesson covers all three, ending with how to open a connection from each of the five environments this course uses.
 
-Every one of them connects with the same kind of address — a **connection string** — so once you understand that, switching between tools is trivial.
+Every one of them connects with the same kind of address - a **connection string** - so once you understand that, switching between tools is trivial. Everything below was run on mongo 8.3.11 with mongosh 2.11.1 and Node driver 7.7.0 on one Mac; the interactive transcript comes from a throwaway `mongo:8` container with a `library` database holding 25 members.
 
 ## mongosh basics
 
-`mongosh` is an interactive JavaScript shell. You type a command, it runs against the server, and it prints the result. A handful of commands cover almost everything you do day to day:
+`mongosh` is an interactive JavaScript shell. You type a command, it runs against the server, and it prints the result. Here is a real session (the `test>` / `library>` prompts are the shell's own; lines you type follow them):
 
-```js
-show dbs
+```text
+test> show dbs
+admin    100.00 KiB
+config    12.00 KiB
+library    8.00 KiB
+local     40.00 KiB
+test> use library
+switched to db library
+library> db.members.find({}, { _id: 0, name: 1 })
+[
+  { name: 'Member 1' },  { name: 'Member 2' },
+  ...
+  { name: 'Member 19' }, { name: 'Member 20' }
+]
+Type "it" for more
+library> it
+[
+  { name: 'Member 21' },
+  { name: 'Member 22' },
+  { name: 'Member 23' },
+  { name: 'Member 24' },
+  { name: 'Member 25' }
+]
+library> it
+no cursor
 ```
 
-`show dbs` lists the databases on the server. To start working inside one — say a `library` database — you `use` it. The database does not need to exist yet; MongoDB creates it the moment you write the first document into it:
+- `show dbs` lists the databases; `use library` selects one (it need not exist yet - MongoDB creates it at the first write); `db.members.find()` reads.
+- The shell prints **20 documents** per batch (`config.get("displayBatchSize")` returned `20`), then `Type "it" for more`. `it` stands for **iterate**, and once the cursor is exhausted it answers `no cursor`.
+
+`show`, `use` and `it` are **shell-only commands**, not JavaScript: they work at the prompt but not inside a script, an `--eval` string, or a driver. Every one has a plain-JavaScript equivalent that does work everywhere, and this fence proves it (it seeds its own `library` members first):
 
 ```js
-use library
+// mongosh/shell-equivalents.js
+db.members.insertMany(Array.from({ length: 25 }, (_, i) => ({ name: `Member ${i + 1}`, joined: 2020 + (i % 6), fines: i % 4 })));
+
+const lib = db.getSiblingDB("library_demo");          // like `use library_demo`
+lib.members.insertOne({ name: "Grace" });
+const names = db.getMongo().getDBNames();             // like `show dbs`
+console.log(names.includes("library_demo"));          // true: created by the first write
+
+const cursor = db.members.find({}, { _id: 0, name: 1 });
+console.log(cursor.next(), cursor.hasNext());         // like `it`, one document at a time
+console.log(db.members.find().toArray().length);      // or drain the whole cursor
+console.log(config.get("displayBatchSize"));          // the interactive page size
+
+assert.strictEqual(db.members.find().toArray().length, 25);
+assert.strictEqual(config.get("displayBatchSize"), 20);
+db.getSiblingDB("library_demo").dropDatabase();
 ```
 
-Now `db` refers to the `library` database. Reading documents out of a collection is `db.<collection>.find()`:
+```text
+true
+{ name: 'Member 1' } true
+25
+20
+```
+
+### Running mongosh without typing: `--eval` and `--file`
+
+For scripts and cron jobs you do not sit at a prompt. `--eval` runs one expression, `--file` runs a script, and `--quiet` suppresses the banner. These ran against the throwaway container (with credentials, see the next section):
+
+```bash
+# scripts/mongosh-eval-file.sh
+mongosh --quiet "mongodb://root:secret@localhost:27017/library?authSource=admin" \
+  --eval 'db.members.countDocuments({ fines: { $gt: 1 } })'
+
+mongosh --quiet "mongodb://root:secret@localhost:27017" --file report.js
+```
+
+```text
+12
+1 of 2 members owe fines
+```
+
+where `report.js` is an ordinary script - note `console.log`, not `show`:
 
 ```js
-db.members.find()
+// mongosh/report.js
+const library = db.getSiblingDB("report_demo");
+library.members.insertMany([{ name: "Ada", fines: 0 }, { name: "Alan", fines: 3 }]);
+const total = library.members.countDocuments();
+const owing = library.members.countDocuments({ fines: { $gt: 0 } });
+console.log(`${owing} of ${total} members owe fines`);
+assert.strictEqual(owing, 1);
+library.dropDatabase();
 ```
-
-When a query returns more documents than fit on screen, mongosh shows the first batch and prints `Type "it" for more`. Typing `it` fetches the next batch — `it` stands for **iterate**:
-
-```js
-it
-```
-
-That is the core loop: `show dbs` to see what is there, `use` to pick a database, `db.coll.find()` to read, and `it` to page through results.
 
 ## A tour of Compass
 
-**MongoDB Compass** is the official desktop GUI, and it is the friendliest way to explore data you do not yet understand. You connect by pasting a connection string into the box on the start screen — for a local Docker setup that is something like `mongodb://localhost:27017`, or `mongodb://root:secret@localhost:27017` if you enabled authentication — and clicking **Connect**.
+**MongoDB Compass** is the official desktop GUI, and it is the friendliest way to explore data you do not yet understand. You connect by pasting a connection string into the box on the start screen and clicking **Connect**. Compass also embeds a MongoDB shell.
 
-Once connected, the left sidebar lists your **databases**, and expanding one lists its **collections**. Clicking a collection opens it, and across the top you get a row of tabs that map onto the things you will learn in this course:
+Once connected, the sidebar lists your **databases** and **collections**. The Compass documentation ([mongodb.com/docs/compass](https://www.mongodb.com/docs/compass/current/), fetched 2026-09-30) names these tabs for a collection:
 
-- The **Documents** tab shows the actual documents. You can scroll them, edit a field by double-clicking its value, and add a new document with the green **ADD DATA** button in the top right.
-- The **Schema** tab samples the collection and draws a picture of which fields exist and what types they hold — a quick way to understand an unfamiliar collection without reading every document.
-- The **Aggregations** tab is a visual pipeline builder. You add stages one at a time and watch the documents transform, which makes the aggregation module much easier to follow.
-- The **Explain Plan** (available when you run a query) shows how MongoDB executed it — whether it used an index or scanned everything — which is the heart of the indexes module.
+- **Documents** - insert, browse and query documents; edit a field in place.
+- **Aggregations** - a visual pipeline builder: add stages one at a time and watch the documents transform (the aggregation module leans on it).
+- **Schema** - samples the collection and shows which fields exist and what types they hold.
+- **Explain Plan** - how MongoDB executed a query, index or full scan (the heart of the indexes module).
+- **Indexes** - list, create and drop indexes.
+- **Validation** - schema validation rules.
 
-Compass and the shell are complementary: Compass for seeing and exploring, the shell for repeating and scripting. Neither replaces a driver in your application code.
+Compass is a desktop app, so we could not run it in the same automated way as the rest of this lesson; its layout changes between releases, so trust the docs page over any screenshot. Compass and the shell are complementary: Compass for seeing and exploring, the shell for repeating and scripting. Neither replaces a driver in your application code.
 
 ## Connecting from each environment
 
-When it is time to write an application, you connect with a **driver**. The connection string is the same; only the API around it differs. Here is how to open a connection in each of the five environments — the shell simply starts with the string, while each driver creates a client and verifies it with a ping.
+When it is time to write an application, you connect with a **driver**. The connection string is the same; only the API around it differs. Here is how to open a connection in each of the five environments. **Python, Go, Rust and Node each printed `connected` when we ran the snippets below verbatim against a plain `mongo:8` container on port 27017.**
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
-    ```js
+    ```bash
+    # scripts/mongosh-connect.sh
     mongosh "mongodb://localhost:27017"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/connect.mjs @skip-verify ran verbatim against a throwaway mongo:8 on host port 27017
     import { MongoClient } from "mongodb";
 
     const client = new MongoClient("mongodb://localhost:27017");
@@ -109,7 +178,55 @@ When it is time to write an application, you connect with a **driver**. The conn
   </TabItem>
 </Tabs>
 
-Once a client is connected, you reuse it for the whole life of your program. Creating a fresh client per request is a common and costly mistake — the client manages a pool of connections that is meant to be shared.
+(Versions used: PyMongo 4.18.2, Go driver v2.9.1, Rust driver 3.9.1, Node driver 7.7.0. The Python, Go and Rust tabs were run in scratch programs that supply `client`/`ctx` around the snippet.)
+
+### Connection-string options that bite
+
+The format is `mongodb://[user:password@]host[:port][/database][?options]`. Three options decide most "it worked yesterday" problems. We ran each against a real server with a 2 second `serverSelectionTimeoutMS`:
+
+```js
+// app/connection-options.mjs @skip-verify needs a second, auth-enabled container on host port 27019
+import { MongoClient } from "mongodb";
+
+async function tryUri(label, uri) {
+  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+  try {
+    await client.connect();
+    await client.db("library").collection("members").findOne();
+    console.log(label, "-> ok");
+  } catch (e) {
+    console.log(label, "->", e.name + ":", e.message.split("\n")[0]);
+  } finally { await client.close(); }
+}
+await tryUri("no authSource   ", "mongodb://root:secret@localhost:27019/library");
+await tryUri("authSource=admin", "mongodb://root:secret@localhost:27019/library?authSource=admin");
+await tryUri("replicaSet=rs0  ", "mongodb://localhost:27117/?replicaSet=rs0");
+await tryUri("replicaSet=nope ", "mongodb://localhost:27117/?replicaSet=nope");
+await tryUri("directConnection", "mongodb://localhost:27117/?directConnection=true");
+```
+
+```text
+no authSource    -> MongoServerError: Authentication failed.
+authSource=admin -> ok
+replicaSet=rs0   -> ok
+replicaSet=nope  -> MongoServerSelectionError: Server selection timed out after 2000 ms
+directConnection -> ok
+```
+
+- **`authSource`** - the root user was created in the `admin` database. When the string names a database (`/library`) and no `authSource`, the driver authenticates **against that database**, where the user does not exist. Same credentials, `Authentication failed.` until you add `?authSource=admin`. With no database in the path the default is `admin`.
+- **`replicaSet`** - must match the set's real name; a wrong name never finds a matching member, so the driver times out with a server-selection error rather than "wrong name".
+- **`directConnection=true`** - skip discovery and talk only to the address you gave (useful when the set advertises a hostname your machine cannot reach, see the Docker lesson).
+
+## Reuse one client
+
+Once a client is connected, you reuse it for the whole life of your program. A client owns a connection pool (plus monitoring connections to the server) and is meant to be shared. We measured the difference with 50 sequential "requests" on a local server:
+
+```text
+50 requests, new client each, never closed: 203 ms, connections +100
+50 requests, one shared client:              33 ms, connections +2
+```
+
+(Second run: 162 ms vs 36 ms; +100 vs +2 both times.) Two server connections per client leaked, and about six times the latency, on a local socket. Across a network with TLS the gap only widens.
 
 ## Choosing a tool
 
@@ -125,49 +242,85 @@ export const toolDiagram = `flowchart TD
 
 ## Tips and gotchas
 
-- **The connection string format** is `mongodb://[user:password@]host:port[/database]`. The host and port are the only required parts; credentials and a default database are optional.
+- **The connection string format** is `mongodb://[user:password@]host:port[/database][?options]`. The host is the only required part.
 - **Use the shell vs Compass vs a driver** by intent: the shell for fast and repeatable commands, Compass for visual exploration and schema discovery, and a driver for anything your application does in production.
-- **Authentication** changes the string, not the workflow. If you set a root user in the Docker lesson, include `root:secret@` before the host in every tool.
-- **Reuse one client.** All the drivers are built around a long-lived client object with an internal connection pool. Create it once at startup.
+- **Authentication** changes the string, not the workflow. If you set a root user in the Docker lesson, include `root:secret@` before the host in every tool, and `authSource=admin` when the path names another database.
+- **`show`, `use`, `it` are not JavaScript.** Inside a script use `db.getSiblingDB(...)`, `db.getMongo().getDBNames()` and cursor methods.
 
 <Callout title="One string, three doors">
 The shell, Compass, and every driver all open the same database through the same connection string. Learn the string once and you can reach MongoDB from anywhere.
 </Callout>
 
+## Reading AI-generated code
+
+An assistant writing an Express endpoint on top of MongoDB will often "keep the handler self-contained":
+
+<SpotTheBug lang="js" code={`// AI comment: "self-contained handler - connects, queries, done"
+app.get("/members/:name", async (req, res) => {
+  const client = new MongoClient(process.env.MONGO_URL);
+  const member = await client.db("library").collection("members").findOne({ name: req.params.name });
+  res.json(member);
+});`}>
+
+Every request builds a **new** client, connects it, and never closes it. We ran exactly that loop 50 times against a local server: it took 203 ms (162 ms on a second run) against 33 ms for one shared client, and the server's connection count went up by **100**, two per abandoned client (a connection for the pool and one for monitoring). Under real traffic the connection count climbs until the server's or OS's limit is hit and requests start failing. The fix is a single client created once at startup and reused (and closed on shutdown):
+
+```js
+// app/shared-client.mjs
+// One client for the whole process: this is what the prelude's `client` is.
+const members = client.db("library").collection("members");
+await members.insertOne({ name: "Grace" });
+const member = await members.findOne({ name: "Grace" });   // called per request, same pool
+if (member?.name !== "Grace") throw new Error("expected Grace");
+console.log(member.name);
+```
+
+```text
+Grace
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A connection string is an **address plus instructions**: where to knock (`host:port`), who you are (`user:password`), where your account lives (`authSource`), and what topology to expect (`replicaSet`, `directConnection`). The shell, Compass and drivers are three front ends to the same door. The only stateful object is the **client** - a pool of long-lived connections - and that is why it is created once.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| mongosh | Fast to script and repeat, runs over SSH on a server with no GUI, and can be automated as a `.js` file | You need to remember command syntax and field names yourself, with no visual aid while exploring unfamiliar data |
-| Compass (GUI) | Instantly see the schema and real documents, build an aggregation pipeline stage by stage by dragging and dropping, and understand new data faster | Needs a screen — cannot be used over SSH or automated in a script — and opening the app is heavier than typing one command in a terminal |
+| mongosh | Fast to script and repeat, runs over SSH on a server with no GUI, `--eval` / `--file` fit cron and CI | You need to remember command syntax and field names yourself; `show`/`use`/`it` do not work outside the prompt |
+| Compass (GUI) | Instantly see the schema and real documents, build an aggregation pipeline stage by stage, understand new data faster | Needs a screen - cannot be used over SSH or automated - and is heavier than one terminal command |
+| One shared driver client | 33 ms vs 203 ms for 50 requests, +2 connections vs +100 (measured above) | You must manage its lifecycle (create at startup, close on shutdown) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using Compass as a tool to automate routine jobs** — Compass is designed for click-to-explore, not for running repeatedly as an automated pipeline. Work that must run every day should be a mongosh script or driver code instead.
-- **Creating a new client in application code on every request** — drivers are meant to have one long-lived client created once, reusing its connection pool. Creating a new one per request opens and closes connections needlessly and slows everything down a lot.
-- **Assuming mongosh and a driver share 100% identical syntax** — mongosh is a JavaScript shell with its own helpers like `use`, `show dbs`, and `it`, none of which exist in a real driver. Each language driver calls methods matching its own API — you cannot copy-paste shell commands directly.
+- **"Compass is a good tool to automate routine jobs."** - It is built for click-to-explore. Work that runs every day should be a mongosh `--file` script or driver code.
+- **"A new client per request is fine, the driver pools anyway."** - The pool lives inside the client; a new client is a new pool. Measured: `connections +100` for 50 requests.
+- **"mongosh and a driver share identical syntax."** - `use`, `show dbs`, `it` exist only at the shell prompt. The drivers use their own APIs.
+- **"Same credentials, so any connection string works."** - without `authSource=admin` the string above failed with `Authentication failed.`
+- **"A wrong `replicaSet` name gives a clear error."** - it gives a 2 second server-selection timeout.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **On-call / SRE teams** — connect to a production server over SSH and use mongosh to run quick status-checking queries, because there is no GUI available and speed matters when troubleshooting in the middle of the night.
->
-> **Data / analyst teams** — use Compass to browse an unfamiliar collection first, then use the visual aggregation pipeline builder to assemble stages one at a time until the pipeline is correct, before copying it into real code.
+> The driver itself encodes this rule: a `MongoClient` created with no options reports `maxPoolSize` 100 and `minPoolSize` 0 (Node driver 7.7.0, `client.options`), a pool sized per process - not per request.
 
 export const quizShell = [
   {
     q: 'In mongosh, what does typing "it" do after a find()?',
     options: [
       'Inserts a test document',
-      'Iterates — fetches the next batch of results',
+      'Iterates - fetches the next batch of results',
       'Switches to a different database',
       'Repeats the last command',
     ],
     answer: 1,
+    explain: 'The shell prints 20 documents per batch; `it` fetches the next batch and answers "no cursor" when nothing is left.',
   },
   {
     q: 'Which Compass tab samples a collection and shows which fields and types exist?',
     options: ['Documents', 'Schema', 'Explain Plan', 'Indexes'],
     answer: 1,
+    explain: 'The Schema tab samples the collection; Explain Plan shows how a query ran, and Indexes manages indexes.',
   },
   {
     q: 'What is the recommended lifecycle for a driver client object?',
@@ -178,6 +331,29 @@ export const quizShell = [
       'Never create a client; the shell handles it',
     ],
     answer: 1,
+    explain: 'Measured: 50 requests took 203 ms and left +100 connections with a new client each, versus 33 ms and +2 with one shared client.',
+  },
+  {
+    q: 'The root user was created in `admin`. This string fails with "Authentication failed." although the password is right: `mongodb://root:secret@localhost:27017/library`. Why?',
+    options: [
+      'The password must be URL-encoded',
+      'With a database in the path and no authSource, the driver authenticates against that database, not admin',
+      'library does not exist yet',
+      'mongosh cannot use connection strings',
+    ],
+    answer: 1,
+    explain: 'Adding ?authSource=admin made the same credentials work; the database in the path only changes the default auth database.',
+  },
+  {
+    q: 'Which of these works inside a mongosh --file script?',
+    options: [
+      'show dbs',
+      'use library',
+      'db.getSiblingDB("library")',
+      'it',
+    ],
+    answer: 2,
+    explain: '`show`, `use` and `it` are prompt-only shell commands; db.getSiblingDB() is plain JavaScript and works in scripts, --eval and drivers.',
   },
 ]
 
