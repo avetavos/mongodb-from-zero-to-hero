@@ -119,8 +119,8 @@ function ensureContainer(refresh) {
   if (exists && refresh) { sh('docker', ['rm', '-f', V.container]); }
   if (!exists || refresh) {
     mkdirSync(LESSONS_DIR, { recursive: true });
-    const r = sh('docker', ['run', '-d', '--name', V.container, '-p', `${V.port}:${V.port}`,
-      '-v', `${LESSONS_DIR}:/lessons:ro`, V.mongoImage, 'mongod', '--port', String(V.port), '--replSet', V.replSet, '--bind_ip_all']);
+    const r = sh('docker', ['run', '-d', '--memory', '3g', '--name', V.container, '-p', `${V.port}:${V.port}`,
+      '-v', `${LESSONS_DIR}:/lessons:ro`, V.mongoImage, 'mongod', '--port', String(V.port), '--replSet', V.replSet, '--bind_ip_all', '--wiredTigerCacheSizeGB', '0.5']);
     if (r.status !== 0) throw new Error(`docker run failed: ${r.stderr}`);
   } else if (st.stdout.trim() !== 'true') {
     sh('docker', ['start', V.container]);
