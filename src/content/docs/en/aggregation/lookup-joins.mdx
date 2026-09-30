@@ -1,6 +1,6 @@
 ---
-title: $lookup — joining collections
-description: Join documents from another collection with $lookup using localField and foreignField, work with the resulting array, and use the pipeline form for richer joins.
+title: Lookup joins
+description: Join collections with $lookup - the equality and pipeline forms, why it is a left outer join, and the join strategy (IndexedLoopJoin, HashJoin, NestedLoopJoin) that explain reports, measured on 20 000 orders.
 sidebar:
   order: 4
 ---
@@ -9,29 +9,40 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-MongoDB stores related data in separate collections often enough that you will sometimes need to stitch two of them back together. The `$lookup` stage does that join inside an aggregation pipeline: for each incoming document, it finds the matching documents in another collection and attaches them as an **array** field. It is a left outer join — every input document comes through, with an empty array when nothing matches.
+MongoDB stores related data in separate collections often enough that you will sometimes need to stitch two of them back together. The `$lookup` stage does that join inside an aggregation pipeline: for each incoming document it finds matching documents in another collection and attaches them as an **array** field. The manual describes it as "a left outer join to a collection in the same database" ([$lookup](https://www.mongodb.com/docs/manual/reference/operator/aggregation/lookup/), consulted 2026-09-30): every input document comes through, with an empty array when nothing matches.
 
-We add a second collection to the shop. Alongside `sales`, there is now a `books` collection describing each title:
+Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program. The lesson seeds the module's `sales` shape (20 000 orders here, to keep a per-document join quick) plus a `books` collection keyed by title (500 books; titles T500-T519 are sold but have no book), a `booksByTitle` copy with a plain `title` field, and `lplan()`, a helper that reports how the join was executed.
 
-```json
-{ "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
+```js
+// mongosh/lk-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.lplan = (pipeline, coll = "sales") => {        // how the $lookup was executed
+  const e = db.getCollection(coll).explain("executionStats").aggregate(pipeline);
+  const q = e.queryPlanner?.winningPlan?.queryPlan;
+  if (q) { for (let p = q; p; p = p.inputStage) if (p.stage === "EQ_LOOKUP") return "EQ_LOOKUP " + p.strategy + (p.indexName ? " on " + p.indexName : "") + " | executionTimeMillis " + e.executionStats.executionTimeMillis; }
+  const l = (e.stages ?? []).find((s) => s.$lookup);
+  return l ? "$lookup (no strategy reported) | keys " + l.totalKeysExamined + ", docs " + l.totalDocsExamined + ", indexes " + JSON.stringify(l.indexesUsed) : "no lookup stage";
+};
+db.sales.insertMany(Array.from({ length: 20000 }, (_, i) => ({ title: "T" + (i % 520), genre: genres[(i % 520) % 5], quantity: 1 + (i % 5), price: 5 + (i % 21), buyer: "b" + (i % 1000) })));
+db.books.insertMany(Array.from({ length: 500 }, (_, i) => ({ _id: "T" + i, author: "A" + (i % 50), year: 1900 + (i % 120) })));   // T500..T519 have NO book
+db.booksByTitle.insertMany(Array.from({ length: 500 }, (_, i) => ({ title: "T" + i, author: "A" + (i % 50), year: 1900 + (i % 120) })));
+console.log("sales:", db.sales.countDocuments(), "| books:", db.books.countDocuments(), "(20 titles sold have no book)");
 ```
 
-A sales order references a book by its `title`:
-
-```json
-{ "_id": "a1", "title": "Dune", "quantity": 3, "price": 12 }
+```text
+sales: 20000 | books: 500 (20 titles sold have no book)
 ```
 
 ## The equality form: localField and foreignField
 
-The simplest `$lookup` matches one local field against one foreign field. You name the collection to join (`from`), the field on the incoming document (`localField`), the field on the foreign document (`foreignField`), and the name of the array field to add (`as`).
+The simplest `$lookup` matches one local field against one foreign field: `from` (the collection), `localField`, `foreignField`, and `as` (the array field to add). Below, the two orders-per-title groups are joined to their book. `T510` has no book, so its array is empty; the Node.js tab shows the same on two orders:
 
 export const joinFlow = `flowchart LR
-  S["sales: title = Dune"] --> L["$lookup from books on title"]
-  B["books: _id = Dune"] --> L
+  S["sales: title = T7"] --> L["$lookup from books on _id"]
+  B["books: _id = T7"] --> L
   L --> O["sales doc with book array attached"]`
 
 <Mermaid code={joinFlow} title="Each sales document is joined to matching books and carries them in a new array field" />
@@ -39,26 +50,29 @@ export const joinFlow = `flowchart LR
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
-      { $lookup: {
-          from: "books",
-          localField: "title",
-          foreignField: "_id",
-          as: "book"
-      } }
-    ])
+    // mongosh/lk-equality.js
+    const rows = db.sales.aggregate([
+      { $match: { title: { $in: ["T7", "T510"] } } },
+      { $group: { _id: "$title", orders: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+      { $lookup: { from: "books", localField: "_id", foreignField: "_id", as: "book" } },
+    ]).toArray();
+    console.log(rows);
+    assert.ok(rows.every((r) => Array.isArray(r.book)));
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const rows = await db.collection("sales").aggregate([
-      { $lookup: {
-          from: "books",
-          localField: "title",
-          foreignField: "_id",
-          as: "book",
-      } },
+    // app/lk-equality.mjs
+    const sales = db.collection("sales");
+    await db.collection("books").insertOne({ _id: "Dune", author: "Frank Herbert", pages: 412, year: 1965 });
+    await sales.insertMany([{ title: "Dune", quantity: 3, price: 12 }, { title: "Unknown", quantity: 1, price: 5 }]);
+    const rows = await sales.aggregate([
+      { $lookup: { from: "books", localField: "title", foreignField: "_id", as: "book" } },
+      { $project: { _id: 0, title: 1, book: 1 } },
     ]).toArray();
+    console.log(JSON.stringify(rows));
+    if (rows[0].book.length !== 1 || rows[1].book.length !== 0) throw new Error("left outer join expected");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -76,234 +90,291 @@ export const joinFlow = `flowchart LR
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$lookup", bson.D{
-            {"from", "books"},
-            {"localField", "title"},
-            {"foreignField", "_id"},
-            {"as", "book"},
+        {{Key: "$lookup", Value: bson.D{
+            {Key: "from", Value: "books"},
+            {Key: "localField", Value: "title"},
+            {Key: "foreignField", Value: "_id"},
+            {Key: "as", Value: "book"},
         }}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$lookup": {
+    let mut cursor = coll
+        .aggregate(vec![doc! { "$lookup": {
             "from": "books",
             "localField": "title",
             "foreignField": "_id",
-            "as": "book"
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    ```
-  </TabItem>
-</Tabs>
-
-Each sales document now carries a `book` array holding the matched book document:
-
-```json
-[
-  {
-    "_id": "a1",
-    "title": "Dune",
-    "quantity": 3,
-    "price": 12,
-    "book": [
-      { "_id": "Dune", "author": "Frank Herbert", "pages": 412, "year": 1965 }
-    ]
-  }
-]
-```
-
-The result is **always an array**, even when at most one document matches, because a join can in general match many. A common next step is `$unwind` (the next lesson) to flatten that one-element array into a plain object.
-
-**In Compass:** the **Aggregations** tab offers `$lookup` from a dropdown and lets you pick the foreign collection and fields with form inputs. The preview shows the new array field appended to each document, which makes the "join attaches an array" behaviour concrete.
-
-## The pipeline form for richer joins
-
-When you need more than a single-field equality — filtering the foreign documents, projecting them, or matching on several conditions — use the **pipeline form**. You declare `let` variables from the local document and run a sub-pipeline against the foreign collection, comparing with `$expr`. Here we attach only books published after 1950, exposing just author and year:
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.sales.aggregate([
-      { $lookup: {
-          from: "books",
-          let: { t: "$title" },
-          pipeline: [
-            { $match: { $expr: { $eq: ["$_id", "$$t"] } } },
-            { $match: { year: { $gt: 1950 } } },
-            { $project: { _id: 0, author: 1, year: 1 } }
-          ],
-          as: "book"
-      } }
-    ])
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const rows = await db.collection("sales").aggregate([
-      { $lookup: {
-          from: "books",
-          let: { t: "$title" },
-          pipeline: [
-            { $match: { $expr: { $eq: ["$_id", "$$t"] } } },
-            { $match: { year: { $gt: 1950 } } },
-            { $project: { _id: 0, author: 1, year: 1 } },
-          ],
-          as: "book",
-      } },
-    ]).toArray();
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    rows = list(db.sales.aggregate([
-        {"$lookup": {
-            "from": "books",
-            "let": {"t": "$title"},
-            "pipeline": [
-                {"$match": {"$expr": {"$eq": ["$_id", "$$t"]}}},
-                {"$match": {"year": {"$gt": 1950}}},
-                {"$project": {"_id": 0, "author": 1, "year": 1}},
-            ],
             "as": "book",
-        }},
-    ]))
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    pipeline := mongo.Pipeline{
-        {{"$lookup", bson.D{
-            {"from", "books"},
-            {"let", bson.D{{"t", "$title"}}},
-            {"pipeline", bson.A{
-                bson.D{{"$match", bson.D{{"$expr", bson.D{{"$eq", bson.A{"$_id", "$$t"}}}}}}},
-                bson.D{{"$match", bson.D{{"year", bson.D{{"$gt", 1950}}}}}},
-                bson.D{{"$project", bson.D{{"_id", 0}, {"author", 1}, {"year", 1}}}},
-            }},
-            {"as", "book"},
-        }}},
-    }
-    cursor, err := coll.Aggregate(ctx, pipeline)
-    if err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let pipeline = vec![
-        doc! { "$lookup": {
-            "from": "books",
-            "let": { "t": "$title" },
-            "pipeline": [
-                { "$match": { "$expr": { "$eq": ["$_id", "$$t"] } } },
-                { "$match": { "year": { "$gt": 1950 } } },
-                { "$project": { "_id": 0, "author": 1, "year": 1 } }
-            ],
-            "as": "book"
-        } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
+        } }])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-The attached array now holds only the trimmed, filtered foreign document:
-
-```json
+```text
 [
+  { _id: 'T510', orders: 38, book: [] },
   {
-    "_id": "a1",
-    "title": "Dune",
-    "quantity": 3,
-    "price": 12,
-    "book": [ { "author": "Frank Herbert", "year": 1965 } ]
+    _id: 'T7',
+    orders: 39,
+    book: [ { _id: 'T7', author: 'A7', year: 1907 } ]
   }
 ]
 ```
 
-Note the `$$t` syntax: a single `$` references a field of the foreign document, while `$$` references a `let` variable carried in from the local document.
+```text
+[{"title":"Dune","book":[{"_id":"Dune","author":"Frank Herbert","pages":412,"year":1965}]},{"title":"Unknown","book":[]}]
+```
+
+The result is **always an array**, even when at most one document matches, because a join can in general match many. If `localField` is itself an array, each element is matched against the foreign field with no `$unwind` needed ([$lookup](https://www.mongodb.com/docs/manual/reference/operator/aggregation/lookup/), consulted 2026-09-30):
+
+```js
+// mongosh/lk-array-local.js
+db.carts.insertOne({ _id: "c1", titles: ["T1", "T2", "T900"] });
+const c = db.carts.aggregate([{ $lookup: { from: "books", localField: "titles", foreignField: "_id", as: "books" } }]).toArray()[0];
+console.log("localField is an array ->", c.books.map((b) => b._id), "(T900 has no book; no $unwind needed)");
+assert.strictEqual(c.books.length, 2);
+```
+
+```text
+localField is an array -> [ 'T2', 'T1' ] (T900 has no book; no $unwind needed)
+```
+
+**In Compass:** the **Aggregations** tab offers `$lookup` from a dropdown and lets you pick the foreign collection and fields with form inputs; the preview shows the array field appended to each document.
+
+## Left outer, and how to make it inner
+
+```js
+// mongosh/lk-outer.js
+const total = db.sales.countDocuments();
+const joined = db.sales.aggregate([{ $lookup: { from: "books", localField: "title", foreignField: "_id", as: "book" } }, { $match: { book: { $size: 0 } } }, { $count: "noBook" }]).toArray()[0].noBook;
+const inner = db.sales.aggregate([{ $lookup: { from: "books", localField: "title", foreignField: "_id", as: "book" } }, { $unwind: "$book" }, { $count: "n" }]).toArray()[0].n;
+console.log({ orders: total, ordersWithNoBook: joined, afterUnwind: inner });
+assert.strictEqual(total, joined + inner);
+```
+
+```text
+{ orders: 20000, ordersWithNoBook: 760, afterUnwind: 19240 }
+```
+
+760 of the 20 000 orders reference a title with no book: they came through with `book: []`. A following `$unwind: "$book"` drops them (an inner join); `preserveNullAndEmptyArrays: true` keeps them.
+
+## The pipeline form
+
+When you need more than one equality - filtering or projecting the foreign side - use the **pipeline form**: declare `let` variables from the local document and run a sub-pipeline against the foreign collection, comparing with `$expr`. A single `$` in the sub-pipeline is a field of the *foreign* document; `$$t` is the `let` variable from the *local* one. Attaching only books published after 1950:
+
+```js
+// mongosh/lk-pipeline-form.js
+const rows = db.sales.aggregate([
+  { $match: { title: { $in: ["T7", "T60"] } } },
+  { $group: { _id: "$title" } },
+  { $sort: { _id: 1 } },
+  { $lookup: { from: "books", let: { t: "$_id" },
+      pipeline: [{ $match: { $expr: { $eq: ["$_id", "$$t"] } } }, { $match: { year: { $gt: 1950 } } }, { $project: { _id: 0, author: 1, year: 1 } }],
+      as: "book" } },
+]).toArray();
+console.log(JSON.stringify(rows));
+assert.ok(rows.every((r) => r.book.length === 0 || r.book[0].year > 1950));
+```
+
+```text
+[{"_id":"T60","book":[{"author":"A10","year":1960}]},{"_id":"T7","book":[]}]
+```
+
+## Which join did the server run?
+
+The review of the old lesson said `$lookup` has no strategy and "queries the foreign collection once per input document". Only one of those is true. `explain` reports the strategy chosen for the equality form: **IndexedLoopJoin** (an index lookup per input document), **HashJoin** (build a hash table of the foreign side once) or **NestedLoopJoin** (scan the foreign collection per input document). Same question, different foreign fields:
+
+```js
+// mongosh/lk-strategy.js
+const eq = (from, foreignField) => [{ $lookup: { from, localField: "title", foreignField, as: "book" } }];
+console.log("foreignField _id (always indexed)   :", lplan(eq("books", "_id")));
+console.log("foreignField title, NO index        :", lplan(eq("booksByTitle", "title")));
+db.booksByTitle.createIndex({ title: 1 });
+console.log("foreignField title, index title_1   :", lplan(eq("booksByTitle", "title")));
+const pipe = [{ $lookup: { from: "books", let: { t: "$title" }, pipeline: [{ $match: { $expr: { $eq: ["$_id", "$$t"] } } }], as: "book" } }];
+console.log("pipeline form ($expr on _id)        :", lplan(pipe));
+```
+
+```text
+foreignField _id (always indexed)   : EQ_LOOKUP IndexedLoopJoin on _id_ | executionTimeMillis 104
+foreignField title, NO index        : EQ_LOOKUP HashJoin | executionTimeMillis 23
+foreignField title, index title_1   : EQ_LOOKUP IndexedLoopJoin on title_1 | executionTimeMillis 107
+pipeline form ($expr on _id)        : $lookup (no strategy reported) | keys 19240, docs 19240, indexes ["_id_"]
+```
+
+- **IndexedLoopJoin** - the foreign field has an index (`_id_` is always there).
+- **HashJoin** - no index but a small foreign collection: one pass builds the hash table. Here it was faster (23 ms) than the indexed loop (107 ms).
+- **Pipeline form** - no strategy is reported; the `$lookup` stage instead lists `totalKeysExamined: 19240`, `totalDocsExamined: 19240` and `indexesUsed: ["_id_"]` - one indexed lookup per input document.
+
+### $lookup + $unwind is one stage
+
+```js
+// mongosh/lk-unwind.js
+const p = [{ $lookup: { from: "books", localField: "title", foreignField: "_id", as: "book" } }, { $unwind: "$book" }];
+const e = db.sales.explain().aggregate(p);
+const l = e.stages.find((x) => x.$lookup).$lookup;
+console.log("explain stages:", e.stages.map((x) => Object.keys(x)[0]).join(" > "), "(no separate $unwind stage)");
+console.log("$lookup.unwinding:", JSON.stringify(l.unwinding), "| strategy fields:", Object.keys(l).filter((k) => /strategy|index|unwind/i.test(k)).join(", "));
+console.log("rows with $unwind (inner join):", db.sales.aggregate([...p, { $count: "n" }]).toArray()[0].n);
+console.log("rows with preserveNullAndEmptyArrays (left join):", db.sales.aggregate([p[0], { $unwind: { path: "$book", preserveNullAndEmptyArrays: true } }, { $count: "n" }]).toArray()[0].n);
+```
+
+```text
+explain stages: $cursor > $lookup (no separate $unwind stage)
+$lookup.unwinding: {"preserveNullAndEmptyArrays":false} | strategy fields: unwinding
+rows with $unwind (inner join): 19240
+rows with preserveNullAndEmptyArrays (left join): 20000
+```
+
+The optimizer coalesces `$lookup` + `$unwind` into a single stage (`unwinding` on the `$lookup`), so the matched documents are produced one at a time instead of first building the array.
+
+Sharded collections: the `from` collection can be sharded starting in MongoDB 5.1 ([$lookup](https://www.mongodb.com/docs/manual/reference/operator/aggregation/lookup/), consulted 2026-09-30). This course runs unsharded, so that path is not exercised here.
 
 ## Tips and gotchas
 
-- A `$lookup` runs a query against the foreign collection for every input document. **Index the `foreignField`** (or whatever the sub-pipeline matches on), or the join can become slow on real-world sizes.
-- It is a left outer join: input documents with no match still come through, with an empty `as` array. Filter those out afterward with `$match` if you only want joined rows.
-- Joins are powerful but not free. If you find yourself joining the same two collections on every read, that can be a sign the data wants to be **embedded** rather than referenced — a data-modeling question covered later.
-- The result field named in `as` is always an array. Pair `$lookup` with `$unwind` when you expect a single match and want a flat object.
+- **Index the `foreignField`** (or whatever the sub-pipeline matches on): NestedLoopJoin over 50 000 books took 1 162 ms and IndexedLoopJoin 10 ms for the same join.
+- It is a left outer join: filter empties with `$match` or make it inner with `$unwind`.
+- `as` is always an array; pair with `$unwind` when you expect one match.
+- Joining the same two collections on every read suggests the data wants to be embedded - see the data-modeling module.
 
 <Callout title="Lookup attaches an array">
-$lookup is a left outer join that hangs the matched foreign documents on a new array field. The equality form joins one field to one field; the pipeline form lets you filter and reshape the foreign side. Index the foreign field, because the join queries it once per input document.
+`$lookup` is a left outer join that hangs matched foreign documents on a new array field. The equality form joins one field to one field and reports a join strategy; the pipeline form filters and reshapes the foreign side. Index the foreign field: without an index a big foreign collection becomes a nested loop.
 </Callout>
+
+## Reading AI-generated code
+
+Asked to "attach the book details to each sale", an assistant writes the equality lookup against a catalogue keyed by a plain `title` field:
+
+<SpotTheBug lang="js" code={`// AI comment: "join is O(1) per order - foreignField lookup"
+db.sales.aggregate([
+  { $lookup: { from: "booksNoIdx", localField: "title", foreignField: "title", as: "book" } },
+]);`}>
+
+Nothing in `$lookup` makes the lookup O(1): it depends entirely on an index on `foreignField`. With no index on a 50 000-book catalogue, explain reports **NestedLoopJoin** and the join of just 100 orders took 1 006 ms; after `createIndex({ title: 1 })` the same pipeline reported IndexedLoopJoin and took 13 ms. The fix is the index (created once, at deploy time):
+
+```js
+// mongosh/lk-bug.js
+// AI: "join sales to the book details by title" - books have a `title` field but nobody indexed it (booksByTitle2 is a fresh copy)
+db.booksNoIdx.insertMany(Array.from({ length: 50000 }, (_, i) => ({ title: "T" + i, author: "A" + (i % 50) })));   // a bigger catalogue: 50 000 books
+const join = [{ $match: { buyer: { $in: ["b1", "b2", "b3", "b4", "b5"] } } }, { $lookup: { from: "booksNoIdx", localField: "title", foreignField: "title", as: "book" } }];
+let t = Date.now(); const a = db.sales.aggregate(join).toArray().length; const noIdx = Date.now() - t;
+console.log("no index on booksNoIdx.title:", lplan(join), "|", a, "rows in", noIdx, "ms");
+db.booksNoIdx.createIndex({ title: 1 });
+t = Date.now(); const b = db.sales.aggregate(join).toArray().length; const withIdx = Date.now() - t;
+console.log("with title_1                 :", lplan(join), "|", b, "rows in", withIdx, "ms");
+```
+
+```text
+no index on booksNoIdx.title: EQ_LOOKUP NestedLoopJoin | executionTimeMillis 1162 | 100 rows in 1006 ms
+with title_1                 : EQ_LOOKUP IndexedLoopJoin on title_1 | executionTimeMillis 10 | 100 rows in 13 ms
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`$lookup` is a loop that runs a query for you: for each input document, find matches on the other side. The only decision is how that inner query is served - an index probe, a hash table built once, or a scan - and `explain` names the choice. Index or small side = cheap; large unindexed side = a scan per row.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| `$lookup` (reference across collections) | No duplicated data, one place to update, shared across documents | Every read pays the join cost — one extra query per input document for the engine |
-| Embedding (keep the data in one document) | One read, no join needed — fastest for read-heavy workloads | Data is duplicated if referenced from multiple places, updates must chase every copy, and the document can grow toward its limit |
-| `$lookup` pipeline form (`let` + sub-pipeline) | Filter and reshape the foreign side before joining, match on complex multi-field conditions | More complex to write and read, and harder to fully index the sub-pipeline |
-| `$lookup` equality form (`localField`/`foreignField`) | Short to write, easy to understand, straightforward to index | Can only match a single equality condition — nothing more complex |
+| `$lookup` (reference) | No duplicated data; one place to update | Every read pays the join (an index probe per input row) |
+| Embedding | One read, no join | Duplication; updates chase every copy |
+| Pipeline form | Filter and reshape the foreign side | More complex; no join strategy reported |
+| Equality form | Short; a strategy you can read in explain | One equality only |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Not indexing `foreignField`** — `$lookup` queries the foreign collection once per input document. Without an index on the matched field, the join gets much slower as data grows.
-- **Forgetting `$lookup` is always a left outer join** — documents with no match still come through with an empty `as` array; they are not filtered out. If you want only joined rows, add a `$match` to filter out the empty array yourself.
-- **Confusing `$` with `$$` in the pipeline form** — a single `$` refers to a field on the foreign document inside the sub-pipeline, while `$$` refers to a variable declared with `let` from the local side. Mixing them up breaks the query silently or throws an error.
+- **"`$lookup` has no join strategy."** - explain showed IndexedLoopJoin, HashJoin and NestedLoopJoin for the equality form.
+- **"It always queries the foreign collection once per input document."** - only in the loop cases; HashJoin built the table once and was 4-5x faster on a 500-book side.
+- **"Unmatched documents are filtered out."** - 760 orders came through with `book: []`.
+- **"A one-element `as` array is an object."** - it is an array; use `$unwind`.
+- **"An index on the local side speeds the join."** - the probe hits the foreign side.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A typical analytics dashboard** — a sales report that must show product names and categories alongside sales figures commonly keeps `sales` and `products` in separate collections and joins them at query time with `$lookup`, rather than embedding product data into every order, because product data changes more often than an order does.
->
-> **A typical real estate report** — a system that must join transactions with broker and listing data commonly uses a pipeline-style `$lookup` to filter transactions down to the relevant time window before joining, reducing what the engine has to process across collections. Keller Williams uses this style of MongoDB aggregation with its listing data on Atlas ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+> The manual states that starting in MongoDB 5.1 "the `from` collection can be sharded", and that a localField array can be matched against a scalar foreignField "without an `$unwind` stage" ([$lookup](https://www.mongodb.com/docs/manual/reference/operator/aggregation/lookup/), consulted 2026-09-30) - two behaviours older tutorials still describe as impossible.
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the equality `$lookup` returned a `book` array per order) but they are not executed by the course's automated checker._
 
 export const quizLookup = [
   {
-    q: 'In the equality form of $lookup, what does the "as" option name?',
+    q: 'What kind of join is $lookup?',
     options: [
-      'The foreign collection to join',
-      'The local field to match on',
-      'The new array field that holds the matched documents',
-      'The sort order of the join',
-    ],
-    answer: 2,
-  },
-  {
-    q: 'A sales document matches exactly one book. What is the type of the field $lookup adds?',
-    options: [
-      'A plain embedded object',
-      'An array containing the matched document',
-      'A string with the matched _id',
-      'A null value',
+      'Inner join - unmatched documents are dropped',
+      'Left outer join - every input document comes through, with an empty array when nothing matches',
+      'Full outer join',
+      'Cross join',
     ],
     answer: 1,
+    explain: '20 000 orders in, 20 000 out: 760 orders had book: []. Adding $unwind (inner join) left 19 240.',
   },
   {
-    q: 'Which index most improves $lookup performance?',
+    q: 'What type is the field named in `as`?',
     options: [
-      'An index on the localField',
-      'An index on the foreignField in the joined collection',
-      'An index on the as field',
-      'No index helps a $lookup',
+      'Always an array, even for at most one match',
+      'An object when one document matches',
+      'null when nothing matches',
+      'A string',
     ],
-    answer: 1,
+    answer: 0,
+    explain: 'book was [ { _id: "T7", ... } ] for a match and [] for T510; the assert in the fence checks Array.isArray for every row.',
   },
   {
-    q: 'In the pipeline form, what does $$t refer to?',
+    q: '$lookup on an unindexed foreignField in a 50 000-document collection. What did explain report?',
     options: [
-      'A field on the foreign document',
-      'A let variable carried in from the local document',
-      'The name of the foreign collection',
-      'A literal string',
+      'IndexedLoopJoin',
+      'NestedLoopJoin - a scan of the foreign collection per input document (1 162 ms vs 10 ms once indexed)',
+      'The query is rejected',
+      'HashJoin',
     ],
     answer: 1,
+    explain: 'Same pipeline: NestedLoopJoin in 1 162 ms without the index, IndexedLoopJoin on title_1 in 10 ms.',
+  },
+  {
+    q: 'When does the server choose HashJoin?',
+    options: [
+      'When the foreign field is unindexed and the foreign collection is small (500 documents here - 23 ms, faster than the indexed 107 ms)',
+      'Always',
+      'Only in the pipeline form',
+      'Never in MongoDB 8',
+    ],
+    answer: 0,
+    explain: 'The unindexed 500-document booksByTitle used HashJoin (23 ms); adding title_1 switched to IndexedLoopJoin (107 ms). Small foreign sides can be cheaper to hash.',
+  },
+  {
+    q: 'What does `$lookup` followed by `$unwind: "$book"` do to unmatched orders?',
+    options: [
+      'Keeps them with book: null',
+      'Drops them, making it an inner join; preserveNullAndEmptyArrays: true keeps them (20 000 rows)',
+      'Throws an error',
+      'Duplicates them',
+    ],
+    answer: 1,
+    explain: '19 240 rows with the plain $unwind versus 20 000 with preserveNullAndEmptyArrays; explain shows the $unwind absorbed into the $lookup stage.',
+  },
+  {
+    q: 'In the pipeline form, what does `$$t` mean?',
+    options: [
+      'A field of the foreign document',
+      'A variable declared in `let` from the local document',
+      'A system variable for the collection',
+      'An escaped dollar sign',
+    ],
+    answer: 1,
+    explain: 'let: { t: "$_id" } passes the local value in; inside the sub-pipeline "$_id" is the foreign field and "$$t" the local one. Only T60 (year 1960) survived the year > 1950 filter.',
   },
 ]
 
