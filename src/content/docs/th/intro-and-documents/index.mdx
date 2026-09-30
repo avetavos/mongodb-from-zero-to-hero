@@ -8,6 +8,7 @@ sidebar:
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ยินดีต้อนรับสู่ **MongoDB — From Zero to Hero** คอร์สนี้จะพาคุณจากคนที่ไม่เคยแตะ database มาก่อนเลย ไปสู่การออกแบบโมเดลข้อมูล query ข้อมูล สร้าง index เพื่อความเร็ว รวมข้อมูลด้วย aggregation ให้กลายเป็นรายงาน ไปจนถึงรันบน production ได้อย่างสบายมือ เราจะทำงานผ่านตัวอย่างที่จับต้องได้ตลอดทาง: โลกจำลองเล็ก ๆ ของสมาชิกห้องสมุดและหนังสือที่พวกเขายืม ตั้งใจให้เล็กไว้เพื่อให้แนวคิดหลักยังคงเป็นจุดเด่น ทุก operation จะถูกแสดงห้าแบบ — ใน shell **mongosh** และใน driver ของ **Node.js**, **Python**, **Go**, และ **Rust** — เพื่อให้บทเรียนนำไปใช้ได้กับ stack ที่คุณทำงานจริง
@@ -50,6 +51,28 @@ export const journeyDiagram = `flowchart TD
 4. **Documents and BSON** — รูปแบบไบนารีที่อยู่ใต้ JSON ของคุณ และ type ที่ document เก็บได้
 5. **Document vs relational** — การแปลคำศัพท์ relational เป็นคำศัพท์ MongoDB แบบเทียบเคียงกัน
 
+## runtime เบื้องหลังทุกผลลัพธ์
+
+ทุก output ในคอร์สนี้ถูกจับมา ไม่ได้พิมพ์เอง: **mongo 8.3.11** (สิ่งที่ `mongo:8` resolve ได้เมื่อ 2026-09-30), **mongosh 2.11.1**, **Node.js driver 7.7.0** รันบน Mac เครื่องเดียวกับ container แท็บ Python, Go และ Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node และเมื่อบทใดระบุ ก็รันหนึ่งครั้งในโปรแกรม scratch (PyMongo 4.18.2, Go driver v2.9.1, Rust driver 3.9.1) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส ซึ่งครอบคลุม fence ของ `mongosh` และ Node โมดูล 1 ถึง 6 ใช้ได้กับ MongoDB ทุกแบบ; **โมดูล 7 (transaction, change stream) ต้องการ replica set** ซึ่งบท Setup แสดงวิธีเริ่ม
+
+ทุกบทเรียน seed ข้อมูลของตัวเอง คุณจึงเปิดบทไหนก็ได้โดยลำพัง รูปร่างข้อมูลเหมือนกันตลอดทุกโมดูล — นี่คือ dataset ที่บทเรียนสร้าง (พร้อมการตรวจที่รันได้ว่ามันโหลดได้):
+
+```js
+// mongosh/intro-dataset.js
+db.members.insertMany([
+  { name: "Ada",    joined: 2023, fines: 0, city: "Cambridge", borrowed: ["Compilers"] },
+  { name: "Grace",  joined: 2024, fines: 0, city: "Arlington", borrowed: ["Compilers", "Algorithms"] },
+  { name: "Linus",  joined: 2023, fines: 2, city: "Helsinki",  borrowed: [] },
+]);
+db.sales.insertOne({ title: "Compilers", genre: "cs", quantity: 2, price: 45.5, buyer: "Ada" });
+console.log(db.members.countDocuments(), db.sales.countDocuments());
+assert.strictEqual(db.members.countDocuments({ fines: { $gt: 0 } }), 1);
+```
+
+```text
+3 1
+```
+
 ## เคล็ดลับและข้อควรระวัง
 
 - คุณไม่จำเป็นต้องท่องจำอะไรในนี้ เป้าหมายของโมดูลนี้คือความคล่องกับคำศัพท์ — document, collection, BSON, `_id` — เพื่อให้โมดูลถัด ๆ ไปอ่านได้ลื่นไหล
@@ -60,45 +83,100 @@ export const journeyDiagram = `flowchart TD
 ตลอดคอร์สเราจะกลับมาที่ห้องสมุดในจินตนาการเดิมซ้ำ ๆ: สมาชิก ค่าปรับที่พวกเขาค้างชำระ และหนังสือที่พวกเขายืม การใช้ชุดข้อมูลเล็ก ๆ ชุดเดียวซ้ำหมายความว่าคุณจะใช้สมาธิไปกับ database ไม่ใช่การเรียนรู้ตัวอย่างใหม่ในทุกบทเรียน
 </Callout>
 
+## อ่านโค้ดที่ AI สร้าง
+
+คอร์สนี้แสดง driver Node.js เคียงข้าง shell และข้อผิดพลาด Node ที่พบบ่อยที่สุดในโค้ดที่ AI เขียนคือลืม `await`:
+
+<SpotTheBug lang="js" code={`// AI comment: "insert the member, then confirm the count"
+const members = db.collection("members");
+members.insertOne({ name: "Grace" });
+const n = await members.countDocuments();
+console.log(n === 1 ? "saved" : "missing");`}>
+
+`insertOne` คืน promise; ถ้าไม่มี `await` โค้ดจะวิ่งล้ำไปก่อน เรารันรูปแบบนี้ 20 ครั้ง (ลบ collection ก่อนทุกครั้ง): จำนวนที่นับได้คือ **0 ใน 15 จาก 20 ครั้ง** การตรวจจึงพิมพ์ "missing" สำหรับการเขียนที่สำเร็จในอีกเสี้ยววินาที การ reject ของ promise ที่ไม่ await ก็หายไปด้วย — insert ที่ duplicate key ล้มเหลวอย่างเงียบจนกว่าเราจะต่อ `.catch` วิธีแก้คือคำเดียว:
+
+```js
+// app/intro-await.mjs
+const members = db.collection("members");
+await members.deleteMany({});
+await members.insertOne({ name: "Grace" });
+const n = await members.countDocuments();
+console.log(n === 1 ? "saved" : "missing");
+if (n !== 1) throw new Error("expected 1");
+```
+
+```text
+saved
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+คอร์สนี้คือ loop เดียว: **จำลอง** document, **เขียน** (CRUD), **อ่าน** (querying), ทำให้การอ่าน**เร็ว** (indexes), **สรุป** (aggregation), รักษาให้**ถูกต้อง** (transactions) และ**มีชีวิต** (operations) โมดูล 1 ถึง 3 คือคำศัพท์ของ loop นั้น ที่เหลือคือคุณสมบัติที่เพิ่มเมื่อ loop ทำงานแล้ว
+
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| schema ที่ยืดหยุ่นของ document model | เริ่มเขียนโค้ดและ ship ฟีเจอร์ได้เร็วโดยไม่ต้องออกแบบ schema ให้สมบูรณ์ตั้งแต่วันแรก | ไม่มีการรับประกันตอน compile time ว่าทุก document ใน collection จะมีรูปร่างเดียวกัน ความสม่ำเสมอเป็นหน้าที่ของทีมคุณเอง |
-| BSON ที่มี type มากกว่า JSON | เก็บ Date, ObjectId, Decimal128 ได้แม่นยำโดยไม่ต้องแปลงค่าเอง | driver แต่ละภาษา map type พวกนี้เข้ากับ native type ของตัวเองต่างกัน ต้องเข้าใจ mapping ก่อนใช้งานจริง |
+| schema ที่ยืดหยุ่นของ document model | เริ่มเขียนโค้ดและส่งฟีเจอร์ได้เร็ว โดยไม่ต้องออกแบบ schema ให้ครบตั้งแต่วันแรก | ไม่มีการรับประกันตอน compile ว่า document ทุกใบใน collection มีรูปร่างเดียวกัน — ความสม่ำเสมอเป็นความรับผิดชอบของทีมเอง |
+| BSON ที่มี type มากกว่า JSON | เก็บ Date, ObjectId และ Decimal128 ได้ตรงตัว โดยไม่ต้องแปลงค่าเอง | driver แต่ละภาษา map type เหล่านี้ไปยัง type ดั้งเดิมของตัวเองต่างกัน (บท Documents and BSON วัดให้ดู) |
+| container standalone สำหรับเรียน | รันง่ายที่สุด รองรับ root user | ไม่มี transaction หรือ change stream; โมดูล 7 ต้องใช้แบบ replica set |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า "ไม่มี schema" แปลว่าไม่ต้องออกแบบอะไรเลย** — schema ที่ยืดหยุ่นยังต้องการวินัย ทีมที่ปล่อยให้ document แต่ละใบมีรูปร่างต่างกันไปเรื่อย ๆ โดยไม่ตั้งใจจะเจอ bug ตอน query ทีหลัง
-- **ข้ามลำดับโมดูลเพราะคิดว่าแต่ละโมดูลแยกอิสระเต็มที่** — โมดูลต่อยอดจากกัน โดยเฉพาะคำศัพท์ใน Intro & Documents ที่โมดูลหลัง ๆ ใช้ซ้ำตลอด การข้ามไปเรียน Aggregation ก่อนอาจทำให้งงกับคำว่า document, field, BSON
-- **มองว่า MongoDB คือ database เดียวที่เหมาะกับทุกงาน** — โมดูลนี้จะพูดถึงเมื่อไร document database เหมาะและเมื่อไร relational database ยังเป็นตัวเลือกที่ดีกว่า การเลือกอย่างตั้งใจสำคัญกว่าการใช้เพราะกระแส
+- **"ไม่มี schema แปลว่าไม่ต้องออกแบบ"** — schema ยืดหยุ่นยังต้องมีวินัย บท What is MongoDB แสดง field ที่พิมพ์ผิดถูกรับเงียบ ๆ
+- **"แต่ละโมดูลแยกอิสระเต็มที่"** — โมดูลหลังพึ่งคำศัพท์ที่นี่ (document, field, BSON, `_id`)
+- **"MongoDB เหมาะกับทุกงาน"** — โมดูลนี้ครอบคลุมเมื่อ relational database ยังดีกว่า
+- **"container Docker จากบท Setup ครอบคลุมทั้งคอร์ส"** — แบบ standalone ไม่: โมดูล 7 ต้องการ replica set
+- **"ไม่มี `await` ก็ยังใช้ได้ถ้าเขียนเร็ว"** — 15 จาก 20 การนับเป็น 0 ในการรันด้านบน
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
 > **eBay** — ใช้ MongoDB เป็นหนึ่งใน core enterprise data platform ขององค์กร รองรับแอปที่ลูกค้าใช้งานจริงบน ebay.com รวมถึง product catalog ที่ scale replica set ออกไปหลายสิบ node เพื่อรองรับการอ่านปริมาณมหาศาล ([mongodb.com/customers/ebay](https://www.mongodb.com/customers/ebay), 2017)
 >
-> **Forbes** — ใช้ MongoDB Atlas เป็น backend ของ CMS ที่ให้บริการเนื้อหาทั้งหมดบน Forbes.com schema ที่ยืดหยุ่นของ document model ช่วยให้ทีมพัฒนาฟีเจอร์ได้เร็วขึ้น ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019)
+> **Forbes** — ใช้ MongoDB Atlas เป็น backend ของ CMS ที่ให้บริการเนื้อหาทั้งหมดบน Forbes.com โครงสร้างข้อมูลที่ยืดหยุ่นทำให้ทีมเพิ่ม component ได้เร็ว และลดเวลา build เฉลี่ยจาก 25 เหลือ 9 นาที ([mongodb.com/customers/forbes](https://www.mongodb.com/customers/forbes), 2019)
 
 export const quizIndex = [
   {
     q: 'หน่วยข้อมูลพื้นฐานที่ MongoDB เก็บคืออะไร?',
     options: [
-      'row ในตารางที่ตายตัว',
+      'row ในตารางตายตัว',
       'document — object คล้าย JSON ภายใน collection',
       'คู่ key-value ที่ไม่มีโครงสร้าง',
       'ค่าของ column เดียว',
     ],
     answer: 1,
+    explain: 'document คือ object คล้าย JSON (BSON) ที่จัดกลุ่มเป็น collection',
   },
   {
-    q: 'คอร์สนี้มีทั้งหมดกี่โมดูล?',
+    q: 'คอร์สนี้ประกอบด้วยกี่โมดูล?',
     options: ['สี่', 'หก', 'แปด', 'สิบสอง'],
     answer: 2,
+    explain: 'ทั้งแปดโมดูลคือ Intro, CRUD, Querying, Indexes, Aggregation, Data Modeling, Transactions & Consistency, Operations & Scaling',
   },
   {
-    q: 'โมดูลไหนสอนเรื่องการทำให้ query เร็วขึ้น?',
+    q: 'โมดูลใดสอนการทำให้ query เร็ว?',
     options: ['Querying', 'Indexes', 'Aggregation', 'Operations & Scaling'],
     answer: 1,
+    explain: 'Indexes — รวมถึงการอ่าน query plan ด้วย explain',
+  },
+  {
+    q: 'โมดูลใดต้องใช้ replica set ไม่ใช่ container standalone ธรรมดา?',
+    options: ['CRUD', 'Aggregation', 'Transactions & Consistency', 'Data Modeling'],
+    answer: 2,
+    explain: 'multi-document transaction และ change stream ล้มเหลวบน server แบบ standalone ("The $changeStream stage is only supported on replica sets")',
+  },
+  {
+    q: 'ใน Node เรียก `members.insertOne(doc)` โดยไม่ await แล้ว countDocuments() รันทันทีหลังจากนั้น การรันจริงแสดงอะไร?',
+    options: [
+      'จำนวนเป็น 1 เสมอ',
+      'จำนวนมักเป็น 0 เพราะการเขียนยังไม่เสร็จ',
+      'driver โยน error',
+      'MongoDB จัดคิวการนับไว้หลัง insert ให้อัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'ใน 20 ครั้งจำนวนเป็น 0 ถึง 15 ครั้ง: promise ยังค้างอยู่ ต้อง await การเรียก driver เสมอ',
   },
 ]
 
