@@ -1,6 +1,6 @@
 ---
 title: Single-document atomicity
-description: ทำไมการอัปเดต document หนึ่งฉบับ — รวมถึง nested field และ array — จึงเป็นแบบ all-or-nothing และวิธีออกแบบโมเดลข้อมูลที่เกี่ยวข้องกันให้อยู่ด้วยกัน เพื่อให้คุณแทบไม่ต้องใช้ transaction
+description: ทำไมการอัปเดต document หนึ่งฉบับ — รวมถึง nested field และ array — จึงเป็นแบบ all-or-nothing พิสูจน์ด้วย update ที่ล้มเหลวและ race แบบ lost update และทำไม updateMany จึงไม่ atomic ทั้งก้อน
 sidebar:
   order: 2
 ---
@@ -9,42 +9,35 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การรับประกันที่แข็งแกร่งที่สุดที่ MongoDB ให้คุณก็เป็นการรับประกันที่เงียบที่สุดด้วย เพราะไม่มีต้นทุนและไม่ขออะไรจากคุณเลย ทุกการเขียนไปยัง **document หนึ่งฉบับ** เกิดขึ้นเป็นขั้นตอนเดียวที่แบ่งแยกไม่ได้ ถ้าการอัปเดตของคุณตั้งค่าสามฟิลด์ เพิ่มค่า counter และ push เข้า array ทั้งหมดในคราวเดียว ทุก reader จะเห็นการเปลี่ยนแปลงเหล่านั้นทั้งหมดหรือไม่เห็นเลย — ไม่มีทางเห็นสภาพที่นำไปใช้ครึ่งทาง และถ้ามีอะไรผิดพลาดระหว่างการเขียน document จะถูกทิ้งไว้ในสภาพเดิมเป๊ะอย่างที่เคยเป็นก่อนหน้า สิ่งนี้เป็นจริงไม่ว่าการเปลี่ยนแปลงจะลงลึกแค่ไหน: nested object และ array ภายใน document เป็นส่วนหนึ่งของหน่วย atomic เดียวกัน
+การรับประกันที่แข็งแกร่งที่สุดที่ MongoDB ให้คุณก็เป็นการรับประกันที่เงียบที่สุดด้วย เพราะไม่มีต้นทุนและไม่ขออะไรจากคุณเลย ทุกการเขียนไปยัง **document หนึ่งฉบับ** เกิดขึ้นเป็นขั้นตอนเดียวที่แบ่งแยกไม่ได้ ถ้าการอัปเดตของคุณตั้งค่าสามฟิลด์ เพิ่มค่า counter และ pull จาก array ในคราวเดียว ทุก reader จะเห็นการเปลี่ยนแปลงเหล่านั้นทั้งหมดหรือไม่เห็นเลย — ไม่มีทางเห็นสภาพที่นำไปใช้ครึ่งทาง และถ้ามีอะไรผิดพลาดระหว่างการเขียน document จะอยู่ในสภาพเดิมเป๊ะ สิ่งนี้เป็นจริงไม่ว่าการเปลี่ยนแปลงจะลงลึกแค่ไหน: nested object และ array ภายใน document เป็นส่วนหนึ่งของหน่วย atomic เดียวกัน manual ของ MongoDB สรุปไว้ในประโยคเดียวว่า "write operations are atomic on the single-document level, even if modifying multiple values" ([Atomicity in MongoDB](https://www.mongodb.com/docs/manual/core/write-operations-atomicity/), ตรวจเมื่อ 2026-09-30)
 
-เราจะทำงานกับ `members` ของห้องสมุดเราต่อไป ลองนึกภาพ document สมาชิกที่รวบรวมทุกอย่างเกี่ยวกับคนคนหนึ่งไว้ด้วยกัน — ค่าปรับ หนังสือที่กำลังยืมอยู่ และบันทึกกิจกรรมเล็ก ๆ:
+ทุก output ด้านล่างจับมาจากเครื่อง Mac นี้ บน mongo 8.3.11 (replica set โหนดเดียว), mongosh 2.11.1 และ Node driver 7.7.0 id, เวลา และตัวเลขของ race บนเครื่องคุณจะต่างออกไป แท็บ Python, Go และ Rust สะท้อนการเรียกที่ตรวจแล้วใน shell/Node แต่ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส
 
-```json
-{
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Ada",
-  "fines": 4,
-  "borrowed": ["Algorithms"],
-  "activity": { "lastVisit": 2025, "visits": 12 }
-}
+## document ของสมาชิก
+
+แต่ละบทเรียน seed ข้อมูลของตัวเอง สมาชิกหนึ่งคนรวมค่าปรับ หนังสือที่ยืมอยู่ และบันทึกกิจกรรมเล็ก ๆ ไว้ด้วยกัน:
+
+```js
+// mongosh/atomicity-seed.js
+db.members.insertOne({
+  name: "Ada", fines: 4, borrowed: ["Algorithms"],
+  activity: { lastVisit: 2025, visits: 12 },
+});
+assert.strictEqual(db.members.countDocuments({ name: "Ada" }), 1);
 ```
 
 ## เขียนครั้งเดียว เปลี่ยนหลายอย่าง ก็ยังคง atomic
 
-สมมติว่า Ada คืนหนังสือ จ่ายค่าปรับสองหน่วย และมาเยือนห้องสมุด — สามการเปลี่ยนแปลงเชิงตรรกะที่เกิดขึ้นในการมาเยือนครั้งเดียวนี้ เพราะทั้งหมดอยู่ใน **document เดียว** การอัปเดตครั้งเดียวจึงนำไปใช้พร้อมกัน ไม่มี transaction ให้เปิดและไม่มี session ให้จัดการ ตัว operator ทำงานเอง และการอัปเดตทั้งหมดลงในคราวเดียว:
+สมมติว่า Ada คืนหนังสือ จ่ายค่าปรับสองหน่วย และมาเยือนห้องสมุด — สามการเปลี่ยนแปลงเชิงตรรกะในการมาครั้งเดียว เพราะทั้งหมดอยู่ใน **document เดียว** การอัปเดตครั้งเดียวจึงนำไปใช้พร้อมกัน ไม่มี transaction ให้เปิดและไม่มี session ให้จัดการ:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.updateOne(
-      { name: "Ada" },
-      {
-        $inc: { fines: -2, "activity.visits": 1 },
-        $set: { "activity.lastVisit": 2026 },
-        $pull: { borrowed: "Algorithms" }
-      }
-    )
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members").updateOne(
+    // mongosh/atomicity-update.js
+    const res = db.members.updateOne(
       { name: "Ada" },
       {
         $inc: { fines: -2, "activity.visits": 1 },
@@ -52,6 +45,31 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
         $pull: { borrowed: "Algorithms" }
       }
     );
+    console.log(res);
+    const ada = db.members.findOne({ name: "Ada" }, { _id: 0 });
+    console.log(ada);
+    assert.strictEqual(ada.fines, 2);
+    assert.strictEqual(ada.borrowed.length, 0);
+    assert.strictEqual(ada.activity.visits, 13);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/atomicity-update.mjs
+    const members = db.collection("members");
+    await members.insertOne({ name: "Ada", fines: 4, borrowed: ["Algorithms"], activity: { lastVisit: 2025, visits: 12 } });
+    const res = await members.updateOne(
+      { name: "Ada" },
+      {
+        $inc: { fines: -2, "activity.visits": 1 },
+        $set: { "activity.lastVisit": 2026 },
+        $pull: { borrowed: "Algorithms" }
+      }
+    );
+    console.log(res);
+    const ada = await members.findOne({ name: "Ada" }, { projection: { _id: 0 } });
+    console.log(ada);
+    if (ada.fines !== 2 || ada.borrowed.length !== 0 || ada.activity.visits !== 13) throw new Error("update not applied as a unit");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -97,25 +115,72 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-ทุกส่วนของการเปลี่ยนแปลงลงพร้อมกัน และไม่มี reader คนใดเคยเห็น document ในสภาพที่ ยกตัวอย่างเช่น ค่าปรับลดลงแล้วแต่หนังสือยังถูกยืมอยู่:
+output จริง ของ mongosh ก่อนแล้วตามด้วย Node (รูปแบบ acknowledgement ต่างกัน แต่ document เหมือนกัน):
 
-```json
+```text
 {
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Ada",
-  "fines": 2,
-  "borrowed": [],
-  "activity": { "lastVisit": 2026, "visits": 13 }
+  acknowledged: true,
+  insertedId: null,
+  matchedCount: 1,
+  modifiedCount: 1,
+  upsertedCount: 0
+}
+{
+  name: 'Ada',
+  fines: 2,
+  borrowed: [],
+  activity: { lastVisit: 2026, visits: 13 }
 }
 ```
 
-ตัว update operator เองก็เป็น atomic `$inc` อ่านค่าปัจจุบันและบวกเข้าไปเป็นขั้นตอนเดียว ดังนั้นการเพิ่มค่าพร้อมกันสองครั้งจะไม่มีทางทำให้การอัปเดตหายไปจากการที่ทั้งคู่อ่านตัวเลขเริ่มต้นเดียวกัน คุณสมบัตินี้นี่เองคือเหตุผลว่าทำไม counter และยอดคงเหลือจึงควรอยู่ภายใน document เดียว แทนที่จะคำนวณในแอปพลิเคชันของคุณแล้วเขียนกลับ
+```text
+{
+  acknowledged: true,
+  modifiedCount: 1,
+  upsertedId: null,
+  upsertedCount: 0,
+  matchedCount: 1
+}
+{
+  name: 'Ada',
+  fines: 2,
+  borrowed: [],
+  activity: { lastVisit: 2026, visits: 13 }
+}
+```
 
-## ออกแบบโมเดลให้ข้อมูลที่เกี่ยวข้องกันอยู่ด้วยกัน
+ไม่มี reader คนไหนเห็น document ในสภาพที่ค่าปรับลดแล้วแต่หนังสือยังอยู่ในรายการยืมได้เลย ตัว update operator เองก็ atomic เช่นกัน: `$inc` อ่านและบวกเป็นขั้นตอนเดียวฝั่ง server (พิสูจน์ใน race ด้านล่าง)
 
-บทเรียนเชิงปฏิบัติคือเรื่องการออกแบบโมเดล เมื่อข้อมูลเปลี่ยนแปลงไปด้วยกัน ให้เก็บไว้ด้วยกัน แล้ว atomicity ฟรี ๆ จะครอบให้เอง document สมาชิกของเราทำเช่นนี้อยู่แล้ว: ค่าปรับ การยืม และบันทึกกิจกรรมล้วน embed อยู่ ดังนั้นสถานะทั้งหมดของสมาชิกหนึ่งคนจึงเคลื่อนไปเป็นหน่วยเดียว หากเราแยกบันทึกกิจกรรมออกไปเป็น collection `activity` แยกต่างหากที่ key ด้วยสมาชิก การมาเยือนครั้งเดียวกันนั้นจะคร่อมสอง document และบังคับให้เราต้องเลือกระหว่างการยอมเสีย atomicity หรือจ่ายค่า transaction
+## update ที่ล้มเหลวไม่เปลี่ยนอะไรเลย
 
-นี่คือหัวใจของเหตุผลที่ document model กับ consistency model ของ MongoDB ถึงเข้ากันได้ดี นิสัยแบบ relational ที่ normalise ทุกอย่างลงในตารางแยกกันสร้างการอัปเดตหลายแถวที่ต้องใช้ transaction เพื่อให้สอดคล้องกัน ส่วนนิสัยแบบ document ที่ embed สิ่งที่เป็นของคู่กันเข้าด้วยกันเปลี่ยนหลาย ๆ กรณีเหล่านั้นให้เป็นการเขียน atomic ครั้งเดียว
+Atomic หมายถึง all-or-nothing ตอนล้มเหลวด้วย ในตัวอย่างนี้ update ตั้ง `city` ก่อน แล้วพยายาม `$inc` ฟิลด์ string ชื่อ `name` server ปฏิเสธ update ทั้งก้อน — `city` ไม่เคยปรากฏ:
+
+```js
+// mongosh/atomicity-fail.js
+let message = null;
+try {
+  db.members.updateOne({ name: "Ada" }, { $set: { city: "Arlington" }, $inc: { name: 1 } });
+} catch (e) { message = e.message; }
+console.log(message);
+const after = db.members.findOne({ name: "Ada" }, { _id: 0 });
+console.log(after);
+assert.ok(message.includes("Cannot apply $inc to a value of non-numeric type"));
+assert.strictEqual(after.city, undefined);
+```
+
+```text
+Plan executor error during update :: caused by :: Cannot apply $inc to a value of non-numeric type. {_id: ObjectId('6abcc850aeeadcc10fdb2f05')} has the field 'name' of non-numeric type string
+{
+  name: 'Ada',
+  fines: 2,
+  borrowed: [],
+  activity: { lastVisit: 2026, visits: 13 }
+}
+```
+
+## ออกแบบโมเดลให้ข้อมูลที่เกี่ยวข้องอยู่ด้วยกัน
+
+บทเรียนเชิงปฏิบัติคือเรื่องการออกแบบโมเดล เมื่อข้อมูลเปลี่ยนพร้อมกัน ให้เก็บไว้ด้วยกัน แล้ว atomicity ฟรีก็ครอบคลุมให้ ถ้าเราแยก activity log ไปเป็น collection `activity` ต่างหากที่อ้างอิงสมาชิก การมาเยือนครั้งเดียวกันนี้จะข้ามสอง document และบังคับให้เลือกระหว่างยอมเสีย atomicity หรือจ่ายค่า transaction (บทถัดไป)
 
 export const embedDiagram = `flowchart LR
   A["One member document"] --> B["fines"]
@@ -125,79 +190,207 @@ export const embedDiagram = `flowchart LR
   C --> E
   D --> E`
 
-<Mermaid code={embedDiagram} title="การ embed ข้อมูลที่เกี่ยวข้องกันใน document เดียวหมายความว่าการเขียน atomic ครั้งเดียวรักษาทุกอย่างให้สอดคล้องกัน" />
+<Mermaid code={embedDiagram} title="การฝังข้อมูลที่เกี่ยวข้องไว้ใน document เดียว ทำให้การเขียนแบบ atomic ครั้งเดียวรักษาความสอดคล้องของทั้งหมด" />
 
-**ใน Compass:** เปิด document สมาชิกในแท็บ Documents แล้วขยาย nested object `activity` และ array `borrowed` การแก้ไขหลายฟิลด์เหล่านี้แล้วคลิก **Update** จะนำไปใช้เป็นการเขียน atomic ครั้งเดียว เหมือนกับการเรียกผ่าน driver ด้านบน
+**ใน Compass:** เปิด document ของสมาชิกในแท็บ Documents แก้หลายฟิลด์แล้วกด **Update** — Compass ส่ง update หนึ่งครั้งต่อ document ซึ่ง atomic เหมือนการเรียกผ่าน driver ข้างบน
+
+## race ที่ atomic operator ป้องกันได้
+
+Atomic operator สำคัญเมื่อมี client เขียนพร้อมกันหลายตัว ด้านล่าง client 100 ตัวพร้อมกันแต่ละตัวบวก 1 ให้ counter ครั้งหนึ่งแบบ **อ่าน คำนวณ เขียนกลับ** อีกครั้งด้วย `$inc`:
+
+```js
+// app/atomicity-lost-update.mjs
+const counters = db.collection("counters");
+await counters.insertMany([{ _id: "read-modify-write", n: 0 }, { _id: "inc", n: 0 }]);
+
+await Promise.all(Array.from({ length: 100 }, async () => {
+  const doc = await counters.findOne({ _id: "read-modify-write" });
+  await counters.updateOne({ _id: "read-modify-write" }, { $set: { n: doc.n + 1 } });
+}));
+await Promise.all(Array.from({ length: 100 }, () =>
+  counters.updateOne({ _id: "inc" }, { $inc: { n: 1 } })));
+
+const rows = await counters.find().toArray();
+console.log(rows);
+const byId = Object.fromEntries(rows.map((r) => [r._id, r.n]));
+if (byId["inc"] !== 100) throw new Error("$inc must never lose an update");
+if (byId["read-modify-write"] >= 100) throw new Error("expected lost updates in the naive version");
+```
+
+```text
+[ { _id: 'read-modify-write', n: 1 }, { _id: 'inc', n: 100 } ]
+```
+
+ทุกการเขียน atomic แต่ละตัว — แต่การบวกส่วนใหญ่จาก 100 ครั้งก็ยังหายไป เพราะแต่ละ client เขียนกลับค่าที่คำนวณจากการอ่านที่ล้าสมัย atomicity อยู่ใน *operator* ไม่ใช่ใน read-then-write ของแอปพลิเคชันคุณ
+
+## updateMany คือการเขียน atomic หลายครั้ง
+
+"การเขียน atomic ครั้งเดียว" จบที่ขอบเขตของ document ด้านล่าง `updateMany` รันบน 300 000 document ขณะที่ลูป polling (อีก connection หนึ่งจาก pool) นับว่ามีกี่ตัวที่เป็น `done: true` แล้ว reader เห็น batch ที่ทำไปครึ่งทาง:
+
+```js
+// app/atomicity-updatemany.mjs
+const big = db.collection("big");
+const docs = Array.from({ length: 300000 }, (_, i) => ({ i, done: false }));
+for (let i = 0; i < docs.length; i += 100000) await big.insertMany(docs.slice(i, i + 100000), { ordered: false });
+await big.createIndex({ done: 1 });
+
+const seen = [];
+let running = true;
+const poll = (async () => {
+  while (running) seen.push(await big.countDocuments({ done: true }));
+})();
+
+const t0 = Date.now();
+const res = await big.updateMany({}, { $set: { done: true } });
+const ms = Date.now() - t0;
+running = false;
+await poll;
+
+const partial = seen.filter((n) => n > 0 && n < 300000);
+console.log({ modifiedCount: res.modifiedCount, ms, samples: seen.length, partialSamples: partial.length, firstPartial: partial.slice(0, 5) });
+if (partial.length === 0) throw new Error("expected the reader to observe a partially applied updateMany");
+```
+
+```text
+{
+  modifiedCount: 300000,
+  ms: 2119,
+  samples: 172,
+  partialSamples: 170,
+  firstPartial: [ 247, 609, 827, 1015, 1169 ]
+}
+```
+
+manual พูดไว้เหมือนกันว่า "the modification of each document is atomic, but the operation as a whole is not atomic" ([Atomicity in MongoDB](https://www.mongodb.com/docs/manual/core/write-operations-atomicity/)) เมื่อ batch ต้องเป็น all-or-nothing ให้ใช้ multi-document transaction
 
 ## เคล็ดลับและข้อควรระวัง
 
-- atomicity เป็นแบบต่อ **document** ไม่ใช่ต่อ **operation** การ `updateMany` ครั้งเดียวที่แตะ document หนึ่งพันฉบับคือการเขียน atomic ที่เป็นอิสระต่อกันหนึ่งพันครั้ง ไม่ใช่ขั้นตอน atomic ขั้นตอนเดียวขนาดใหญ่ — reader อีกคนสามารถเห็นบางส่วนที่นำไปใช้แล้วและบางส่วนที่ยังไม่ได้
-- การอ่านไม่ block อยู่กับการเขียนเหล่านี้ reader จะได้ document ก่อนการเขียนหรือหลังการเขียน ไม่มีทางเจอสภาพเขียนค้างครึ่งทาง เพราะไม่มีสภาพเขียนครึ่งทางให้รอ
-- การ embed ไม่ได้ฟรีในทุกกรณี ถ้า document จะโตขึ้นโดยไม่มีขอบเขต — บันทึกกิจกรรมที่มีรายการนับล้าน — การแยกออกไปอาจเป็นทางเลือกที่ถูกต้อง แล้วคุณก็ยอมรับว่าการเปลี่ยนแปลงเหล่านั้นต้องใช้กลยุทธ์ความสอดคล้องที่ต่างออกไป
+- Atomicity เป็นระดับ **document** ไม่ใช่ระดับ **operation**: `updateMany` หนึ่งครั้งบนหนึ่งพัน document คือการเขียน atomic อิสระหนึ่งพันครั้ง
+- การฝังข้อมูลไม่ฟรีเสมอไป document ที่โตไม่จำกัด (activity log ที่มีเป็นล้านรายการ) จะเข้าใกล้ขีดจำกัด 16 MiB — แยกออกไปและยอมรับกลยุทธ์ความสอดคล้องอีกแบบ
+- "Atomic" ไม่ได้แปลว่า "แยกขาดจาก document อื่น": ถ้าตรรกะของคุณอ่าน document B เพื่อตัดสินว่าจะเขียนอะไรลง document A ก็ยังมี race
 
-<Callout title="การ embed ให้ atomicity แก่คุณฟรี ๆ">
-transaction ที่ถูกที่สุดคือ transaction ที่คุณไม่เคยต้องใช้ ออกแบบโมเดลข้อมูลที่เปลี่ยนแปลงไปด้วยกันให้อยู่ใน document เดียว แล้วการอัปเดตธรรมดาครั้งเดียวก็รักษาความสอดคล้องได้เอง โดยไม่มี session ไม่มี commit และไม่มีต้นทุนเพิ่ม
+<Callout title="การฝังข้อมูลให้ atomicity ฟรี">
+transaction ที่ถูกที่สุดคือตัวที่คุณไม่ต้องใช้ ออกแบบให้ข้อมูลที่เปลี่ยนพร้อมกันอยู่ใน document เดียว แล้ว update ธรรมดาครั้งเดียวก็รักษาความสอดคล้องได้ โดยไม่ต้องมี session, commit หรือต้นทุนเพิ่ม
 </Callout>
 
-## ข้อแลกเปลี่ยน
+## Reading AI-generated code
 
-| ตัวเลือก | Benefit | Cost |
+ผู้ช่วย AI ที่ถูกขอ "ลด stock อย่างปลอดภัย" เขียนโค้ดนี้ มันดูเหมือน guard และคอมเมนต์ฟังดูมั่นใจ:
+
+<SpotTheBug lang="js" code={`// AI comment: "single-document writes are atomic, so this can never oversell"
+async function buy(stock, sku) {
+  const item = await stock.findOne({ _id: sku });
+  if (item.left > 0) {
+    await stock.updateOne({ _id: sku }, { $inc: { left: -1 } });
+    return true;
+  }
+  return false;
+}`}>
+
+`updateOne` แต่ละครั้ง atomic แต่ *การเช็ค* กับ *การเขียน* เป็นสอง operation แยกกัน ผู้ซื้อ 50 คนพร้อมกันจึงผ่าน `item.left > 0` ทั้งหมดก่อนที่การลดครั้งใดจะลงจริง ในการรันด้านล่าง สินค้า 10 ชิ้นถูก "ขาย" 50 ครั้งและ counter ติดลบ วิธีแก้คือย้ายการเช็คเข้าไปใน filter เพื่อให้ server ทดสอบและลดในขั้นตอน atomic เดียว:
+
+```js
+// app/atomicity-oversell.mjs
+const stock = db.collection("stock");
+await stock.insertMany([{ _id: "naive", left: 10 }, { _id: "guard", left: 10 }]);
+
+await Promise.all(Array.from({ length: 50 }, async () => {
+  const item = await stock.findOne({ _id: "naive" });
+  if (item.left > 0) await stock.updateOne({ _id: "naive" }, { $inc: { left: -1 } });
+}));
+
+const results = await Promise.all(Array.from({ length: 50 }, () =>
+  stock.updateOne({ _id: "guard", left: { $gt: 0 } }, { $inc: { left: -1 } })));
+const sold = results.reduce((n, r) => n + r.modifiedCount, 0);
+
+const rows = await stock.find().toArray();
+console.log(rows, "guarded sales:", sold);
+if (rows.find((r) => r._id === "naive").left >= 0) throw new Error("expected the naive version to oversell");
+if (rows.find((r) => r._id === "guard").left !== 0 || sold !== 10) throw new Error("guarded version must sell exactly 10");
+```
+
+```text
+[ { _id: 'naive', left: -39 }, { _id: 'guard', left: 0 } ] guarded sales: 10
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+document คือหน่วยของ "all or nothing": server ใช้ update document กับ record หนึ่งภายใต้ write lock ของ record นั้น และ reader ได้เวอร์ชันก่อนหรือหลัง ไม่เคยได้ตรงกลาง อะไรก็ตามที่ใหญ่กว่าหนึ่ง document (batch, read-then-write, สอง collection) คือ *ลำดับ* ของขั้นตอน atomic ที่ client อื่นแทรกได้ — เว้นแต่คุณฝังการเช็คไว้ใน filter หรือใช้ transaction
+
+## Trade-offs
+
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| embed ข้อมูลไว้ใน document เดียว | atomicity ฟรี ไม่มี session ไม่มี commit latency ต่ำสุดเท่าที่เป็นไปได้ | document โตขึ้นเรื่อย ๆ ตามข้อมูลที่ embed อาจเข้าใกล้ 16MB BSON limit หรือทำให้การอ่าน/เขียนช้าลงเมื่อต้องย้ายทั้งก้อน |
-| แยกข้อมูลออกเป็นหลาย document/collection แล้วใช้ multi-document transaction เมื่อต้องเปลี่ยนร่วมกัน | ยืดหยุ่นในการ query และ scale แต่ละส่วนแยกจากกันได้ | เสีย atomicity ฟรีที่เคยได้ ต้องจ่าย session และ commit overhead ทุกครั้งที่ต้องเปลี่ยนแปลงร่วมกัน |
+| ฝังข้อมูลใน document เดียว | atomicity ฟรี ไม่มี session ไม่มี commit latency ต่ำที่สุด | document โตตามข้อมูลที่ฝัง เข้าใกล้ขีดจำกัด BSON 16 MiB และทำให้ทุกการเขียนต้องเขียน document ที่ใหญ่ขึ้นใหม่ |
+| Guard ใน filter (`{ left: { $gt: 0 } }`) | เช็คและเขียนเป็นขั้นตอน atomic เดียว ไม่ต้อง transaction | ใช้ได้เฉพาะเมื่อเงื่อนไขเกี่ยวกับ document เดียวกัน |
+| แยกข้อมูลข้าม document/collection และใช้ multi-document transaction เมื่อต้องเปลี่ยนพร้อมกัน | ยืดหยุ่นในการ query และ scale แต่ละส่วนอิสระ | เสีย atomicity ฟรี ต้องจ่ายค่า session และ commit ทุกครั้งที่ต้องเปลี่ยนร่วมกัน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า read-then-write ที่ทำในแอปพลิเคชันเป็น atomic เพราะจบลงด้วยการเขียน document เดียว** — ไม่จริง ช่วงเวลาระหว่างการอ่านค่ามาคำนวณกับการเขียนกลับมี race condition ได้เสมอ ต้องใช้ atomic operator อย่าง `$inc` หรือ `findOneAndUpdate` ที่ทำ read-modify-write บน server ในขั้นตอนเดียวแทน
-- **มองว่า atomic แปลว่า isolated จาก document อื่นด้วย** — atomicity รับประกันแค่ document ของตัวเอง ถ้า business logic ต้องอ่าน document อื่นมาประกอบการตัดสินใจก่อนเขียน ยังมี race กับ document นั้นอยู่เหมือนเดิม นี่เป็นคนละปัญหากับ multi-document consistency ที่ต้องแก้ด้วยเครื่องมือคนละอย่าง
-- **embed ทุกอย่างเข้าไปโดยไม่ดูอัตราการเติบโตของข้อมูล** — เห็นว่า embed ให้ atomicity ฟรีก็ embed array ที่โตไม่มีขอบเขต เช่น log ทุก event ของสมาชิก ทำให้ document ดันเข้าใกล้ขีดจำกัดขนาดและทำให้ทุก operation บน document นั้นช้าลงโดยไม่จำเป็น
+- **"read-then-write เป็น atomic เพราะจบด้วยการเขียน document เดียว"** — พิสูจน์แล้วว่าผิด: client 100 ตัวทำให้ counter ได้น้อยกว่า 100 มาก ใช้ `$inc`, guard ใน filter หรือ `findOneAndUpdate`
+- **"`updateMany` เป็น operation atomic เดียว"** — แต่ละ document atomic แต่ batch ไม่ใช่ และ reader เห็นมันทำไปครึ่งทาง
+- **"Atomic แปลว่าแยกขาดจาก document อื่น"** — atomicity ครอบคลุมเฉพาะ document ของคุณเอง การตัดสินใจเขียนจาก document อื่นยังเป็น race
+- **"ฝังทุกอย่าง atomicity ฟรี"** — array ที่ฝังโดยไม่จำกัดขนาดมุ่งหน้าสู่ขีดจำกัด 16 MiB และทำให้ทุก operation บน document ช้าลง
 
-> 💡 ตัวอย่างจากของจริง
->
-> **แพลตฟอร์มอีคอมเมิร์ซทั่วไป** — เก็บ inventory count ไว้เป็น field เดียวใน product document แล้วใช้ `$inc` แบบ atomic ลด/เพิ่ม stock เมื่อมีออเดอร์ แทนที่จะเปิด transaction ทุกครั้ง ทำให้ throughput สูงและไม่มี overselling จาก race condition
->
-> **โซเชียลแอปทั่วไป** — เก็บ like count เป็น field ใน post document เดียวกับเนื้อหาโพสต์ การกดไลก์แต่ละครั้งคือ `$inc` แบบ atomic ครั้งเดียว ไม่ต้องมี session หรือ transaction แม้จะมีคนกดพร้อมกันหลายพันครั้งต่อวินาที
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่ตรวจแล้วใน shell/Node; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizSingle = [
   {
-    q: 'การอัปเดตตั้งค่าสองฟิลด์และ push เข้า array ใน document เดียว reader อีกคนสังเกตเห็นอะไรได้บ้าง?',
+    q: 'update ตั้งสองฟิลด์และ pull จาก array ใน document เดียว reader อื่นสังเกตเห็นอะไรได้บ้าง?',
     options: [
       'อาจเห็นการเปลี่ยนฟิลด์โดยไม่เห็นการเปลี่ยน array',
-      'การเปลี่ยนแปลงทั้งหมดหรือไม่เห็นเลย — ไม่มีทางเห็นสภาพบางส่วน',
-      'เห็นการเปลี่ยน array ก่อนเสมอ แล้วจึงเห็นฟิลด์',
-      'document ที่ถูก lock ซึ่งส่งคืน error',
+      'เห็นทั้งหมดหรือไม่เห็นเลย — ไม่มีสถานะครึ่งทาง',
+      'เห็นการเปลี่ยน array ก่อนเสมอ แล้วค่อยฟิลด์',
+      'document ที่ถูกล็อกและคืน error',
     ],
     answer: 1,
+    explain: 'การเขียน document เดียวเป็น atomic: findOne จริงหลัง update แสดง fines, borrowed และ activity เปลี่ยนไปพร้อมกัน',
   },
   {
-    q: 'ทำไม counter แบบ $inc จึงปลอดภัยภายใต้ concurrency ภายใน document เดียว?',
+    q: 'update ทำ $set: { city } แล้ว $inc บนฟิลด์ string ชื่อ name หลังจากนั้นใน document มีอะไร?',
     options: [
-      'driver ลองใหม่จนกว่าจะชนะ',
-      'แต่ละ $inc อ่านและบวกเป็นขั้นตอน atomic เดียว จึงไม่มีการอัปเดตใดสูญหาย',
-      'MongoDB serialise ทั้ง collection',
-      'counter ถูกเก็บไว้นอก document',
+      'city ถูกตั้ง name ไม่เปลี่ยน',
+      'ไม่มีการเปลี่ยนเลย: server ปฏิเสธ update ทั้งก้อน ("Cannot apply $inc to a value of non-numeric type")',
+      'ทั้งสองอย่าง โดย name ถูกแปลงเป็นตัวเลข',
+      'document ถูกลบ',
     ],
     answer: 1,
+    explain: 'update ที่ล้มเหลวทิ้ง document ไว้เหมือนเดิมเป๊ะ; city ยังเป็น undefined ในการรันจริง',
   },
   {
-    q: 'บทเรียนการออกแบบโมเดลหลักของ single-document atomicity คืออะไร?',
+    q: 'client 100 ตัวแต่ละตัวทำ findOne แล้ว $set n = doc.n + 1 ทำไม counter จึงจบที่ค่าต่ำกว่า 100 มาก?',
     options: [
-      'normalise ทุกอย่างลงใน collection แยกกัน',
-      'เก็บข้อมูลที่เปลี่ยนแปลงไปด้วยกันไว้ใน document เดียวกัน',
-      'ใช้ transaction เสมอเพื่อความปลอดภัย',
-      'หลีกเลี่ยง array และ nested object โดยสิ้นเชิง',
+      '$set แต่ละครั้งไม่ atomic',
+      'client เขียนกลับค่าที่คำนวณจากการอ่านที่ล้าสมัย ทับกันเอง',
+      'MongoDB ทิ้งการเขียนที่เกิน 50 ครั้งต่อวินาที',
+      'driver retry แล้วข้าม update',
     ],
     answer: 1,
+    explain: 'ทุกการเขียน atomic แต่ลำดับ read-compute-write ไม่ atomic เวอร์ชัน $inc ได้ 100 พอดี',
   },
   {
-    q: 'การ updateMany ครั้งเดียวบน document หลายฉบับเป็นขั้นตอน atomic ขั้นตอนเดียวหรือไม่?',
+    q: 'updateMany หนึ่งครั้งบนหลาย document เป็นขั้นตอน atomic เดียวหรือไม่?',
     options: [
       'ใช่ ทั้ง batch เป็น atomic',
-      'ไม่ใช่ เป็นการเขียนแบบ atomic แยกกันทีละ document',
-      'เฉพาะเมื่อ document ทั้งหมดอยู่ใน collection เดียว',
-      'เฉพาะเมื่อมี write concern เป็น majority',
+      'ไม่ มันคือการเขียน atomic อิสระหลายครั้งต่อ document; reader ที่ทำ concurrent เห็นมันถูกใช้ไปครึ่งทาง',
+      'ใช่ ถ้าทุก document อยู่ใน collection เดียว',
+      'ใช่ ถ้า write concern เป็น majority',
     ],
     answer: 1,
+    explain: 'reader ที่ polling นับได้ค่าระหว่าง 0 ถึง 300000 อย่างเคร่งครัดขณะที่ updateMany ทำงาน',
+  },
+  {
+    q: 'จะทำให้ "ลด stock เมื่อ stock > 0 เท่านั้น" ปลอดภัยภายใต้ concurrency ได้อย่างไร?',
+    options: [
+      'findOne เช็คในโค้ดแอป แล้วค่อย updateOne',
+      'ใส่เงื่อนไขใน filter: updateOne({ _id, left: { $gt: 0 } }, { $inc: { left: -1 } })',
+      'เช็คสองรอบ',
+      'ใช้ w: "majority"',
+    ],
+    answer: 1,
+    explain: 'เวอร์ชัน guard ขายได้ 10 จาก 10 พอดี ส่วนเวอร์ชัน check-then-write ทำให้ counter ติดลบ',
   },
 ]
 
