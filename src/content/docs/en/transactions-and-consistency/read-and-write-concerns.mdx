@@ -1,6 +1,6 @@
 ---
 title: Read and write concerns
-description: Tune durability with write concern (w, j, wtimeout) and visibility with read concern (local, majority, linearizable), plus read preference and the latency trade-off.
+description: Tune durability with write concern (w, j, wtimeout) and visibility with read concern (local, majority, snapshot, linearizable), plus read preference — with the implicit defaults, real timeouts and a lost w:1 write proven on a 3-node set.
 sidebar:
   order: 4
 ---
@@ -9,31 +9,49 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-A replica set keeps several copies of your data: one **primary** that takes all writes, and one or more **secondaries** that copy those writes over. This redundancy is what makes the durability and visibility knobs meaningful. When you write, you can decide how many of those copies must confirm the write before you consider it done. When you read, you can decide how committed and how fresh the data you get back must be. The two settings are the **write concern** and the **read concern**, and they let you slide between fast-but-weaker and slow-but-stronger on every operation.
+A replica set keeps several copies of your data: one **primary** that takes all writes, and one or more **secondaries** that copy those writes over. This redundancy is what makes the durability and visibility knobs meaningful. When you write, you can decide how many copies must confirm the write before you consider it done. When you read, you can decide how committed and how fresh the data must be. The two settings are the **write concern** and the **read concern**.
+
+Outputs come from two places, both on this Mac with mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0: fences with a path comment ran against the course's one-node replica set; fences marked *3-node* ran on a throwaway three-container replica set on a Docker network (`rs-1`, `rs-2`, `rs-3`, started with `--replSet rsb3`), removed afterwards. Python/Go/Rust tabs mirror the verified shell/Node call and are not executed by the course's automated checker.
 
 ## Write concern: how durable, how confirmed
 
-A write concern has three parts. The `w` value says how many members must acknowledge the write: `w: 1` means only the primary, while `w: "majority"` means a majority of the set has stored it — the level at which a write survives the loss of any single member. The `j` value, when true, requires the write to be flushed to the on-disk **journal** before it is acknowledged, so it survives a crash, not just a process restart. And `wtimeout` caps how long the driver waits for those acknowledgements before giving up with an error.
+A write concern has three parts. `w` says how many members must acknowledge: `w: 1` means only the primary, `w: "majority"` means a majority of the voting members has the write. `j`, when true, requires the write to be in the on-disk **journal** on the members that count. `wtimeout` (driver option `wtimeoutMS`) caps how long the server waits for those acknowledgements.
 
-Here we insert a member and demand that a majority of the set confirms it, journalled, within five seconds:
+```js
+// mongosh/concern-seed.js
+db.members.insertMany([
+  { name: "Ada", fines: 0 },
+  { name: "Linus", fines: 2 },
+]);
+assert.strictEqual(db.members.countDocuments(), 2);
+```
+
+Insert a member and demand a majority, journalled, within five seconds:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertOne(
+    // mongosh/concern-write.js
+    const res = db.members.insertOne(
       { name: "Grace", fines: 0 },
       { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
-    )
+    );
+    console.log(res);
+    assert.ok(res.acknowledged);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").insertOne(
+    // app/concern-write.mjs
+    const res = await db.collection("members").insertOne(
       { name: "Grace", fines: 0 },
-      { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
+      { writeConcern: { w: "majority", j: true, wtimeoutMS: 5000 } }
     );
+    console.log(res);
+    if (!res.acknowledged) throw new Error("expected an acknowledged write");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -72,35 +90,112 @@ Here we insert a member and demand that a majority of the set confirms it, journ
   </TabItem>
 </Tabs>
 
-The acknowledgement comes back only once the majority has stored the write:
-
-```json
-{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1e7" }
+```text
+{
+  acknowledged: true,
+  insertedId: ObjectId('6abccc3967d5308401ddf857')
+}
 ```
 
-## Read concern and read preference: how fresh, from where
+```text
+{
+  acknowledged: true,
+  insertedId: new ObjectId('6abccc39a50eaebf0946af88')
+}
+```
 
-A **read concern** controls which version of the data a read may return. With `local`, you get whatever the member you queried has right now, even if that data could later be rolled back. With `majority`, you only see data that a majority of the set has stored, so what you read will not be undone. With `linearizable`, a read on the primary reflects every write that was acknowledged before it began — the strongest and slowest option. A separate setting, the **read preference**, chooses *which member* answers: `primary` always gives the freshest data, while `secondary` spreads read load across copies at the cost of possibly trailing slightly behind.
+### You already have `w: "majority"`
 
-Here we read with a majority read concern from the primary, asking for data we know cannot be rolled back:
+Since MongoDB 5.0 the implicit default write concern is `w: "majority"`. The server reports it, and reports that a majority write already waits for the journal on the members that count:
+
+```js
+// mongosh/concern-defaults.js
+const d = db.adminCommand({ getDefaultRWConcern: 1 });
+console.log(d.defaultWriteConcern, d.defaultReadConcern);
+const conf = rs.conf();
+console.log({ writeConcernMajorityJournalDefault: conf.writeConcernMajorityJournalDefault });
+assert.strictEqual(d.defaultWriteConcern.w, "majority");
+assert.strictEqual(conf.writeConcernMajorityJournalDefault, true);
+```
+
+```text
+{ w: 'majority', wtimeout: 0 } { level: 'local' }
+{ writeConcernMajorityJournalDefault: true }
+```
+
+The manual agrees ([Write Concern](https://www.mongodb.com/docs/manual/reference/write-concern/), consulted 2026-09-30): the implicit default is `w: majority`, which waits for the on-disk journal per `writeConcernMajorityJournalDefault` — with one edge case: if the data-bearing voting members are not more than the voting majority (a set with arbiters), the default falls back to `{ w: 1 }`. So an unadorned `insertOne` is already a majority write, and `j: true` on top of `w: "majority"` adds nothing while `writeConcernMajorityJournalDefault` is `true` (the default). It matters for `w: 1`, where `j` decides whether the primary waits for its own journal flush.
+
+### When the concern cannot be satisfied
+
+Ask for two data-bearing members on a one-node set and the server refuses immediately — but note the write was still applied:
+
+```js
+// app/concern-unsatisfiable.mjs
+const members = db.collection("members");
+let err = null;
+try { await members.insertOne({ name: "X" }, { writeConcern: { w: 2, wtimeoutMS: 1000 } }); }
+catch (e) { err = e; }
+console.log(err.name, err.code, err.codeName, "-", err.message);
+console.log("document present anyway:", await members.countDocuments({ name: "X" }));
+if (err.code !== 100) throw new Error("expected UnsatisfiableWriteConcern (100)");
+```
+
+```text
+MongoWriteConcernError 100 UnsatisfiableWriteConcern - Not enough data-bearing nodes
+document present anyway: 1
+```
+
+A write-concern error is not a rollback (the manual: `wtimeout` "does not undo successful data modifications"): it says "I could not confirm enough copies", not "I did not write". This is also why `wtimeout` is uncertain, not a clean failure. The *3-node* run shows the timeout flavour — one secondary frozen with `fsyncLock`, a `w: 3` write with `wtimeout: 2000` (other writes in the same run: `w: 1` acknowledged, `w: "majority"` acknowledged in 3 ms because the other secondary still counts):
+
+```js
+// mongosh/concern-timeout.js @skip-verify needs the 3-node replica set (real output below)
+const lib = db.getSiblingDB("lib");
+lib.members.insertOne({ name: "Grace" }, { writeConcern: { w: 1 } });
+lib.members.insertOne({ name: "Linus" }, { writeConcern: { w: "majority", wtimeout: 5000 } });
+try { lib.members.insertOne({ name: "Edsger" }, { writeConcern: { w: 3, wtimeout: 2000 } }); }
+catch (e) { console.log(e.name, e.code, e.message); console.log(e.errInfo); }
+```
+
+```text
+w:1 ack true
+w:majority with one secondary frozen -> true 3 ms
+MongoWriteConcernError | 64 | waiting for replication timed out
+{ wtimeout: true, writeConcern: { w: 3, wtimeout: 2000, provenance: 'clientSupplied' } }
+primary has 4 docs (the w:3 write is applied even though it errored)
+frozen secondary sees 1 docs
+healthy secondary sees 4
+```
+
+## Read concern: how committed
+
+A **read concern** controls which version of the data a read may return. `local` (the default for reads outside transactions) returns what the queried member has now, even data that could later be rolled back. `available` is the same on a replica set. `majority` returns only data acknowledged by a majority. `snapshot` is `majority`-based and is meant for transactions and multi-statement reads. `linearizable` reflects every majority-acknowledged write that completed before the read began, and works only on the primary. All five run on the one-node set:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members
-      .find({ fines: 0 })
-      .readConcern("majority")
-      .readPref("primary")
+    // mongosh/concern-read.js
+    const counts = {};
+    for (const level of ["local", "available", "majority", "snapshot"]) {
+      counts[level] = db.members.find({ fines: 0 }).readConcern(level).toArray().length;
+    }
+    counts.linearizable = db.members.find({ fines: 0 }).readConcern("linearizable").maxTimeMS(3000).toArray().length;
+    console.log(counts);
+    assert.strictEqual(counts.majority, 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const docs = await db.collection("members")
-      .find({ fines: 0 }, {
-        readConcern: { level: "majority" },
-        readPreference: "primary"
-      })
-      .toArray();
+    // app/concern-read.mjs
+    const members = db.collection("members");
+    await members.deleteMany({});   // fresh start
+    await members.insertMany([{ name: "Ada", fines: 0 }, { name: "Linus", fines: 2 }]);
+    const counts = {};
+    for (const level of ["local", "available", "majority", "snapshot"]) {
+      counts[level] = (await members.find({ fines: 0 }, { readConcern: { level }, readPreference: "primary" }).toArray()).length;
+    }
+    counts.linearizable = (await members.find({ fines: 0 }, { readConcern: { level: "linearizable" }, maxTimeMS: 3000 }).toArray()).length;
+    console.log(counts);
+    if (counts.majority !== 1) throw new Error("expected one member with fines 0");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -147,9 +242,71 @@ Here we read with a majority read concern from the primary, asking for data we k
   </TabItem>
 </Tabs>
 
-## The trade-off, drawn out
+```text
+{ local: 2, available: 2, majority: 2, snapshot: 2, linearizable: 2 }
+```
 
-Every step toward stronger guarantees costs latency. A `w: 1` write returns the instant the primary has it; a `w: "majority"` write waits for the data to travel to and be stored by other members first. The flow below shows where that extra time goes:
+```text
+{ local: 1, available: 1, majority: 1, snapshot: 1, linearizable: 1 }
+```
+
+The levels differ in what they *wait for*, and the difference is visible even on one node. Below, 200 times: write, then immediately count with `local` and with `majority` — once for `w: 1` writes, once for `w: "majority"` writes:
+
+```js
+// app/concern-own-writes.mjs
+const rc = db.collection("rc");
+await rc.deleteMany({});
+async function behindCount(w) {
+  let behind = 0;
+  for (let i = 0; i < 200; i++) {
+    await rc.insertOne({ i, w }, { writeConcern: { w } });
+    const local = await rc.countDocuments({}, { readConcern: { level: "local" } });
+    const maj = await rc.countDocuments({}, { readConcern: { level: "majority" } });
+    if (maj < local) behind++;
+  }
+  return behind;
+}
+const withW1 = await behindCount(1);
+await rc.deleteMany({});
+const withMajority = await behindCount("majority");
+console.log({ "w:1 then majority-read behind": withW1, "w:majority then majority-read behind": withMajority });
+if (withMajority !== 0 || withW1 === 0) throw new Error("expected w:1 to lag and w:majority not to");
+```
+
+```text
+{
+  'w:1 then majority-read behind': 200,
+  'w:majority then majority-read behind': 0
+}
+```
+
+A `w: 1` write is acknowledged before it is majority-committed, so a `majority` read right after it does not see your own write. A `w: "majority"` write followed by a `majority` read always does. (On one node the gap is milliseconds; across a network it is the replication lag.)
+
+`linearizable` is refused on anything but the primary. *3-node* run, connected directly to a secondary:
+
+```text
+MongoServerError | 10107 NotWritablePrimary | cannot satisfy linearizable read concern on non-primary node
+```
+
+## Read preference: from where
+
+**Read preference** chooses *which member* answers. `primary` (default) always reads the freshest data; `secondary`/`secondaryPreferred` spread load at the cost of staleness. *3-node* run of the Node driver, 20 `explain`ed reads with `secondaryPreferred` — the primary was `rs-1`:
+
+```js
+// app/concern-readpref.mjs @skip-verify needs the 3-node replica set (real output below)
+const client = new MongoClient("mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3");
+await client.connect();
+const members = client.db("lib").collection("members", { readPreference: "secondaryPreferred" });
+const served = new Set();
+for (let i = 0; i < 20; i++) served.add((await members.find({}).explain()).serverInfo.host);
+console.log("reads served by:", [...served].sort());
+```
+
+```text
+reads served by: [ 'rs-2', 'rs-3' ]
+```
+
+And what a secondary can show: with `rs-2` frozen (`db.fsyncLock()`) while four documents were written on the primary, a direct read on `rs-2` returned **1** document and the healthy `rs-3` returned **4** (output above). Read concern and read preference are independent: `majority` on a lagging secondary is safe from rollback, but still behind.
 
 export const ackFlow = `flowchart TD
   C["Client sends a write"] --> P["Primary stores it"]
@@ -162,74 +319,127 @@ export const ackFlow = `flowchart TD
 
 <Mermaid code={ackFlow} title="With majority write concern the client waits until a majority of members has stored the write before it is acknowledged" />
 
-**In Compass:** the connection settings dialog lets you set a default read preference for the whole session, so reads you run in the Documents tab can be routed to secondaries without changing each query.
+**In Compass:** the connection settings dialog lets you set a default read preference for the whole session, so reads in the Documents tab can be routed to secondaries without changing each query.
 
 ## Tips and gotchas
 
-- `w: "majority"` is the sweet spot for durability that survives a failover; `w: 1` is faster but a not-yet-replicated write can be lost if the primary fails right after acknowledging it.
-- `wtimeout` only bounds the *wait*. If it fires, the write may still have been applied on the primary — it just was not confirmed by enough members in time, so treat the timeout as uncertain, not as a clean failure.
-- Reading from a secondary with read preference `secondary` can return slightly stale data, because secondaries trail the primary. Pair it with a read concern that matches how fresh your application actually needs the data to be.
+- `w: "majority"` is the default; ask for `w: 1` only for data you can afford to lose, and know that it can be lost (proof below).
+- `wtimeout` bounds the *wait*, not the write: the timed-out `w: 3` insert was applied on the primary.
+- Reading from a secondary can return stale data, because secondaries trail the primary — a frozen one returned 1 of 4 documents.
+- `linearizable` needs the primary and should carry `maxTimeMS`, otherwise it can block when no majority is reachable.
 
 <Callout title="Pick the weakest guarantee that is still correct">
-Stronger concerns cost latency, so do not reach for linearizable reads or journalled majority writes everywhere by reflex. Choose the lightest setting that still meets the correctness your use case demands, and spend the latency only where it buys you something.
+Stronger concerns cost latency, so do not reach for linearizable reads everywhere by reflex. But the default is already majority: lowering it (w: 1) is the deliberate, risky choice, not raising it.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant "optimising" an order write turns the concern down and writes a confident comment:
+
+<SpotTheBug lang="js" code={`// AI comment: "w: 1 = acknowledged by the primary, which is durable; faster than majority"
+await orders.insertOne(order, { writeConcern: { w: 1 } });`}>
+
+An acknowledgement from the primary is not durability across a failover. *3-node* proof: the primary `rs-2` was cut off from the network, a `w: 1` insert was still acknowledged, the other two members elected `rs-1`, and after `rs-2` was reconnected the acknowledged document was **rolled back** and is gone (its BSON was moved to `/data/db/rollback/`). The fix is the default, `w: "majority"` — during the same partition it did not falsely acknowledge, it timed out:
+
+```js
+// mongosh/concern-lost-write.js @skip-verify needs the 3-node replica set and a network partition (real output below)
+const l = db.getSiblingDB("lib");
+l.lost2.insertOne({ _id: "only-on-old-primary" }, { writeConcern: { w: 1 } });   // acknowledged
+try { l.lost2.insertOne({ _id: "maj" }, { writeConcern: { w: "majority", wtimeout: 3000 } }); }
+catch (e) { console.log("w:majority ->", e.codeName); }
+```
+
+```text
+ack on isolated primary: true
+w:majority -> WriteConcernTimeout
+(after the partition heals, on the set)
+rs-1:27017 PRIMARY | rs-2:27017 SECONDARY | rs-3:27017 SECONDARY
+[ { _id: 'on-new-primary' } ]
+/data/db/rollback/200fb679-8f77-415c-bafe-7bf7b4b846b3/removed.2026-09-30T08-43-30.1.bson
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Two independent dials. **Write concern** says how many copies must have the write before *you* are told "done" — it changes what the writer knows. **Read concern** says how settled the data must be before a reader may see it — it changes what the reader sees. Read preference only chooses the server. A write that was acknowledged by fewer than a majority can vanish in a failover; a read below `majority` can see it before it vanishes.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Write concern `w: "majority"` | A write survives a failover because most members have confirmed it | Higher latency, since it waits for a network round trip to secondaries |
-| Write concern `w: 1` | Fastest, acknowledges as soon as the primary accepts | If the primary fails before replicating, that write can be lost |
-| Read concern `majority` | No dirty reads, no chance of seeing data later rolled back | Data can lag slightly, since it waits for replication to a majority first |
-| Read concern `local` | Fastest, freshest data from the queried node | Can read data not yet permanently committed, which can later be rolled back after a failover |
+| Write concern `w: "majority"` (default) | An acknowledged write survives a failover | A network round trip to secondaries (3 ms with a frozen member on the lab); blocks or times out if a majority is unreachable |
+| Write concern `w: 1` | Fastest, acknowledges as soon as the primary accepts | Proven above: an acknowledged write was rolled back after a partition |
+| Read concern `majority` / `snapshot` | No reads of data that can be rolled back | Lags `local` (and your own `w: 1` writes) |
+| Read concern `local` | Fastest, freshest data on the queried member | May read data that is later rolled back |
+| Read concern `linearizable` | Reflects every completed majority write | Primary only; slow; needs `maxTimeMS` |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using `w: "majority"` with `j: false` and assuming it is as safe as having the journal** — `majority` only says how many members confirmed, not that each one has flushed to disk. To truly survive a crash, always set `j: true` alongside it.
-- **Treating read concern and read preference as the same thing** — read concern controls how "fresh and committed" the data is; read preference controls "which member" answers. Setting only one does not solve the other's problem — reading from a secondary with a majority read concern still returns data that is behind, even if not dirty.
-- **Setting the strongest write concern as the default for every operation regardless of use case** — writing logs or easily-regenerated data with `w: "majority", j: true` just like financial data unnecessarily drops throughput, when those operations can tolerate a small amount of data loss.
+- **"`w: 'majority'` needs `j: true` to be safe."** — with `writeConcernMajorityJournalDefault: true` (the default, shown above) a majority write already waits for the journal on the members that count.
+- **"The default write concern is `w: 1`."** — since 5.0 it is `majority`; `getDefaultRWConcern` shows it.
+- **"A `wtimeout` error means the write failed."** — the write was applied on the primary (`primary has 4 docs`); only the confirmation is missing.
+- **"An acknowledged write is safe."** — only if the concern covers a majority; a `w: 1` acknowledgement was rolled back.
+- **"Read concern and read preference are the same knob."** — one picks how settled the data is, the other picks which member; a `majority` read on a lagging secondary is safe but still stale.
 
-> 💡 Real-world example
->
-> **Banking and payment systems** — use `w: "majority", j: true` for every financial transaction, because added latency is acceptable, but losing data is not, ever.
->
-> **A typical digital asset exchange platform** — uses read concern `majority` when reading a balance to decide whether to approve a transaction, so it never reads a value that could later be rolled back after a failover and wrongly approves a transaction.
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; they are not executed by the course's automated checker._
 
 export const quizConcerns = [
   {
-    q: 'What does a write concern of w: "majority" guarantee?',
-    options: [
-      'Only the primary has the write',
-      'A majority of the set has stored the write, so it survives one member failing',
-      'Every member has the write before acknowledging',
-      'The write skips the journal for speed',
-    ],
-    answer: 1,
+    q: 'What is the implicit default write concern on MongoDB 8 (unset by the client)?',
+    options: ['w: 0', 'w: 1', 'w: "majority"', 'w: 1 with j: true'],
+    answer: 2,
+    explain: 'getDefaultRWConcern returned defaultWriteConcern { w: "majority", wtimeout: 0 } on a fresh deployment (defaultReadConcern { level: "local" }).',
   },
   {
-    q: 'What does the j option in a write concern require?',
+    q: 'Do you need j: true on top of w: "majority" for the write to reach the journal?',
     options: [
-      'That the write is sent to a secondary first',
-      'That the write is flushed to the on-disk journal before acknowledgement',
-      'That a join is performed on the data',
-      'That the write is rejected if a conflict exists',
+      'Yes, otherwise majority never journals',
+      'No, while writeConcernMajorityJournalDefault is true (the default) a majority write already waits for the journal on the members that count',
+      'Only on secondaries',
+      'j is ignored everywhere',
     ],
     answer: 1,
+    explain: 'rs.conf().writeConcernMajorityJournalDefault printed true.',
   },
   {
-    q: 'Which read concern only returns data a majority has stored?',
-    options: ['local', 'majority', 'available', 'primary'],
-    answer: 1,
-  },
-  {
-    q: 'What does read preference control?',
+    q: 'A w: 3 insert with wtimeout: 2000 returns WriteConcernTimeout (64). Is the document on the primary?',
     options: [
-      'How many members acknowledge a write',
-      'Which member of the set answers a read',
-      'Whether the journal is used',
-      'The order of fields returned',
+      'No, the timeout rolled it back',
+      'Yes, the write was applied; only the confirmation from enough members is missing',
+      'Only if j was true',
+      'It depends on the read concern',
     ],
     answer: 1,
+    explain: 'The 3-node run showed "primary has 4 docs" after the timed-out insert.',
+  },
+  {
+    q: 'You write with w: 1 and immediately read with readConcern "majority". What did 200 real trials show?',
+    options: [
+      'The read always sees your write',
+      'The majority read was behind your own write every time; after a w: "majority" write it was never behind',
+      'The read fails with an error',
+      'The read blocks until replication',
+    ],
+    answer: 1,
+    explain: 'Real counts: 200 of 200 behind after w: 1, 0 of 200 after w: "majority".',
+  },
+  {
+    q: 'A primary is partitioned from the others, accepts a w: 1 insert (acknowledged), and the rest elect a new primary. What happens to that document when the old primary rejoins?',
+    options: [
+      'It is kept and replicated',
+      'It is rolled back (moved to the rollback directory) and disappears from the set',
+      'It is merged with the new primary\'s data',
+      'The old primary refuses to rejoin',
+    ],
+    answer: 1,
+    explain: 'In the lab the acknowledged document was absent afterwards and a removed.*.bson file appeared in /data/db/rollback.',
+  },
+  {
+    q: 'Which read concern is refused on a secondary?',
+    options: ['local', 'available', 'majority', 'linearizable'],
+    answer: 3,
+    explain: 'The secondary answered: cannot satisfy linearizable read concern on non-primary node.',
   },
 ]
 

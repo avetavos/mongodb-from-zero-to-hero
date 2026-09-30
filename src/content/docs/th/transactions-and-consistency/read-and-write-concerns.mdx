@@ -1,6 +1,6 @@
 ---
 title: Read and write concerns
-description: ปรับ durability ด้วย write concern (w, j, wtimeout) และ visibility ด้วย read concern (local, majority, linearizable) พร้อม read preference และการแลกเปลี่ยนเรื่อง latency
+description: ปรับความคงทนด้วย write concern (w, j, wtimeout) และการมองเห็นด้วย read concern (local, majority, snapshot, linearizable) พร้อม read preference — พร้อมค่าเริ่มต้นที่แฝงอยู่ timeout จริง และ write แบบ w:1 ที่หายไปจริงบนเซต 3 โหนด
 sidebar:
   order: 4
 ---
@@ -9,35 +9,49 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-replica set เก็บสำเนาข้อมูลของคุณไว้หลายชุด: **primary** หนึ่งตัวที่รับการเขียนทั้งหมด และ **secondary** หนึ่งตัวหรือมากกว่าที่คัดลอกการเขียนเหล่านั้นมา ความซ้ำซ้อนนี้คือสิ่งที่ทำให้ปุ่ม durability และ visibility มีความหมาย
+replica set เก็บข้อมูลของคุณหลายชุด: **primary** หนึ่งตัวที่รับการเขียนทั้งหมด และ **secondary** หนึ่งตัวหรือมากกว่าที่คัดลอกการเขียนเหล่านั้นไป ความซ้ำซ้อนนี้คือสิ่งที่ทำให้ปุ่มปรับความคงทนและการมองเห็นมีความหมาย เมื่อเขียน คุณกำหนดได้ว่าต้องมีกี่สำเนายืนยันการเขียนก่อนจะถือว่าเสร็จ เมื่ออ่าน คุณกำหนดได้ว่าข้อมูลต้อง commit แล้วและสดแค่ไหน สองการตั้งค่านี้คือ **write concern** และ **read concern**
 
-เมื่อคุณเขียน คุณตัดสินใจได้ว่าต้องมีสำเนากี่ชุดยืนยันการเขียน ก่อนจะถือว่าเขียนเสร็จ — นี่คือปุ่ม **write concern** เมื่อคุณอ่าน คุณตัดสินใจได้ว่าข้อมูลที่คุณได้กลับมาต้อง commit แล้วและสดแค่ไหน — นี่คือปุ่ม **read concern**
+output มาจากสองที่ ทั้งคู่บนเครื่อง Mac นี้ด้วย mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0: fence ที่มี path comment รันบน replica set โหนดเดียวของคอร์ส; fence ที่ระบุว่า *3-node* รันบน replica set สามคอนเทนเนอร์ชั่วคราวบน Docker network (`rs-1`, `rs-2`, `rs-3` สตาร์ทด้วย `--replSet rsb3`) ซึ่งลบทิ้งหลังใช้งาน แท็บ Python/Go/Rust สะท้อนการเรียกที่ตรวจแล้วใน shell/Node และไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส
 
-ทั้งสองปุ่มนี้ช่วยให้คุณเลื่อนระหว่างเร็ว-แต่-อ่อนกับช้า-แต่-แข็งแกร่งได้ในทุก operation
+## Write concern: คงทนแค่ไหน ยืนยันแค่ไหน
 
-## write concern: durable แค่ไหน ยืนยันแค่ไหน
+write concern มีสามส่วน `w` บอกว่ามีสมาชิกกี่ตัวต้องยืนยัน: `w: 1` คือเฉพาะ primary, `w: "majority"` คือเสียงข้างมากของสมาชิกที่มีสิทธิ์โหวตมีการเขียนนั้นแล้ว `j` เมื่อเป็น true ต้องให้การเขียนอยู่ใน **journal** บนดิสก์ของสมาชิกที่นับ `wtimeout` (option ของ driver คือ `wtimeoutMS`) จำกัดเวลาที่ server รอการยืนยันเหล่านั้น
 
-write concern มีสามส่วน ค่า `w` บอกว่าสมาชิกกี่ตัวต้องตอบรับการเขียน: `w: 1` หมายถึงเฉพาะ primary ส่วน `w: "majority"` หมายถึงสมาชิกส่วนใหญ่ของชุดเก็บข้อมูลนั้นแล้ว — ระดับที่การเขียนรอดพ้นจากการสูญเสียสมาชิกตัวเดียวใด ๆ ค่า `j` เมื่อเป็น true กำหนดให้การเขียนต้องถูก flush ลง on-disk **journal** ก่อนจะตอบรับ เพื่อให้รอดจากการ crash ไม่ใช่แค่ restart โปรเซส และ `wtimeout` จำกัดว่า driver จะรอการตอบรับเหล่านั้นนานแค่ไหนก่อนจะยอมแพ้พร้อม error
+```js
+// mongosh/concern-seed.js
+db.members.insertMany([
+  { name: "Ada", fines: 0 },
+  { name: "Linus", fines: 2 },
+]);
+assert.strictEqual(db.members.countDocuments(), 2);
+```
 
-ตรงนี้เรา insert สมาชิกคนหนึ่งแล้วบังคับให้สมาชิกส่วนใหญ่ของชุดยืนยัน พร้อม journal ภายในห้าวินาที:
+insert สมาชิกและกำหนดให้ต้องได้ majority ที่ journal แล้ว ภายในห้าวินาที:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertOne(
+    // mongosh/concern-write.js
+    const res = db.members.insertOne(
       { name: "Grace", fines: 0 },
       { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
-    )
+    );
+    console.log(res);
+    assert.ok(res.acknowledged);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").insertOne(
+    // app/concern-write.mjs
+    const res = await db.collection("members").insertOne(
       { name: "Grace", fines: 0 },
-      { writeConcern: { w: "majority", j: true, wtimeout: 5000 } }
+      { writeConcern: { w: "majority", j: true, wtimeoutMS: 5000 } }
     );
+    console.log(res);
+    if (!res.acknowledged) throw new Error("expected an acknowledged write");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -76,35 +90,112 @@ write concern มีสามส่วน ค่า `w` บอกว่าสม
   </TabItem>
 </Tabs>
 
-การตอบรับจะกลับมาก็ต่อเมื่อส่วนใหญ่ได้จัดเก็บการเขียนแล้วเท่านั้น:
-
-```json
-{ "acknowledged": true, "insertedId": "65f0b3d4e4b0a1c2e4b0a1e7" }
+```text
+{
+  acknowledged: true,
+  insertedId: ObjectId('6abccc3967d5308401ddf857')
+}
 ```
 
-## read concern และ read preference: สดแค่ไหน จากที่ไหน
+```text
+{
+  acknowledged: true,
+  insertedId: new ObjectId('6abccc39a50eaebf0946af88')
+}
+```
 
-**read concern** ควบคุมว่าการอ่านอาจคืนข้อมูลเวอร์ชันใด ด้วย `local` คุณได้สิ่งที่สมาชิกที่คุณ query มีอยู่ตอนนี้ แม้ข้อมูลนั้นอาจ roll back ทีหลังก็ตาม ด้วย `majority` คุณเห็นเฉพาะข้อมูลที่สมาชิกส่วนใหญ่ของชุดได้จัดเก็บแล้ว ดังนั้นสิ่งที่คุณอ่านจะไม่ถูกยกเลิก ด้วย `linearizable` การอ่านบน primary จะสะท้อนทุกการเขียนที่ตอบรับไปแล้วก่อนการอ่านนี้จะเริ่ม — ตัวเลือกที่แข็งแกร่งที่สุดและช้าที่สุด การตั้งค่าแยกต่างหากอย่าง **read preference** เลือกว่า *สมาชิกตัวไหน* เป็นผู้ตอบ: `primary` ให้ข้อมูลที่สดที่สุดเสมอ ส่วน `secondary` กระจายภาระการอ่านไปยังสำเนาต่าง ๆ โดยแลกกับการที่อาจตามหลังอยู่เล็กน้อย
+### คุณมี `w: "majority"` อยู่แล้ว
 
-ตรงนี้เราอ่านด้วย majority read concern จาก primary โดยขอข้อมูลที่เรารู้ว่าไม่สามารถถูก roll back ได้:
+ตั้งแต่ MongoDB 5.0 write concern เริ่มต้นแบบแฝงคือ `w: "majority"` server รายงานค่านี้ และรายงานว่า majority write รอ journal บนสมาชิกที่นับอยู่แล้ว:
+
+```js
+// mongosh/concern-defaults.js
+const d = db.adminCommand({ getDefaultRWConcern: 1 });
+console.log(d.defaultWriteConcern, d.defaultReadConcern);
+const conf = rs.conf();
+console.log({ writeConcernMajorityJournalDefault: conf.writeConcernMajorityJournalDefault });
+assert.strictEqual(d.defaultWriteConcern.w, "majority");
+assert.strictEqual(conf.writeConcernMajorityJournalDefault, true);
+```
+
+```text
+{ w: 'majority', wtimeout: 0 } { level: 'local' }
+{ writeConcernMajorityJournalDefault: true }
+```
+
+manual ก็ยืนยันเช่นนั้น ([Write Concern](https://www.mongodb.com/docs/manual/reference/write-concern/), ตรวจเมื่อ 2026-09-30): ค่าเริ่มต้นแบบแฝงคือ `w: majority` ซึ่งรอ journal บนดิสก์ตาม `writeConcernMajorityJournalDefault` — มีกรณียกเว้นหนึ่งอย่าง: ถ้าสมาชิกที่เก็บข้อมูลและมีสิทธิ์โหวตไม่มากกว่า voting majority (เซตที่มี arbiter) ค่าเริ่มต้นจะถอยไปเป็น `{ w: 1 }` ดังนั้น `insertOne` เปล่า ๆ ก็เป็น majority write อยู่แล้ว และ `j: true` เพิ่มบน `w: "majority"` ไม่ได้เพิ่มอะไรตราบที่ `writeConcernMajorityJournalDefault` เป็น `true` (ค่าเริ่มต้น) มันสำคัญกับ `w: 1` ซึ่ง `j` เป็นตัวตัดสินว่า primary จะรอ flush journal ของตัวเองหรือไม่
+
+### เมื่อ concern ทำให้ครบไม่ได้
+
+ขอสมาชิกที่เก็บข้อมูลสองตัวบนเซตโหนดเดียว server ปฏิเสธทันที — แต่สังเกตว่าการเขียนยังถูกนำไปใช้แล้ว:
+
+```js
+// app/concern-unsatisfiable.mjs
+const members = db.collection("members");
+let err = null;
+try { await members.insertOne({ name: "X" }, { writeConcern: { w: 2, wtimeoutMS: 1000 } }); }
+catch (e) { err = e; }
+console.log(err.name, err.code, err.codeName, "-", err.message);
+console.log("document present anyway:", await members.countDocuments({ name: "X" }));
+if (err.code !== 100) throw new Error("expected UnsatisfiableWriteConcern (100)");
+```
+
+```text
+MongoWriteConcernError 100 UnsatisfiableWriteConcern - Not enough data-bearing nodes
+document present anyway: 1
+```
+
+error ของ write concern ไม่ใช่ rollback (manual: `wtimeout` "does not undo successful data modifications"): มันบอกว่า "ฉันยืนยันสำเนาได้ไม่พอ" ไม่ใช่ "ฉันไม่ได้เขียน" นี่คือเหตุผลที่ `wtimeout` เป็นผลลัพธ์ที่ไม่แน่นอน ไม่ใช่ความล้มเหลวที่สะอาด การรัน *3-node* แสดงแบบ timeout — secondary หนึ่งตัวถูกแช่แข็งด้วย `fsyncLock`, เขียน `w: 3` พร้อม `wtimeout: 2000` (การเขียนอื่นในรอบเดียวกัน: `w: 1` ได้ ack, `w: "majority"` ได้ ack ใน 3 ms เพราะ secondary อีกตัวยังนับอยู่):
+
+```js
+// mongosh/concern-timeout.js @skip-verify needs the 3-node replica set (real output below)
+const lib = db.getSiblingDB("lib");
+lib.members.insertOne({ name: "Grace" }, { writeConcern: { w: 1 } });
+lib.members.insertOne({ name: "Linus" }, { writeConcern: { w: "majority", wtimeout: 5000 } });
+try { lib.members.insertOne({ name: "Edsger" }, { writeConcern: { w: 3, wtimeout: 2000 } }); }
+catch (e) { console.log(e.name, e.code, e.message); console.log(e.errInfo); }
+```
+
+```text
+w:1 ack true
+w:majority with one secondary frozen -> true 3 ms
+MongoWriteConcernError | 64 | waiting for replication timed out
+{ wtimeout: true, writeConcern: { w: 3, wtimeout: 2000, provenance: 'clientSupplied' } }
+primary has 4 docs (the w:3 write is applied even though it errored)
+frozen secondary sees 1 docs
+healthy secondary sees 4
+```
+
+## Read concern: commit แล้วแค่ไหน
+
+**read concern** ควบคุมว่าการอ่านคืนข้อมูลเวอร์ชันไหนได้ `local` (ค่าเริ่มต้นสำหรับการอ่านนอก transaction) คืนสิ่งที่สมาชิกที่ถูก query มีตอนนี้ แม้เป็นข้อมูลที่อาจถูก roll back ภายหลัง `available` บน replica set เหมือนกับ `local` `majority` คืนเฉพาะข้อมูลที่เสียงข้างมากยืนยันแล้ว `snapshot` อิงกับ `majority` และออกแบบไว้สำหรับ transaction และการอ่านหลายคำสั่ง `linearizable` สะท้อนทุกการเขียนที่เสียงข้างมากยืนยันและเสร็จก่อนการอ่านจะเริ่ม และใช้ได้กับ primary เท่านั้น ทั้งห้าระดับรันได้บนเซตโหนดเดียว:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members
-      .find({ fines: 0 })
-      .readConcern("majority")
-      .readPref("primary")
+    // mongosh/concern-read.js
+    const counts = {};
+    for (const level of ["local", "available", "majority", "snapshot"]) {
+      counts[level] = db.members.find({ fines: 0 }).readConcern(level).toArray().length;
+    }
+    counts.linearizable = db.members.find({ fines: 0 }).readConcern("linearizable").maxTimeMS(3000).toArray().length;
+    console.log(counts);
+    assert.strictEqual(counts.majority, 2);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const docs = await db.collection("members")
-      .find({ fines: 0 }, {
-        readConcern: { level: "majority" },
-        readPreference: "primary"
-      })
-      .toArray();
+    // app/concern-read.mjs
+    const members = db.collection("members");
+    await members.deleteMany({});   // fresh start
+    await members.insertMany([{ name: "Ada", fines: 0 }, { name: "Linus", fines: 2 }]);
+    const counts = {};
+    for (const level of ["local", "available", "majority", "snapshot"]) {
+      counts[level] = (await members.find({ fines: 0 }, { readConcern: { level }, readPreference: "primary" }).toArray()).length;
+    }
+    counts.linearizable = (await members.find({ fines: 0 }, { readConcern: { level: "linearizable" }, maxTimeMS: 3000 }).toArray()).length;
+    console.log(counts);
+    if (counts.majority !== 1) throw new Error("expected one member with fines 0");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -151,9 +242,71 @@ write concern มีสามส่วน ค่า `w` บอกว่าสม
   </TabItem>
 </Tabs>
 
-## การแลกเปลี่ยน อธิบายให้เห็นภาพ
+```text
+{ local: 2, available: 2, majority: 2, snapshot: 2, linearizable: 2 }
+```
 
-ทุกก้าวไปสู่การรับประกันที่แข็งแกร่งกว่ามีต้นทุนเป็น latency การเขียน `w: 1` คืนค่าทันทีที่ primary รับไว้ ส่วนการเขียน `w: "majority"` รอให้ข้อมูลเดินทางไปและถูกจัดเก็บโดยสมาชิกตัวอื่นก่อน ผังด้านล่างแสดงว่าเวลาที่เพิ่มขึ้นนั้นไปอยู่ที่ไหน:
+```text
+{ local: 1, available: 1, majority: 1, snapshot: 1, linearizable: 1 }
+```
+
+แต่ละระดับต่างกันที่ *สิ่งที่มันรอ* และความต่างนั้นมองเห็นได้แม้บนโหนดเดียว ด้านล่างคือ 200 ครั้งของ: เขียน แล้วนับทันทีด้วย `local` และ `majority` — ครั้งหนึ่งกับการเขียนแบบ `w: 1` อีกครั้งกับ `w: "majority"`:
+
+```js
+// app/concern-own-writes.mjs
+const rc = db.collection("rc");
+await rc.deleteMany({});
+async function behindCount(w) {
+  let behind = 0;
+  for (let i = 0; i < 200; i++) {
+    await rc.insertOne({ i, w }, { writeConcern: { w } });
+    const local = await rc.countDocuments({}, { readConcern: { level: "local" } });
+    const maj = await rc.countDocuments({}, { readConcern: { level: "majority" } });
+    if (maj < local) behind++;
+  }
+  return behind;
+}
+const withW1 = await behindCount(1);
+await rc.deleteMany({});
+const withMajority = await behindCount("majority");
+console.log({ "w:1 then majority-read behind": withW1, "w:majority then majority-read behind": withMajority });
+if (withMajority !== 0 || withW1 === 0) throw new Error("expected w:1 to lag and w:majority not to");
+```
+
+```text
+{
+  'w:1 then majority-read behind': 200,
+  'w:majority then majority-read behind': 0
+}
+```
+
+การเขียนแบบ `w: 1` ถูก acknowledge ก่อนที่จะถูก commit แบบ majority การอ่านแบบ `majority` ทันทีหลังจากนั้นจึงไม่เห็นการเขียนของคุณเอง ส่วนการเขียนแบบ `w: "majority"` ตามด้วยการอ่านแบบ `majority` เห็นเสมอ (บนโหนดเดียวช่องว่างนี้เป็นระดับมิลลิวินาที ข้ามเครือข่ายมันคือ replication lag)
+
+`linearizable` ถูกปฏิเสธบนทุกตัวที่ไม่ใช่ primary การรัน *3-node* เชื่อมตรงกับ secondary:
+
+```text
+MongoServerError | 10107 NotWritablePrimary | cannot satisfy linearizable read concern on non-primary node
+```
+
+## Read preference: จากที่ไหน
+
+**read preference** เลือกว่า *สมาชิกตัวไหน* ตอบ `primary` (ค่าเริ่มต้น) อ่านข้อมูลสดที่สุดเสมอ; `secondary`/`secondaryPreferred` กระจายโหลดโดยแลกกับข้อมูลที่ล้าหลัง การรัน *3-node* ของ Node driver ทำ `explain` 20 ครั้งด้วย `secondaryPreferred` — primary คือ `rs-1`:
+
+```js
+// app/concern-readpref.mjs @skip-verify needs the 3-node replica set (real output below)
+const client = new MongoClient("mongodb://rs-1:27017,rs-2:27017,rs-3:27017/?replicaSet=rsb3");
+await client.connect();
+const members = client.db("lib").collection("members", { readPreference: "secondaryPreferred" });
+const served = new Set();
+for (let i = 0; i < 20; i++) served.add((await members.find({}).explain()).serverInfo.host);
+console.log("reads served by:", [...served].sort());
+```
+
+```text
+reads served by: [ 'rs-2', 'rs-3' ]
+```
+
+และสิ่งที่ secondary แสดงได้: เมื่อ `rs-2` ถูกแช่แข็ง (`db.fsyncLock()`) ขณะที่ primary เขียนสี่ document การอ่านตรงบน `rs-2` คืน **1** document ส่วน `rs-3` ที่ปกติคืน **4** (output ข้างบน) read concern กับ read preference เป็นอิสระต่อกัน: `majority` บน secondary ที่ล้าหลังปลอดภัยจาก rollback แต่ก็ยังล้าหลังอยู่
 
 export const ackFlow = `flowchart TD
   C["Client sends a write"] --> P["Primary stores it"]
@@ -164,76 +317,129 @@ export const ackFlow = `flowchart TD
   P --> M
   M -->|"Yes"| ACK["Acknowledge to client — write is durable"]`
 
-<Mermaid code={ackFlow} title="ด้วย majority write concern client จะรอจนสมาชิกส่วนใหญ่เก็บข้อมูลเรียบร้อยก่อน ถึงจะได้รับการตอบรับ" />
+<Mermaid code={ackFlow} title="ด้วย majority write concern client รอจนเสียงข้างมากของสมาชิกเก็บการเขียนแล้วจึงได้รับ acknowledgement" />
 
-**ใน Compass:** ไดอะล็อกการตั้งค่า connection ให้คุณตั้ง read preference เริ่มต้นสำหรับทั้ง session ดังนั้นการอ่านที่คุณรันในแท็บ Documents สามารถถูกส่งไปยัง secondary ได้โดยไม่ต้องเปลี่ยนแต่ละ query
+**ใน Compass:** dialog ตั้งค่าการเชื่อมต่อให้ตั้ง read preference เริ่มต้นสำหรับทั้ง session ได้ ทำให้การอ่านในแท็บ Documents ถูกส่งไป secondary โดยไม่ต้องแก้ทุก query
 
 ## เคล็ดลับและข้อควรระวัง
 
-- `w: "majority"` คือจุดที่เหมาะที่สุดสำหรับ durability ที่รอดจาก failover ส่วน `w: 1` เร็วกว่าแต่การเขียนที่ยังไม่ได้ replicate อาจหายได้ถ้า primary ล้มทันทีหลังตอบรับ
-- `wtimeout` จำกัดแค่ *การรอ* เท่านั้น ถ้า timeout เกิดขึ้น การเขียนอาจลงบน primary ไปแล้วก็ได้ เพียงแต่ยังไม่มีสมาชิกยืนยันครบภายในเวลา ดังนั้นให้ถือว่า timeout เป็นความไม่แน่นอน ไม่ใช่ความล้มเหลวที่สะอาด
-- การอ่านจาก secondary ด้วย read preference `secondary` สามารถคืนข้อมูลที่เก่าไปเล็กน้อยได้ เพราะ secondary ตามหลัง primary ให้จับคู่กับ read concern ที่ตรงกับระดับความสดที่แอปของคุณต้องการจริง ๆ
+- `w: "majority"` เป็นค่าเริ่มต้น; ขอ `w: 1` เฉพาะข้อมูลที่ยอมเสียได้ และรู้ว่ามันหายได้ (พิสูจน์ข้างล่าง)
+- `wtimeout` จำกัด *การรอ* ไม่ใช่การเขียน: insert `w: 3` ที่ timeout ถูกนำไปใช้บน primary แล้ว
+- การอ่านจาก secondary อาจได้ข้อมูลล้าหลัง เพราะ secondary ตามหลัง primary — ตัวที่ถูกแช่แข็งคืน 1 จาก 4 document
+- `linearizable` ต้องใช้ primary และควรมี `maxTimeMS` ไม่เช่นนั้นอาจบล็อกเมื่อเข้าถึง majority ไม่ได้
 
-<Callout title="เลือกการรับประกันที่อ่อนที่สุดแต่ยังถูกต้อง">
-concern ที่แข็งแกร่งกว่ามีต้นทุนเป็น latency ดังนั้นอย่าคว้า linearizable read หรือ journalled majority write ไปทุกที่โดยอัตโนมัติ เลือกการตั้งค่าที่เบาที่สุดที่ยังตรงตามความถูกต้องที่ use case ของคุณเรียกร้อง และยอมจ่าย latency เฉพาะจุดที่ได้อะไรกลับมาจริง ๆ
+<Callout title="เลือกการรับประกันที่อ่อนที่สุดที่ยังถูกต้อง">
+concern ที่แรงกว่าเสีย latency จึงอย่าใช้ linearizable read ทุกที่ตามสัญชาตญาณ แต่ค่าเริ่มต้นเป็น majority อยู่แล้ว: การลดมัน (w: 1) ต่างหากที่เป็นการตัดสินใจที่ตั้งใจและเสี่ยง ไม่ใช่การเพิ่ม
 </Callout>
 
-## ข้อแลกเปลี่ยน
+## Reading AI-generated code
 
-| ตัวเลือก | Benefit | Cost |
+ผู้ช่วย AI ที่ "ปรับแต่ง" การเขียน order ลด concern ลงและเขียนคอมเมนต์อย่างมั่นใจ:
+
+<SpotTheBug lang="js" code={`// AI comment: "w: 1 = acknowledged by the primary, which is durable; faster than majority"
+await orders.insertOne(order, { writeConcern: { w: 1 } });`}>
+
+acknowledgement จาก primary ไม่ใช่ความคงทนข้าม failover หลักฐานบน *3-node*: primary `rs-2` ถูกตัดขาดจากเครือข่าย, insert แบบ `w: 1` ยังได้ acknowledge, อีกสองสมาชิกเลือก `rs-1` ขึ้นมา และหลังเชื่อม `rs-2` กลับ document ที่ได้ acknowledge ไปแล้วถูก **rollback** และหายไป (BSON ของมันถูกย้ายไป `/data/db/rollback/`) วิธีแก้คือค่าเริ่มต้น `w: "majority"` — ระหว่าง partition เดียวกัน มันไม่ acknowledge เท็จ แต่ timeout:
+
+```js
+// mongosh/concern-lost-write.js @skip-verify needs the 3-node replica set and a network partition (real output below)
+const l = db.getSiblingDB("lib");
+l.lost2.insertOne({ _id: "only-on-old-primary" }, { writeConcern: { w: 1 } });   // acknowledged
+try { l.lost2.insertOne({ _id: "maj" }, { writeConcern: { w: "majority", wtimeout: 3000 } }); }
+catch (e) { console.log("w:majority ->", e.codeName); }
+```
+
+```text
+ack on isolated primary: true
+w:majority -> WriteConcernTimeout
+(after the partition heals, on the set)
+rs-1:27017 PRIMARY | rs-2:27017 SECONDARY | rs-3:27017 SECONDARY
+[ { _id: 'on-new-primary' } ]
+/data/db/rollback/200fb679-8f77-415c-bafe-7bf7b4b846b3/removed.2026-09-30T08-43-30.1.bson
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+มีสองปุ่มที่เป็นอิสระต่อกัน **Write concern** บอกว่าต้องมีกี่สำเนามีการเขียนนั้นก่อนที่ *คุณ* จะถูกบอกว่า "เสร็จ" — มันเปลี่ยนสิ่งที่ผู้เขียนรู้ **Read concern** บอกว่าข้อมูลต้องนิ่งแค่ไหนก่อนที่ผู้อ่านจะเห็น — มันเปลี่ยนสิ่งที่ผู้อ่านเห็น Read preference แค่เลือก server การเขียนที่ถูกยืนยันโดยน้อยกว่า majority อาจหายไปตอน failover; การอ่านที่ต่ำกว่า `majority` เห็นมันได้ก่อนที่มันจะหาย
+
+## Trade-offs
+
+| ตัวเลือก | ประโยชน์ | ต้นทุน |
 |---------|---------|------|
-| write concern `w: "majority"` | การเขียนรอดจาก failover เพราะสมาชิกส่วนใหญ่ยืนยันแล้ว | latency สูงขึ้นเพราะต้องรอ network round trip ไปยัง secondary |
-| write concern `w: 1` | เร็วที่สุด ตอบกลับทันทีที่ primary รับ | ถ้า primary ล้มก่อน replicate ทัน การเขียนนั้นหายได้ |
-| read concern `majority` | ไม่มี dirty read ไม่มีทางเห็นข้อมูลที่ถูก roll back ภายหลัง | ข้อมูลอาจตามหลังอยู่เล็กน้อยเพราะต้องรอให้ replicate ไปถึงส่วนใหญ่ก่อน |
-| read concern `local` | เร็วที่สุด สดที่สุดจาก node ที่ query | อาจอ่านข้อมูลที่ยังไม่ถูก commit อย่างถาวร แล้วถูก roll back ภายหลังจาก failover |
+| Write concern `w: "majority"` (ค่าเริ่มต้น) | การเขียนที่ acknowledge แล้วรอด failover | ต้องเสีย network round trip ไป secondary (3 ms เมื่อมีสมาชิกถูกแช่แข็งใน lab); บล็อกหรือ timeout ถ้าเข้าถึง majority ไม่ได้ |
+| Write concern `w: 1` | เร็วที่สุด acknowledge ทันทีที่ primary รับ | พิสูจน์ข้างบน: การเขียนที่ acknowledge แล้วถูก rollback หลัง partition |
+| Read concern `majority` / `snapshot` | ไม่อ่านข้อมูลที่อาจถูก rollback | ตามหลัง `local` (และการเขียน `w: 1` ของคุณเอง) |
+| Read concern `local` | เร็วที่สุด ข้อมูลสดที่สุดบนสมาชิกที่ถูก query | อาจอ่านข้อมูลที่ภายหลังถูก rollback |
+| Read concern `linearizable` | สะท้อนทุกการเขียน majority ที่เสร็จแล้ว | ใช้ได้เฉพาะ primary; ช้า; ต้องมี `maxTimeMS` |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ `w: "majority"` กับ `j: false` แล้วคิดว่าปลอดภัยเท่ากับมี journal** — `majority` บอกแค่ว่าสมาชิกกี่ตัวยืนยัน ไม่ได้แปลว่าแต่ละตัว flush ลง disk แล้ว ถ้าต้องการรอดจาก crash จริง ๆ ต้องตั้ง `j: true` ควบคู่ไปด้วยเสมอ
-- **สลับ read concern กับ read preference ว่าเป็นเรื่องเดียวกัน** — read concern ควบคุมว่าข้อมูล "สดและ commit แล้ว" แค่ไหน ส่วน read preference ควบคุมว่า "สมาชิกตัวไหน" เป็นผู้ตอบ การตั้งแค่อย่างใดอย่างหนึ่งไม่ได้แก้ปัญหาของอีกอย่าง เช่น อ่านจาก secondary ด้วย majority read concern ก็ยังได้ข้อมูลที่ตามหลังอยู่ แม้จะไม่ dirty
-- **ตั้ง write concern สูงสุดไว้เป็นค่าเริ่มต้นทุก operation โดยไม่แยกตาม use case** — เขียน log หรือข้อมูลที่ regenerate ได้ง่ายด้วย `w: "majority", j: true` เหมือนกับข้อมูลทางการเงิน ทำให้ throughput ตกโดยไม่จำเป็น ทั้งที่ operation เหล่านั้นทนต่อการสูญเสียข้อมูลเล็กน้อยได้
+- **"`w: 'majority'` ต้องมี `j: true` ถึงจะปลอดภัย"** — เมื่อ `writeConcernMajorityJournalDefault: true` (ค่าเริ่มต้น แสดงข้างบน) majority write รอ journal บนสมาชิกที่นับอยู่แล้ว
+- **"write concern เริ่มต้นคือ `w: 1`"** — ตั้งแต่ 5.0 คือ `majority`; `getDefaultRWConcern` แสดงให้เห็น
+- **"error `wtimeout` แปลว่าการเขียนล้มเหลว"** — การเขียนถูกนำไปใช้บน primary แล้ว (`primary has 4 docs`); ขาดแค่การยืนยัน
+- **"การเขียนที่ acknowledge แล้วปลอดภัย"** — เฉพาะเมื่อ concern ครอบคลุม majority; acknowledgement ของ `w: 1` ถูก rollback ไป
+- **"read concern กับ read preference คือปุ่มเดียวกัน"** — อันหนึ่งเลือกว่าข้อมูลนิ่งแค่ไหน อีกอันเลือกสมาชิก; `majority` บน secondary ที่ล้าหลังปลอดภัยแต่ก็ยังล้าหลัง
 
-> 💡 ตัวอย่างจากของจริง
->
-> **ธนาคาร/ระบบชำระเงิน** — ใช้ `w: "majority", j: true` กับทุกธุรกรรมทางการเงิน เพราะยอมรับ latency ที่เพิ่มขึ้นได้ แต่ยอมรับข้อมูลหายไม่ได้เลย
->
-> **แพลตฟอร์มแลกเปลี่ยนสินทรัพย์ดิจิทัลทั่วไป** — ใช้ read concern `majority` เมื่ออ่านยอดคงเหลือเพื่อตัดสินใจอนุมัติธุรกรรม เพื่อไม่ให้อ่านค่าที่อาจถูก roll back หลัง failover แล้วอนุมัติธุรกรรมผิดพลาด
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่ตรวจแล้วใน shell/Node; ไม่ได้ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizConcerns = [
   {
-    q: 'write concern เป็น w: "majority" รับประกันอะไร?',
-    options: [
-      'เฉพาะ primary เท่านั้นที่มีการเขียน',
-      'สมาชิกส่วนใหญ่ของชุดเก็บข้อมูลแล้ว การเขียนจึงรอดแม้สมาชิกตัวหนึ่งล้ม',
-      'สมาชิกทุกตัวมีการเขียนก่อนตอบรับ',
-      'การเขียนข้าม journal ไปเพื่อความเร็ว',
-    ],
-    answer: 1,
+    q: 'write concern เริ่มต้นแบบแฝงบน MongoDB 8 (เมื่อ client ไม่ได้ตั้ง) คืออะไร?',
+    options: ['w: 0', 'w: 1', 'w: "majority"', 'w: 1 พร้อม j: true'],
+    answer: 2,
+    explain: 'getDefaultRWConcern คืน defaultWriteConcern { w: "majority", wtimeout: 0 } บน deployment ใหม่ (defaultReadConcern { level: "local" })',
   },
   {
-    q: 'ตัวเลือก j ใน write concern กำหนดอะไร?',
+    q: 'ต้องใส่ j: true เพิ่มบน w: "majority" เพื่อให้การเขียนถึง journal หรือไม่?',
     options: [
-      'ว่าการเขียนถูกส่งไปยัง secondary ก่อน',
-      'ว่าการเขียนถูก flush ลง on-disk journal ก่อนการตอบรับ',
-      'ว่ามีการทำ join บนข้อมูล',
-      'ว่าการเขียนถูกปฏิเสธถ้ามี conflict อยู่',
+      'ต้อง ไม่เช่นนั้น majority ไม่เคย journal',
+      'ไม่ต้อง ตราบที่ writeConcernMajorityJournalDefault เป็น true (ค่าเริ่มต้น) majority write รอ journal บนสมาชิกที่นับอยู่แล้ว',
+      'เฉพาะบน secondary',
+      'j ถูกละเลยทุกที่',
     ],
     answer: 1,
+    explain: 'rs.conf().writeConcernMajorityJournalDefault พิมพ์ true',
   },
   {
-    q: 'read concern ตัวใดคืนเฉพาะข้อมูลที่ส่วนใหญ่ได้จัดเก็บแล้ว?',
-    options: ['local', 'majority', 'available', 'primary'],
-    answer: 1,
-  },
-  {
-    q: 'read preference ควบคุมอะไร?',
+    q: 'insert แบบ w: 3 พร้อม wtimeout: 2000 คืน WriteConcernTimeout (64) document อยู่บน primary หรือไม่?',
     options: [
-      'สมาชิกกี่ตัวตอบรับการเขียน',
-      'สมาชิกตัวไหนของชุดเป็นผู้ตอบการอ่าน',
-      'ว่ามีการใช้ journal หรือไม่',
-      'ลำดับของฟิลด์ที่ส่งคืน',
+      'ไม่ timeout roll back แล้ว',
+      'อยู่ การเขียนถูกนำไปใช้แล้ว ขาดแค่การยืนยันจากสมาชิกที่พอ',
+      'เฉพาะเมื่อ j เป็น true',
+      'ขึ้นกับ read concern',
     ],
     answer: 1,
+    explain: 'การรัน 3-node แสดง "primary has 4 docs" หลัง insert ที่ timeout',
+  },
+  {
+    q: 'คุณเขียนด้วย w: 1 แล้วอ่านทันทีด้วย readConcern "majority" การทดลองจริง 200 ครั้งแสดงอะไร?',
+    options: [
+      'การอ่านเห็นการเขียนของคุณเสมอ',
+      'การอ่านแบบ majority ตามหลังการเขียนของคุณทุกครั้ง; หลังการเขียนแบบ w: "majority" ไม่เคยตามหลัง',
+      'การอ่านล้มเหลวด้วย error',
+      'การอ่านบล็อกจนกว่าจะ replicate',
+    ],
+    answer: 1,
+    explain: 'จำนวนจริง: ตามหลัง 200 จาก 200 หลัง w: 1, 0 จาก 200 หลัง w: "majority"',
+  },
+  {
+    q: 'primary ถูกตัดขาดจากสมาชิกอื่น รับ insert แบบ w: 1 (ได้ acknowledge) และที่เหลือเลือก primary ใหม่ เกิดอะไรกับ document นั้นเมื่อ primary เก่ากลับเข้าร่วม?',
+    options: [
+      'ถูกเก็บไว้และ replicate',
+      'ถูก rollback (ย้ายไป rollback directory) และหายจากเซต',
+      'ถูก merge กับข้อมูลของ primary ใหม่',
+      'primary เก่าปฏิเสธที่จะกลับเข้าร่วม',
+    ],
+    answer: 1,
+    explain: 'ใน lab document ที่ acknowledge ไปแล้วหายไปภายหลัง และมีไฟล์ removed.*.bson ปรากฏใน /data/db/rollback',
+  },
+  {
+    q: 'read concern ไหนถูกปฏิเสธบน secondary?',
+    options: ['local', 'available', 'majority', 'linearizable'],
+    answer: 3,
+    explain: 'secondary ตอบว่า: cannot satisfy linearizable read concern on non-primary node',
   },
 ]
 
