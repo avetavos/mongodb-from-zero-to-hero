@@ -67,38 +67,42 @@ Production MongoDB is four problems with four named solutions: replica sets for 
 | Self-managed | Full control over infrastructure | You own every patch, backup, and security task yourself |
 | MongoDB Atlas | Less operational burden, secure by default | Less low-level control, usage-based cost |
 
-## Common mistakes
+## What the lessons measured
 
-- **Assuming you must shard from day one because "the data will grow eventually"** — a single replica set handles more traffic than most people expect, and sharding adds operational complexity that is not worth it without evidence a single machine cannot keep up.
-- **Treating security as a one-time task done at deploy and forgotten** — patching, credential rotation, and access review are ongoing work, not a checklist ticked once.
-- **Never testing failover or a disaster-recovery plan before going to real production** — HA that has never been rehearsed is HA nobody actually knows works when it matters.
+Every number here was captured on this Mac with mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0, on throwaway Docker containers (each capped at 512 MB) that were removed afterwards.
 
-> 💡 Real-world example
->
-> **A typical large-scale search and log system** — uses a MongoDB sharded cluster to hold billions of documents, spreading writes and storage across many shards instead of trying to keep scaling a single machine.
->
-> **A team on MongoDB Atlas** — relies on auto-scaling to let the cluster grow storage and compute automatically to match real load, instead of over-provisioning in advance the way a self-hosted setup requires.
+- **Replica sets** — a crashed primary stalled one write for about 10.8 s (the docs say the median election "should not typically exceed 12 seconds"); a cleanly stopped one for 0.3 s; with two of three members gone the survivor refused writes.
+- **Sharding** — a timestamp shard key put 100 000 of 100 000 documents on one shard, a hashed key split them 48 900 / 51 100; `enableSharding` was not needed.
+- **Performance** — a profile entry with `COLLSCAN` and 50 000 documents examined for 5 000 returned; a client per request multiplied new connections.
+- **Security** — the default container accepted an insert with no credentials; `Command find requires authentication`; a missing `authSource` failed with code 18.
+
+## Mental Model
+
+Four independent questions, four independent mechanisms: copies and votes (availability), key ranges (scale), counters (performance), doors (security). None substitutes for another — a replica set does not scale writes, sharding does not fix a missing index, TLS does not replace authentication.
+
+## Common Misconceptions
+
+- **"Shard from day one because the data will grow."** — a single replica set handles a lot; sharding adds four processes even in the smallest lab and a permanent key decision (changeable, but at least five minutes per resharding).
+- **"Security is a one-time task."** — certificates expire (the lab CA was valid for 2 days on purpose), users and roles drift.
+- **"HA that has never failed over is HA."** — rehearse it: a crash and a clean stop paused writes for 10.8 s versus 0.3 s in the lab.
 
 export const quizOverview = [
   {
     q: 'Which MongoDB feature provides high availability — surviving the failure of a single server?',
-    options: [
-      'Sharding',
-      'A replica set',
-      'The database profiler',
-      'A compound index',
-    ],
+    options: ['Sharding', 'A replica set', 'The database profiler', 'A compound index'],
     answer: 1,
+    explain: 'In the lab the set elected a new primary after the old one was killed; sharding without replica sets would lose that shard.',
   },
   {
     q: 'What is a sharded cluster, structurally?',
     options: [
       'A single very large server with extra memory',
-      'Several replica sets, each holding a slice of the data, behind a router',
+      'Several replica sets, each holding a slice of the data, behind a router (plus config servers)',
       'A read-only copy of one database',
       'A backup stored on a second machine',
     ],
     answer: 1,
+    explain: 'The lab cluster was two shard replica sets, a config server replica set and one mongos.',
   },
   {
     q: 'When should you reach for sharding?',
@@ -109,6 +113,19 @@ export const quizOverview = [
       'Only when authentication is enabled',
     ],
     answer: 2,
+    explain: 'A missing index is multiplied, not fixed, by sharding; a query without the shard key visits every shard.',
+  },
+  {
+    q: 'A primary crashes (SIGKILL) in a default three-node set. Roughly how long is the write pause in the lab?',
+    options: ['Under 100 ms', 'About 10-11 seconds (the 10 s election timeout plus the election)', 'About 5 minutes', 'Writes never resume'],
+    answer: 1,
+    explain: 'One insert stalled 10.8 s and then succeeded; a clean stop paused only 0.3 s.',
+  },
+  {
+    q: 'A default mongo container is started with a published port and no flags. What protects it?',
+    options: ['Nothing: authentication is off and the image binds all interfaces', 'A random password', 'TLS', 'The IP access list'],
+    answer: 0,
+    explain: 'The lab listed databases and inserted a document with no credentials.',
   },
 ]
 

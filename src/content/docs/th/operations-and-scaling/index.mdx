@@ -67,48 +67,60 @@ MongoDB ใน production คือสี่ปัญหาที่มีสี
 | Self-managed | ควบคุม infrastructure ได้เต็มที่ | ต้องรับผิดชอบ patch, backup และ security เองทั้งหมด |
 | MongoDB Atlas | ลดภาระงาน ops, ปลอดภัยโดยค่าเริ่มต้น | ควบคุมรายละเอียดระดับ low-level ได้น้อยกว่า, ต้นทุนคิดตาม usage |
 
-## ข้อผิดพลาดที่พบบ่อย
+## บทเรียนวัดอะไรไว้บ้าง
 
-- **คิดว่าต้อง shard ตั้งแต่วันแรกเพราะ "ข้อมูลจะเยอะในอนาคต"** — replica set เดี่ยวรองรับ traffic ได้นานกว่าที่คนส่วนใหญ่คิด และ sharding เพิ่ม operational complexity ที่ไม่คุ้มถ้ายังไม่มีหลักฐานว่าเครื่องเดียวตามไม่ทันจริง
-- **มองว่า security เป็นงานที่ทำครั้งเดียวตอน deploy แล้วจบ** — patch, credential rotation และการทบทวน access ต้องทำต่อเนื่อง ไม่ใช่ checklist ที่ติ๊กแล้วลืม
-- **ไม่เคยทดสอบ failover หรือแผน disaster recovery ก่อนขึ้น production จริง** — HA ที่ไม่เคยถูกซ้อมคือ HA ที่ไม่มีใครรู้ว่าใช้งานได้จริงหรือเปล่าตอนจำเป็น
+ทุกตัวเลขในนี้จับจากเครื่อง Mac นี้ด้วย mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Docker container ชั่วคราว (แต่ละตัวจำกัด 512 MB) ที่ลบทิ้งหลังใช้งาน
 
-> 💡 ตัวอย่างจากของจริง
->
-> **ระบบค้นหาและ log ขนาดใหญ่ทั่วไป** — ใช้ MongoDB sharded cluster เก็บข้อมูลระดับหลายพันล้าน document กระจาย write และ storage ข้ามหลาย shard แทนที่จะพยายาม scale เครื่องเดียวขึ้นเรื่อย ๆ
->
-> **ทีมที่ใช้ MongoDB Atlas** — พึ่ง auto-scaling ให้ cluster ขยาย storage และ compute ตาม load จริงโดยอัตโนมัติ แทนที่จะต้อง provision เกินความจำเป็นไว้ล่วงหน้าเหมือน self-hosted
+- **Replica set** — primary ที่ล่มทำให้การเขียนหนึ่งครั้งค้างราว 10.8 วินาที (เอกสารบอกว่าค่ามัธยฐานของ election "should not typically exceed 12 seconds"); ตัวที่หยุดอย่างสะอาดค้าง 0.3 วินาที; เมื่อสองในสามสมาชิกหายไป ตัวที่รอดปฏิเสธการเขียน
+- **Sharding** — shard key แบบ timestamp ทำให้ 100 000 จาก 100 000 document อยู่บน shard เดียว ส่วน key แบบ hashed แบ่ง 48 900 / 51 100; ไม่ต้องใช้ `enableSharding`
+- **Performance** — profile entry ที่เป็น `COLLSCAN` ตรวจ 50 000 document เพื่อคืน 5 000; client ต่อ request ทำให้ connection ใหม่เพิ่มขึ้นมาก
+- **Security** — container เริ่มต้นรับ insert โดยไม่ต้องมี credential; `Command find requires authentication`; การไม่ใส่ `authSource` ล้มด้วย code 18
+
+## Mental Model
+
+สี่คำถามอิสระ สี่กลไกอิสระ: สำเนาและเสียงโหวต (availability), ช่วงของ key (scale), ตัวนับ (performance), ประตู (security) ไม่มีอันไหนแทนอันอื่นได้ — replica set ไม่ scale การเขียน, sharding ไม่แก้ index ที่ขาด, TLS ไม่แทน authentication
+
+## Common Misconceptions
+
+- **"shard ตั้งแต่วันแรกเพราะข้อมูลจะโต"** — replica set เดียวรับได้มาก; sharding เพิ่มสี่โปรเซสแม้ใน lab ที่เล็กที่สุด และการตัดสินใจเรื่อง key ถาวร (เปลี่ยนได้ แต่ resharding ใช้อย่างน้อยห้านาที)
+- **"security เป็นงานครั้งเดียว"** — certificate หมดอายุ (CA ใน lab ตั้งให้อายุ 2 วันโดยตั้งใจ), user และ role ค่อย ๆ เปลี่ยน
+- **"HA ที่ไม่เคย failover คือ HA"** — ซ้อมมัน: การล่มกับการหยุดอย่างสะอาดทำให้การเขียนหยุด 10.8 วินาทีเทียบกับ 0.3 วินาทีใน lab
 
 export const quizOverview = [
   {
-    q: 'ฟีเจอร์ใดของ MongoDB ที่ให้ high availability — รอดจากการล้มเหลวของ server เดียว?',
-    options: [
-      'Sharding',
-      'replica set',
-      'database profiler',
-      'compound index',
-    ],
+    q: 'ฟีเจอร์ MongoDB ไหนให้ high availability — รอดจากความล้มเหลวของ server หนึ่งตัว?',
+    options: ['Sharding', 'Replica set', 'database profiler', 'compound index'],
     answer: 1,
+    explain: 'ใน lab เซตเลือก primary ใหม่หลังตัวเก่าถูก kill; sharding โดยไม่มี replica set จะเสีย shard นั้นไป',
   },
   {
-    q: 'sharded cluster ในเชิงโครงสร้างคืออะไร?',
+    q: 'sharded cluster มีโครงสร้างอย่างไร?',
     options: [
-      ' server ขนาดใหญ่มากเครื่องเดียวที่มีหน่วยความจำเพิ่ม',
-      'replica set หลายชุด แต่ละชุดถือส่วนหนึ่งของข้อมูล อยู่หลัง router',
-      'สำเนาแบบอ่านอย่างเดียวของฐานข้อมูลหนึ่ง',
-      'backup ที่เก็บไว้บนเครื่องที่สอง',
+      'server ตัวเดียวขนาดใหญ่ที่มีหน่วยความจำเพิ่ม',
+      'replica set หลายชุด แต่ละชุดถือข้อมูลส่วนหนึ่ง อยู่หลัง router (บวก config server)',
+      'สำเนาแบบอ่านอย่างเดียวของ database หนึ่ง',
+      'backup ที่เก็บบนเครื่องที่สอง',
     ],
     answer: 1,
+    explain: 'คลัสเตอร์ใน lab คือ replica set ของ shard สองชุด, replica set ของ config server และ mongos หนึ่งตัว',
   },
   {
-    q: 'เมื่อใดที่คุณควรเลือกใช้ sharding?',
-    options: [
-      'ทันที สำหรับทุก deployment ใหม่',
-      'เพื่อแก้ query เดียวที่ช้า',
-      'เมื่อเครื่องเดียวไม่สามารถเก็บข้อมูลหรือรับภาระงานได้อีกต่อไป',
-      'เฉพาะเมื่อเปิด authentication แล้วเท่านั้น',
-    ],
+    q: 'เมื่อไหร่ควรใช้ sharding?',
+    options: ['ทันที สำหรับทุก deployment ใหม่', 'เพื่อแก้ query ช้าตัวเดียว', 'เมื่อเครื่องเดียวเก็บข้อมูลหรือรับโหลดไม่ไหวอีกต่อไป', 'เฉพาะเมื่อเปิด authentication'],
     answer: 2,
+    explain: 'index ที่ขาดถูกคูณ ไม่ได้ถูกแก้ด้วย sharding; query ที่ไม่มี shard key ไปทุก shard',
+  },
+  {
+    q: 'primary ล่ม (SIGKILL) ในเซตสามโหนดค่าเริ่มต้น การเขียนหยุดราวเท่าไรใน lab?',
+    options: ['น้อยกว่า 100 ms', 'ราว 10-11 วินาที (election timeout 10 วินาทีบวก election)', 'ราว 5 นาที', 'การเขียนไม่กลับมาอีก'],
+    answer: 1,
+    explain: 'insert หนึ่งครั้งค้าง 10.8 วินาทีแล้วสำเร็จ; การหยุดอย่างสะอาดหยุดเพียง 0.3 วินาที',
+  },
+  {
+    q: 'container mongo เริ่มต้นถูกสตาร์ทพร้อม port ที่เปิดออก โดยไม่มี flag อะไรเลย อะไรปกป้องมัน?',
+    options: ['ไม่มีอะไร: authentication ปิดและ image bind ทุก interface', 'รหัสผ่านสุ่ม', 'TLS', 'IP access list'],
+    answer: 0,
+    explain: 'lab แสดงรายการ database และ insert document ได้โดยไม่มี credential',
   },
 ]
 
