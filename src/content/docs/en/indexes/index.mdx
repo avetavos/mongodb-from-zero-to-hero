@@ -1,6 +1,6 @@
 ---
 title: Why indexes matter
-description: How a query without an index scans every document, and how an index turns those scans into fast ordered seeks.
+description: How a query without an index scans every document, how an index turns that scan into a seek - measured on 1 000 000 documents - and what every index costs on writes and disk.
 sidebar:
   order: 1
 ---
@@ -9,25 +9,28 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-A query that returns the right answer can still be a slow query. When you ask MongoDB to find every member who joined in 2023, and there is nothing helping it, the server has only one option: open the collection at the first document and read forward, checking each one, until it has looked at every single document. That brute-force read is called a **collection scan**, and MongoDB labels it `COLLSCAN` in its diagnostics. On a handful of library members it is invisible. On a collection of ten million documents it is the difference between a reply in a millisecond and a reply that crawls.
+A query that returns the right answer can still be a slow query. When you ask MongoDB to find every member who joined in 2023, and there is nothing helping it, the server has only one option: open the collection at the first document and read forward, checking each one, until it has looked at every single document. That brute-force read is called a **collection scan**, and MongoDB labels it `COLLSCAN` in its diagnostics. On a handful of library members it is invisible. On a million documents it is the difference between a reply in a millisecond and a reply that crawls.
 
-An **index** is the fix. It is a separate, ordered data structure that the server maintains alongside your collection, holding the values of one or more fields in sorted order, each paired with a pointer back to the full document. Because the values are sorted, the server can jump straight to the ones it wants instead of reading everything — the same reason you flip to the back of a textbook rather than reading every page to find where a term is defined. This whole module is about building the right index for the right query, and proving the win with `explain`.
+An **index** is the fix. It is a separate, ordered data structure that the server maintains alongside your collection, holding the values of one or more fields in sorted order, each paired with a pointer back to the full document. Because the values are sorted, the server can jump straight to the ones it wants instead of reading everything - the same reason you flip to the back of a textbook rather than reading every page to find a term. This module is about building the right index for the right query and proving the win with `explain`.
+
+Every number below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac (single node, no load), so treat the milliseconds as orders of magnitude and the key/document counts as exact. Python, Go and Rust tabs were each run once in a scratch program against the same server.
 
 ## A scan versus a seek
 
 Picture the two strategies side by side. Without an index, the query walks the entire collection. With an index, it descends a sorted tree and lands directly on the matching range:
 
 export const scanVsIndexDiagram = `flowchart TB
-  subgraph NoIndex["Without an index — COLLSCAN"]
+  subgraph NoIndex["Without an index - COLLSCAN"]
     Q1["Query: joined equals 2023"] --> S0["Read doc 1"]
     S0 --> S1["Read doc 2"]
     S1 --> S2["Read doc 3"]
     S2 --> S3["...read every document"]
     S3 --> R1["Return the matches"]
   end
-  subgraph WithIndex["With an index — IXSCAN"]
+  subgraph WithIndex["With an index - IXSCAN"]
     Q2["Query: joined equals 2023"] --> B0["Index root"]
     B0 --> B1["Sorted branch"]
     B1 --> B2["Leaf: joined equals 2023"]
@@ -36,21 +39,70 @@ export const scanVsIndexDiagram = `flowchart TB
 
 <Mermaid code={scanVsIndexDiagram} title="A scan reads every document; an index seek jumps to the matching range and follows pointers" />
 
-The right-hand path touches only the documents it needs. The left-hand path touches all of them and then throws most away. That wasted reading is exactly what an index removes.
+## Measured on 1 000 000 documents
 
-## A first index
+Every lesson seeds its own data. This one builds a million `members` (name, joined year, fines, city, one borrowed book) and defines `plan()`, a helper that condenses `explain("executionStats")` into one line: the stage chain, then `returned` (results), `keys` (index entries read) and `docs` (documents read).
 
-Creating an index is a single call. You name the field and a direction — `1` for ascending — and the server builds the structure for you. Here we index the `joined` field on our library `members` so that filtering or sorting by join year becomes a seek:
+```js
+// mongosh/idx-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+const mk = (i) => ({ name: "m" + i, joined: NumberInt(2000 + (i % 26)), fines: i % 7, city: cities[i % 10], borrowed: ["b" + (i % 500)] });
+globalThis.mk = mk;
+globalThis.plan = (cur) => {                       // one line per explain: stages, then the work counters
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + " " + s.executionTimeMillis + "ms";
+};
+const t = Date.now();
+for (let s = 0; s < 1000000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => mk(s + k)), { ordered: false });
+}
+console.log("members:", db.members.countDocuments(), "docs, seeded in", Date.now() - t, "ms");
+assert.strictEqual(db.members.countDocuments(), 1000000);
+```
+
+```text
+members: 1000000 docs, seeded in 6079 ms
+```
+
+Ask for one member by name with nothing to help. The server has to read all one million documents to return a single one:
+
+```js
+// mongosh/idx-collscan.js
+console.log("no index  :", plan(db.members.find({ name: "m777777" })));
+let t = Date.now(); db.members.find({ name: "m777777" }).toArray();
+console.log("wall clock:", Date.now() - t, "ms");
+assert.strictEqual(db.members.find({ name: "m777777" }).explain("executionStats").executionStats.totalDocsExamined, 1000000);
+```
+
+```text
+no index  : COLLSCAN  returned=1 keys=0 docs=1000000 301ms
+wall clock: 267 ms
+```
+
+Now the first index. `createIndex` takes the field and a direction (`1` ascending) and returns the index name - a bare string, not the raw command reply. Building on a million documents took about a second:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.createIndex({ joined: 1 })
+    // mongosh/idx-create.js
+    let t = Date.now();
+    console.log("createIndex returned:", db.members.createIndex({ name: 1 }), "in", Date.now() - t, "ms");
+    console.log("with index:", plan(db.members.find({ name: "m777777" })));
+    t = Date.now(); db.members.find({ name: "m777777" }).toArray();
+    console.log("wall clock:", Date.now() - t, "ms");
+    assert.strictEqual(db.members.find({ name: "m777777" }).explain("executionStats").executionStats.totalDocsExamined, 1);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await db.collection("members").createIndex({ joined: 1 });
+    // app/idx-first-index.mjs
+    const c = db.collection("members");
+    await c.insertMany(Array.from({ length: 1000 }, (_, i) => ({ name: "m" + i, joined: 2000 + (i % 26) })));
+    const name = await c.createIndex({ joined: 1 });
+    const e = await c.find({ joined: 2023 }).explain("executionStats");
+    console.log(name, e.executionStats.totalKeysExamined, e.executionStats.totalDocsExamined, e.executionStats.nReturned);
+    if (name !== "joined_1" || e.executionStats.totalDocsExamined !== e.executionStats.nReturned) throw new Error("index not used");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -79,53 +131,190 @@ Creating an index is a single call. You name the field and a direction — `1` f
   </TabItem>
 </Tabs>
 
-The call returns the name MongoDB gave the new index — it derives the name from the field and direction unless you supply your own:
+```text
+createIndex returned: name_1 in 991 ms
+with index: FETCH > IXSCAN(name_1)  returned=1 keys=1 docs=1 4ms
+wall clock: 1 ms
+```
 
-```json
-"joined_1"
+The same query now reads one key and one document instead of a million. The Node.js tab runs on its own 1 000-document collection and proves the same shape: `joined_1`, keys equal to documents equal to results.
+
+```text
+joined_1 38 38 38
 ```
 
 **In Compass:** open a collection and choose the **Indexes** tab. You will always see the built-in `_id_` index there, and you can add a new one with the **Create Index** button by typing the field name and picking a direction.
+
+### An index is not always a win: selectivity
+
+The index helps because it lets the server skip documents. When the filter keeps most of the collection, there is little to skip. `joined` has only 26 distinct values, so `joined: 2023` keeps 3.8% of the data, but a range that keeps every document is a different story. `hint()` forces a plan so we can compare:
+
+```js
+// mongosh/idx-selectivity.js
+db.members.createIndex({ joined: 1 });
+console.log("joined = 2023 (3.8% of docs), index :", plan(db.members.find({ joined: 2023 })));
+console.log("joined = 2023, forced COLLSCAN       :", plan(db.members.find({ joined: 2023 }).hint({ $natural: 1 })));
+console.log("all members, index scan forced       :", plan(db.members.find({ joined: { $gte: 2000 } }).hint({ joined: 1 })));
+console.log("all members, forced COLLSCAN         :", plan(db.members.find({ joined: { $gte: 2000 } }).hint({ $natural: 1 })));
+```
+
+```text
+joined = 2023 (3.8% of docs), index : FETCH > IXSCAN(joined_1)  returned=38461 keys=38461 docs=38461 35ms
+joined = 2023, forced COLLSCAN       : COLLSCAN  returned=38461 keys=0 docs=1000000 291ms
+all members, index scan forced       : FETCH > IXSCAN(joined_1)  returned=1000000 keys=1000000 docs=1000000 993ms
+all members, forced COLLSCAN         : COLLSCAN  returned=1000000 keys=0 docs=1000000 293ms
+```
+
+The two forced plans for "everyone" read the same number of documents, but the index route also read 1 000 000 keys first (about 3x slower here). Low-selectivity filters gain little; the planner weighs this for you, which is why `explain` (not intuition) decides.
+
+## What an index costs
+
+**Disk and memory.** Each index is a separate structure. On this collection the data is about 100 MB, and the indexes take:
+
+```js
+// mongosh/idx-size.js
+const s = db.members.stats(), mb = (n) => +(n / 1048576).toFixed(1);
+console.log({ dataMB: mb(s.size), indexMB: Object.fromEntries(Object.entries(s.indexSizes).map(([k, v]) => [k, mb(v)])) });
+assert.ok(s.indexSizes.name_1 > 0);
+```
+
+```text
+{ dataMB: 100.6, indexMB: { _id_: 26.9, name_1: 11.9, joined_1: 5.3 } }
+```
+
+**Write time.** Every insert, update of an indexed field, or delete must also change every index. Same 200 000 documents, once into a collection with only `_id_`, once into one with five extra indexes:
+
+```js
+// mongosh/idx-write-cost.js
+function bulkLoad(coll, n) {
+  const t = Date.now();
+  for (let s = 0; s < n; s += 10000) coll.insertMany(Array.from({ length: 10000 }, (_, k) => mk(s + k)), { ordered: false });
+  return Date.now() - t;
+}
+const bare = bulkLoad(db.w0, 200000);
+["name", "joined", "fines", "city", "borrowed"].forEach((f) => db.w5.createIndex({ [f]: 1 }));
+const heavy = bulkLoad(db.w5, 200000);
+console.log("200 000 inserts, _id index only    :", bare, "ms");
+console.log("200 000 inserts, _id + 5 indexes   :", heavy, "ms");
+assert.ok(heavy > bare);
+```
+
+```text
+200 000 inserts, _id index only    : 1244 ms
+200 000 inserts, _id + 5 indexes   : 2240 ms
+```
+
+MongoDB caps a collection at 64 indexes and a compound index at 32 fields ([MongoDB limits](https://www.mongodb.com/docs/manual/reference/limits/), consulted 2026-09-30), but the practical ceiling is your write budget long before that.
+
+### Finding indexes nobody uses
+
+`$indexStats` counts how often each index served a query since the server started. An index at `ops: 0` is a candidate to remove. Before dropping it, `hideIndex()` keeps the index maintained but invisible to the planner, so you can watch for regressions and `unhideIndex()` instantly if something slows down - no rebuild:
+
+```js
+// mongosh/idx-unused.js
+db.members.find({ name: "m1" }).toArray();
+db.members.find({ joined: 2023 }).limit(1).toArray();
+const usage = db.members.aggregate([{ $indexStats: {} }, { $project: { _id: 0, name: 1, ops: "$accesses.ops" } }, { $sort: { name: 1 } }]).toArray();
+console.log(usage);
+db.members.hideIndex("joined_1");
+console.log("joined_1 hidden:", plan(db.members.find({ joined: 2023 })));
+db.members.unhideIndex("joined_1");
+console.log("joined_1 visible again:", plan(db.members.find({ joined: 2023 })));
+```
+
+```text
+[
+  { name: '_id_', ops: Long('0') },
+  { name: 'joined_1', ops: Long('1') },
+  { name: 'name_1', ops: Long('2') }
+]
+joined_1 hidden: COLLSCAN  returned=38461 keys=0 docs=1000000 305ms
+joined_1 visible again: FETCH > IXSCAN(joined_1)  returned=38461 keys=38461 docs=38461 29ms
+```
 
 ## What this module covers
 
 The lessons build from one field to the full toolbox:
 
-1. **Why indexes matter** — scans versus seeks, and the cost of having none.
-2. **Single and compound indexes** — indexing one field, then several, and the prefix rule that decides which queries a compound index can serve.
-3. **The ESR rule** — the field ordering (Equality, Sort, Range) that makes a compound index pull its weight.
-4. **Explain and query plans** — reading `explain` output to confirm an index was used and to spot a covered query.
-5. **Index types** — multikey, text, TTL, partial, unique, and sparse indexes for the cases a plain index cannot cover.
+1. **Why indexes matter** - scans versus seeks, and the cost of having none or too many.
+2. **Single and compound indexes** - the prefix rule that decides which queries a compound index can serve.
+3. **The ESR rule** - Equality, Sort, Range ordering, measured.
+4. **Explain and query plans** - reading `explain`, rejected plans, the plan cache and covered queries.
+5. **Index types** - multikey, text, TTL, partial, unique, sparse, wildcard, hashed and geospatial.
 
 ## Tips and gotchas
 
-- Every collection starts with one index already: a unique index on `_id`. You never have to create it, and you cannot drop it.
-- Indexes are not free. They speed up reads but add work to every insert, update, and delete, because the index must be kept in sync. Index the fields your queries actually use, not every field.
-- An index lives on disk and in memory like the data it describes. A pile of unused indexes wastes both, so it is worth removing ones no query relies on.
+- Every collection starts with one unique index on `_id`. You cannot drop it.
+- `createIndex` returns the index name as a plain string (`"name_1"`), and creating an index that already exists is a no-op - but the same key with different options is an error (see below).
+- Indexes cost disk, memory and write time (about 11.9 MB and a slower insert for one string field here). Index what queries use, and use `$indexStats` to find the rest.
+- Low-selectivity fields (26 years, 7 fine values) rarely justify a standalone index; put them behind a selective field in a compound index.
 
 <Callout title="The one idea behind every index">
-An index trades a little extra write cost and storage for the ability to find documents by seeking through sorted values instead of scanning every document. The rest of this module is just choosing which fields to sort.
+An index trades extra write cost and storage for the ability to find documents by seeking through sorted values instead of scanning every document. The rest of this module is just choosing which fields to sort.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant asked to "make the member lookup fast" will often write this, with the reassuring comment:
+
+<SpotTheBug lang="js" code={`// AI comment: "make sure the index exists, then query"
+app.get("/members/:email", async (req, res) => {
+  const members = db.collection("members");
+  await members.createIndex({ email: 1 }, { unique: true });   // safe: createIndex is idempotent
+  res.json(await members.findOne({ email: req.params.email }));
+});`}>
+
+The comment is half right: `createIndex` is idempotent, so the repeated call does not rebuild anything. But it is not free, and it is not safe. Run 500 times against an existing index it cost a round trip each time (numbers below), and the moment the option set changes - here a later deploy adds `unique: true` to the same key - **every request** throws instead of just the first, because the index `email_1` already exists with different options. Index management belongs in a startup/migration step, run once, with an explicit `name`:
+
+```js
+// mongosh/idx-handler-bug.js
+db.people.insertMany(Array.from({ length: 200 }, (_, i) => ({ email: "p" + i + "@x.test" })));
+db.people.createIndex({ email: 1 });                       // deploy 1: plain index
+let t = Date.now();
+for (let i = 0; i < 500; i++) db.people.createIndex({ email: 1 });   // "make sure the index exists" on every request
+console.log("500 repeated createIndex calls:", Date.now() - t, "ms, indexes:", db.people.getIndexes().length);
+try { db.people.createIndex({ email: 1 }, { unique: true }); }      // deploy 2: same key, new option
+catch (e) { console.log(e.codeName + ":", e.message); }
+assert.strictEqual(db.people.getIndexes().length, 2);
+db.people.dropIndex("email_1");
+console.log("fixed startup script:", db.people.createIndex({ email: 1 }, { unique: true, name: "email_unique" }));
+```
+
+```text
+500 repeated createIndex calls: 158 ms, indexes: 2
+IndexKeySpecsConflict: An existing index has the same name as the requested index. When index names are not specified, they are auto generated and can cause conflicts. Please refer to our documentation. Requested index: { v: 2, unique: true, key: { email: 1 }, name: "email_1" }, existing index: { v: 2, key: { email: 1 }, name: "email_1" }
+fixed startup script: email_unique
+```
+
+The fix only ran cleanly after dropping the old non-unique index first: changing an index means an explicit drop-and-create (or `collMod` for a few properties), never a silent re-create.
+
+</SpotTheBug>
+
+## Mental Model
+
+An index is a second, sorted copy of some fields with pointers back. A read that can use it pays for the matching entries only; every write pays for the data and for every index that mentions a changed field. The decision is always **reads saved versus writes and memory spent**, and `explain` is the ledger.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Index the fields your queries use often | Turns a query from a COLLSCAN into a fast seek | Adds work to every insert/update/delete and consumes disk and RAM |
-| Create no indexes at all | No extra write-time cost, nothing to maintain | Every query risks a COLLSCAN as the collection grows |
-| A compound index covering several query shapes | One index can serve multiple queries if the field order is right | Bigger and more expensive to maintain than a single-field index |
+| Index the fields your queries use often | COLLSCAN of 1 000 000 documents becomes 1 key and 1 document | Extra disk (11.9 MB for `name_1`) and slower writes |
+| Create no indexes | Fastest inserts, nothing to maintain | Every query is a COLLSCAN that grows with the data |
+| Index a low-selectivity field alone | Helps a rare value | Little gain when the filter keeps most documents; still pays write cost |
+| Hide before dropping | Reversible test of "is this index needed" | Still pays write cost while hidden |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Indexing every field "just in case"** — every index adds cost to every write and consumes RAM, since MongoDB must keep it in the working set. Index only the fields your queries actually use.
-- **Never running `explain()` before deciding to add an index** — guessing which index will help is usually wrong. Look at real `explain()` output before creating or dropping any index.
-- **Reaching for a wildcard index as the default instead of a targeted one** — a wildcard index is convenient to start with, but bigger and slower than an index designed for the real query shape. Use it only when the schema is genuinely unpredictable.
+- **"An index always makes a query faster."** - a filter that keeps every document read 1 000 000 keys and 1 000 000 documents through the index, no better than a scan.
+- **"Indexes are free reads-only helpers."** - five extra indexes made the same 200 000 inserts slower (numbers above).
+- **"Calling `createIndex` on every startup or request is harmless."** - it is a no-op only while the options are identical; changed options raise `IndexKeySpecsConflict`.
+- **"An unused index is harmless."** - it is still updated on every write and held in cache; `$indexStats` shows which ones are idle.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **MongoDB Atlas Performance Advisor** — analyzes a collection's slow query log and automatically suggests indexes to create. Real teams often use it as a starting point instead of guessing, then confirm with `explain()` before applying.
->
-> **A large e-commerce team** — indexed every field in the products collection while migrating from a legacy system, then found write throughput collapse. They had to drop unused indexes one at a time, guided by `$indexStats`.
+> MongoDB Atlas's Performance Advisor "monitors queries that MongoDB considers slow and suggests new indexes to improve query performance", attaching sample queries grouped by query shape; it is available on M10+ clusters only ([Performance Advisor](https://www.mongodb.com/docs/atlas/performance-advisor/), consulted 2026-09-30). Treat its suggestions as a starting point and confirm with `explain` before applying, since each suggestion is another index to maintain.
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (create the `joined` index and read back its name) but they are not executed by the course's automated checker._
 
 export const quizIndex = [
   {
@@ -137,6 +326,7 @@ export const quizIndex = [
       'It builds an index automatically and then answers',
     ],
     answer: 1,
+    explain: 'On 1 000 000 members, find({ name: "m777777" }) with no index showed COLLSCAN with totalDocsExamined 1000000 to return one document.',
   },
   {
     q: 'What is an index, fundamentally?',
@@ -147,11 +337,51 @@ export const quizIndex = [
       'A faster replacement for the collection itself',
     ],
     answer: 1,
+    explain: 'It is a separate structure: name_1 took its own 11.9 MB next to the 100 MB of data.',
   },
   {
     q: 'Which index does every collection have without you creating it?',
-    options: ['An index on the first field you insert', 'A unique index on _id', 'A text index', 'No index until you add one'],
+    options: [
+      'An index on the first field you insert',
+      'A unique index on _id',
+      'A text index',
+      'No index until you add one',
+    ],
     answer: 1,
+    explain: 'getIndexes() on a fresh collection lists _id_ only; the size listing above shows _id_ next to name_1 and joined_1.',
+  },
+  {
+    q: 'An index on joined (26 distinct years) and a query that matches 3.8% of 1M documents. What did the run show?',
+    options: [
+      'The index examined all 1M keys',
+      'An IXSCAN that examined only the 38 461 matching keys and documents',
+      'The planner ignored the index',
+      'The query returned nothing',
+    ],
+    answer: 1,
+    explain: 'The plan was FETCH > IXSCAN(joined_1) with keys 38461 and docs 38461; the forced COLLSCAN read 1 000 000 documents.',
+  },
+  {
+    q: 'What happened to insert speed when 5 secondary indexes were added?',
+    options: [
+      'Nothing - indexes only affect reads',
+      'Inserts got slower because every index is updated on each write',
+      'Inserts got faster',
+      'Inserts were rejected',
+    ],
+    answer: 1,
+    explain: '200 000 inserts took longer with five extra indexes than with only _id_ (numbers in the run above).',
+  },
+  {
+    q: 'What does hideIndex do?',
+    options: [
+      'Deletes the index',
+      'Keeps maintaining the index but hides it from the planner, so you can test dropping it',
+      'Encrypts the index',
+      'Moves it to another shard',
+    ],
+    answer: 1,
+    explain: 'With joined_1 hidden the same query became COLLSCAN; unhideIndex restored the IXSCAN instantly, with no rebuild.',
   },
 ]
 
