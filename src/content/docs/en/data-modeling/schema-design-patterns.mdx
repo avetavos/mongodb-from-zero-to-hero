@@ -1,6 +1,6 @@
 ---
 title: Schema design patterns
-description: Four reusable MongoDB modeling patterns — Subset, Computed, Bucket, and Extended Reference — with a short example and the problem each one solves.
+description: The Subset, Computed, Bucket and Extended Reference patterns, each run with real writes - what they save (2.16 MB reads, 20 000 documents, lookups) and what they cost - plus the native time series collection.
 sidebar:
   order: 4
 ---
@@ -9,80 +9,247 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Once you are comfortable choosing between embedding and referencing, you start meeting the same modeling problems again and again: a document that carries far more data than any one screen needs, a value that is expensive to recompute on every read, an array that wants to grow forever, a reference that forces a lookup just to show one extra field. The MongoDB community has named the recurring solutions as **schema design patterns**. They are not features you turn on — they are shapes you deliberately give your documents. This lesson covers four of the most useful: Subset, Computed, Bucket, and Extended Reference.
+Once you can choose between embedding and referencing you keep meeting the same problems: a document carrying far more than one screen needs, a value expensive to recompute on every read, an array that wants to grow forever, a reference that forces a lookup just to show one field. The MongoDB community named the recurring solutions **schema design patterns** ([Building with Patterns](https://www.mongodb.com/blog/post/building-with-patterns-a-summary), consulted 2026-09-30; the Bucket pattern has [its own post](https://www.mongodb.com/blog/post/building-with-patterns-the-bucket-pattern)). They are not features you switch on - they are shapes you give your documents. This lesson runs four of them and measures what each buys and costs.
+
+Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program. The seed builds one popular product with 10 000 reviews stored two ways (one fat document, and a subset document plus a `reviews` collection).
+
+```js
+// mongosh/pat-seed.js
+const rnd = (() => { let x = 11; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();
+// Subset: one popular product with 10 000 reviews, stored two ways
+const reviews = Array.from({ length: 10000 }, (_, i) => ({ user: "u" + (i % 700), stars: 1 + Math.floor(rnd() * 5), text: "Review " + i + " " + "lorem ipsum ".repeat(12), at: new Date(1700000000000 + i * 3600000) }));
+db.productsFat.insertOne({ _id: "BK-204", title: "Distributed Systems", reviews });                                   // everything embedded
+db.reviews.insertMany(reviews.map((r) => ({ ...r, productId: "BK-204" })));
+db.products.insertOne({ _id: "BK-204", title: "Distributed Systems", reviewCount: 10000, recentReviews: reviews.slice(-5).reverse() });   // subset + count
+db.reviews.createIndex({ productId: 1, at: -1 });
+const bsize = (c, id) => db[c].aggregate([{ $match: { _id: id } }, { $project: { b: { $bsonSize: "$$ROOT" } } }]).toArray()[0].b;
+console.log("seeded. BK-204 as one fat document:", bsize("productsFat", "BK-204"), "bytes | subset document:", bsize("products", "BK-204"), "bytes");
+```
+
+```text
+seeded. BK-204 as one fat document: 2156196 bytes | subset document: 1154 bytes
+```
 
 ## The Subset pattern
 
-**Problem:** a document embeds a large array, but most reads only need the first few elements. Loading the whole thing wastes memory and bandwidth. **Solution:** keep a *subset* — the few elements you actually display — in the main document, and push the full list to a separate collection. A product keeps its most recent reviews inline:
+**Problem:** a document embeds a large array but most reads need the first few elements; loading all of it wastes memory and bandwidth (the pattern "solves the problem of having the working set exceed the capacity of RAM due to large documents", per the pattern summary). **Solution:** keep the few elements you display - the *subset* - in the main document and the full list in its own collection. Adding a review touches both, and `$push` with `$each`, `$sort` and `$slice` keeps the inline array at five:
 
-```json
-{
-  "_id": "BK-204",
-  "title": "Distributed Systems",
-  "recentReviews": [
-    { "user": "Grace", "stars": 5, "text": "Indispensable." },
-    { "user": "Linus", "stars": 4, "text": "Dense but worth it." }
-  ],
-  "reviewCount": 1183
-}
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/pat-subset.js
+    const time = (f) => { const t = Date.now(); f(); return Date.now() - t; };
+    console.log("1 000 product-page reads, fat document :", time(() => { for (let i = 0; i < 1000; i++) db.productsFat.findOne({ _id: "BK-204" }, { title: 1, reviews: { $slice: -5 } }); }), "ms (even with a $slice projection)");
+    console.log("1 000 product-page reads, subset       :", time(() => { for (let i = 0; i < 1000; i++) db.products.findOne({ _id: "BK-204" }); }), "ms");
+    // a new review: write it to the full collection AND keep the subset current
+    const r = { productId: "BK-204", user: "Grace", stars: 5, text: "Indispensable.", at: new Date(1800000000000) };
+    db.reviews.insertOne(r);
+    db.products.updateOne({ _id: "BK-204" }, { $inc: { reviewCount: 1 }, $push: { recentReviews: { $each: [{ user: r.user, stars: r.stars, text: r.text, at: r.at }], $sort: { at: -1 }, $slice: 5 } } });
+    const p = db.products.findOne({ _id: "BK-204" });
+    console.log("after the new review:", p.reviewCount, "reviews counted;", p.recentReviews.length, "kept inline; newest is by", p.recentReviews[0].user);
+    console.log("the full list is still one indexed query away:", db.reviews.find({ productId: "BK-204" }).sort({ at: -1 }).skip(5).limit(3).toArray().length, "older reviews fetched");
+    assert.strictEqual(p.recentReviews.length, 5);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/pat-subset.mjs
+    const products = db.collection("products");
+    await products.insertOne({ _id: "BK-204", title: "Distributed Systems", reviewCount: 0, recentReviews: [] });
+    for (let i = 1; i <= 8; i++) {
+      await products.updateOne({ _id: "BK-204" }, {
+        $inc: { reviewCount: 1 },
+        $push: { recentReviews: { $each: [{ user: "u" + i, stars: 1 + (i % 5), at: new Date(1700000000000 + i * 1000) }], $sort: { at: -1 }, $slice: 5 } },
+      });
+    }
+    const p = await products.findOne({ _id: "BK-204" });
+    console.log(p.reviewCount, p.recentReviews.map((r) => r.user));
+    if (p.reviewCount !== 8 || p.recentReviews.length !== 5 || p.recentReviews[0].user !== "u8") throw new Error("subset not maintained");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    db.products.update_one(
+        {"_id": "BK-204"},
+        {
+            "$inc": {"reviewCount": 1},
+            "$push": {"recentReviews": {
+                "$each": [{"user": "Grace", "stars": 5, "at": datetime.datetime.now()}],
+                "$sort": {"at": -1},
+                "$slice": 5,
+            }},
+        },
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := coll.UpdateOne(ctx, bson.M{"_id": "BK-204"}, bson.M{
+        "$inc": bson.M{"reviewCount": 1},
+        "$push": bson.M{"recentReviews": bson.M{
+            "$each":  bson.A{bson.M{"user": "Grace", "stars": 5, "at": time.Now()}},
+            "$sort":  bson.M{"at": -1},
+            "$slice": 5,
+        }},
+    })
+    if err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    coll.update_one(
+        doc! { "_id": "BK-204" },
+        doc! {
+            "$inc": { "reviewCount": 1 },
+            "$push": { "recentReviews": {
+                "$each": [{ "user": "Grace", "stars": 5 }],
+                "$sort": { "stars": -1 },
+                "$slice": 5,
+            } },
+        },
+    )
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+1 000 product-page reads, fat document : 1688 ms (even with a $slice projection)
+1 000 product-page reads, subset       : 235 ms
+after the new review: 10001 reviews counted; 5 kept inline; newest is by Grace
+the full list is still one indexed query away: 3 older reviews fetched
 ```
 
-**Use it when** the working set is a small slice of a large collection of children, and you want the common read to stay fast while the full data remains available on demand.
+```text
+8 [ 'u8', 'u7', 'u6', 'u5', 'u4' ]
+```
+
+The fat document is 2.16 MB, the subset one 1 154 bytes; 1 000 page reads took 1 675 ms against 218 ms (a `$slice` projection did not help - the server still loaded the document). The cost is the second write, and keeping `reviewCount` and the inline list correct.
 
 ## The Computed pattern
 
-**Problem:** a value is derived from many source documents and is read far more often than the sources change — recomputing it on every read is wasteful. **Solution:** compute it once at write time and store the result. An order rolls up its own total rather than re-summing items on every read:
+**Problem:** a value is derived from many source documents and read far more often than the sources change. **Solution:** compute it at write time and store it. The key detail is atomicity: the item and the total change in **one** `updateOne`, so they cannot disagree:
 
-```json
-{
-  "_id": "order_5001",
-  "itemCount": 3,
-  "subtotal": 79.0,
-  "tax": 6.32,
-  "total": 85.32
-}
+```js
+// mongosh/pat-computed.js
+db.orders.insertOne({ _id: "order_1", items: [], itemCount: 0, total: 0 });
+const add = (id, sku, qty, price) => db.orders.updateOne({ _id: id }, { $push: { items: { sku, qty, price } }, $inc: { itemCount: qty, total: qty * price } });   // one atomic write keeps the sum right
+add("order_1", "BK-1", 1, 42); add("order_1", "BK-2", 2, 18.5); add("order_1", "BK-3", 1, 55);
+const o = db.orders.findOne({ _id: "order_1" });
+const recomputed = db.orders.aggregate([{ $match: { _id: "order_1" } }, { $project: { t: { $sum: { $map: { input: "$items", in: { $multiply: ["$$this.qty", "$$this.price"] } } } } } }]).toArray()[0].t;
+console.log({ stored_total: o.total, itemCount: o.itemCount, recomputed_from_items: recomputed });
+assert.strictEqual(o.total, recomputed);
+// the stale-field risk: change a price and forget the total
+db.orders.updateOne({ _id: "order_1", "items.sku": "BK-2" }, { $set: { "items.$.price": 20 } });
+const stale = db.orders.findOne({ _id: "order_1" });
+console.log("after changing one price without touching total ->", { stored_total: stale.total, real_total: stale.items.reduce((n, i) => n + i.qty * i.price, 0) });
+const drifted = db.orders.countDocuments({ $expr: { $ne: ["$total", { $sum: { $map: { input: "$items", in: { $multiply: ["$$this.qty", "$$this.price"] } } } }] } });
+console.log("orders whose stored total no longer matches their items:", drifted);
 ```
 
-**Use it when** reads vastly outnumber writes and the computation is non-trivial. You trade a little extra work on write — and the responsibility of keeping the computed field correct — for cheap, instant reads.
+```text
+{ stored_total: 134, itemCount: 4, recomputed_from_items: 134 }
+after changing one price without touching total -> { stored_total: 134, real_total: 137 }
+orders whose stored total no longer matches their items: 1
+```
+
+The trade-off is exactly what the last lines show: any write path that changes an item without the total leaves a stale value (134 stored, 137 real) and nothing errors. Add an `$expr` audit query like the one above to a health check.
 
 ## The Bucket pattern
 
-**Problem:** you have a high-volume stream of small records (sensor readings, log lines, price ticks) and storing one document per reading creates millions of tiny documents — wasteful in overhead and index size. **Solution:** *bucket* many readings into one document grouped by a window, such as an hour. One bucket holds an hour of measurements:
+**Problem:** a high-volume stream of tiny records (sensor readings, log lines) as one document each means millions of small documents and big indexes. **Solution:** group many records into one document per window - here per sensor per hour, capped at 200 readings so a bucket can never grow without bound (the unbounded-array trap from the last lesson). 20 000 readings, both ways:
 
-```json
-{
-  "_id": "sensor_9:2026-03-14T09",
-  "sensorId": "sensor_9",
-  "hour": "2026-03-14T09:00:00Z",
-  "count": 60,
-  "readings": [
-    { "t": "09:00:01Z", "celsius": 21.4 },
-    { "t": "09:01:01Z", "celsius": 21.5 }
-  ]
+```js
+// mongosh/pat-bucket.js
+const N = 20000, base = 1700000000000, sensors = ["s1", "s2"];
+const reading = (i) => ({ sensorId: sensors[i % 2], t: new Date(base + i * 5000), celsius: 20 + ((Math.imul(i, 2654435761) >>> 0) % 100) / 10 });
+const plain = db.readingsPlain, buck = db.readingsBucket;
+let t = Date.now();
+for (let i = 0; i < N; i += 1000) plain.insertMany(Array.from({ length: 1000 }, (_, k) => reading(i + k)));
+const plainMs = Date.now() - t;
+t = Date.now();
+const ops = [];
+for (let i = 0; i < N; i++) {                                                    // one bucket per sensor per hour, capped at 200 readings
+  const r = reading(i), hour = new Date(Math.floor(r.t.getTime() / 3600000) * 3600000);
+  ops.push({ updateOne: { filter: { sensorId: r.sensorId, hour, count: { $lt: 200 } }, update: { $push: { readings: { t: r.t, celsius: r.celsius } }, $inc: { count: 1 }, $setOnInsert: { sensorId: r.sensorId, hour } }, upsert: true } });
+  if (ops.length === 1000) { buck.bulkWrite(ops, { ordered: true }); ops.length = 0; }
 }
+if (ops.length) buck.bulkWrite(ops, { ordered: true });
+const buckMs = Date.now() - t;
+plain.createIndex({ sensorId: 1, t: 1 }); buck.createIndex({ sensorId: 1, hour: 1 });
+const ix = (c) => Math.round(Object.values(c.stats().indexSizes).reduce((a, b) => a + b, 0) / 1024);
+console.log({ plain: { documents: plain.countDocuments(), ingestMs: plainMs, indexKB: ix(plain) }, bucketed: { documents: buck.countDocuments(), ingestMs: buckMs, indexKB: ix(buck) } });
+const oneHour = buck.findOne({ sensorId: "s1", count: 200 });
+console.log("a full bucket:", oneHour.count, "readings in one document; readings in the collection:", buck.aggregate([{ $group: { _id: null, n: { $sum: "$count" } } }]).toArray()[0].n);
+assert.strictEqual(buck.aggregate([{ $group: { _id: null, n: { $sum: "$count" } } }]).toArray()[0].n, N);
 ```
 
-**Use it when** you ingest time-series or streaming data. Bucketing caps each document's growth at a known window, so you get the read benefits of embedding without the unbounded-array trap from the previous lesson.
+```text
+{
+  plain: { documents: 20000, ingestMs: 140, indexKB: 760 },
+  bucketed: { documents: 112, ingestMs: 1903, indexKB: 28 }
+}
+a full bucket: 200 readings in one document; readings in the collection: 20000
+```
+
+Bucketing cut the collection to 112 documents and the indexes from 760 KB to 28 KB, but ingest was about 14 times slower (1 903 ms vs 140 ms) because each reading is an upsert that finds its bucket first. That is the honest trade: cheaper storage and reads, more expensive writes.
+
+### The native alternative: time series collections
+
+For time-ordered measurements MongoDB builds and maintains the buckets for you. The manual: "Compared to normal collections, storing time series data in time series collections improves query efficiency and reduces the disk usage" ([time series collections](https://www.mongodb.com/docs/manual/core/timeseries-collections/), consulted 2026-09-30). You declare a `timeField` and an optional `metaField`:
+
+```js
+// mongosh/pat-timeseries.js
+db.createCollection("readingsTs", { timeseries: { timeField: "t", metaField: "sensorId", granularity: "seconds" } });
+const base = 1700000000000;
+for (let i = 0; i < 20000; i += 1000) db.readingsTs.insertMany(Array.from({ length: 1000 }, (_, k) => ({ sensorId: ["s1", "s2"][(i + k) % 2], t: new Date(base + (i + k) * 5000), celsius: 20 + ((Math.imul(i + k, 2654435761) >>> 0) % 100) / 10 })));
+const s = db.readingsTs.stats();
+console.log({ visibleDocuments: db.readingsTs.countDocuments(), buckets: s.timeseries.bucketCount, avgReadingsPerBucket: Math.round(20000 / s.timeseries.bucketCount) });
+const kb = (c) => Math.round(db[c].stats().size / 1024);      // data size in BSON bytes (storageSize is not meaningful this early)
+console.log("data size KB - one document per reading:", kb("readingsPlain"), "| hand-made buckets:", kb("readingsBucket"), "| time series collection:", kb("readingsTs"));
+console.log("query it like any collection:", db.readingsTs.aggregate([{ $match: { sensorId: "s1" } }, { $group: { _id: null, avg: { $avg: "$celsius" } } }, { $project: { _id: 0, avg: { $round: ["$avg", 2] } } }]).toArray());
+assert.strictEqual(db.readingsTs.countDocuments(), 20000);
+```
+
+```text
+{ visibleDocuments: 20000, buckets: 56, avgReadingsPerBucket: 357 }
+data size KB - one document per reading: 1301 | hand-made buckets: 731 | time series collection: 75
+query it like any collection: [ { avg: 24.9 } ]
+```
+
+Same 20 000 readings: 1 301 KB as plain documents, 731 KB as hand-made buckets, 75 KB in the time series collection (the sizes are BSON data sizes, and the time series figure is the compressed columnar bucket data). Reach for the hand-made pattern only when the native collection does not fit (for example when you need to update readings in place).
 
 ## The Extended Reference pattern
 
-**Problem:** you reference another document but always need one or two of its fields when you render the parent — forcing a lookup just to show a name. **Solution:** copy that handful of fields alongside the reference, *extending* it. An order keeps the customer's id *and* the few customer fields it always displays:
+**Problem:** you reference another document but always need one or two of its fields to render the parent. **Solution:** copy those few fields next to the reference. The pattern is most useful "when your application is experiencing lots of JOIN operations to bring together frequently accessed data" (pattern summary). Copy only fields that rarely change, and plan the refresh:
 
-```json
-{
-  "_id": "order_5001",
-  "customer": { "id": "cust_77", "name": "Grace Hopper", "city": "Cambridge" },
-  "status": "shipped"
-}
+```js
+// mongosh/pat-extended-reference.js
+db.customers.insertMany([{ _id: "cust_77", name: "Grace Hopper", city: "Cambridge", notes: "long profile ..." }, { _id: "cust_78", name: "Linus", city: "Helsinki" }]);
+db.ordersX.insertMany(Array.from({ length: 5000 }, (_, i) => ({ _id: "o" + i, customer: { id: i % 2 ? "cust_77" : "cust_78", name: i % 2 ? "Grace Hopper" : "Linus", city: i % 2 ? "Cambridge" : "Helsinki" }, total: 10 + (i % 90) })));   // id + the fields the page always shows
+console.log("order list row, no lookup needed:", db.ordersX.findOne({ _id: "o1" }));
+db.customers.updateOne({ _id: "cust_77" }, { $set: { city: "Arlington" } });                                // the customer moves
+console.log("orders now showing the old city:", db.ordersX.countDocuments({ "customer.id": "cust_77", "customer.city": "Cambridge" }));
+const t = Date.now();
+const r = db.ordersX.updateMany({ "customer.id": "cust_77" }, { $set: { "customer.city": "Arlington" } });
+console.log("refresh copies:", r.modifiedCount, "orders updated in", Date.now() - t, "ms; still stale:", db.ordersX.countDocuments({ "customer.id": "cust_77", "customer.city": "Cambridge" }));
+assert.strictEqual(r.modifiedCount, 2500);
 ```
 
-**Use it when** a referenced field is read constantly but changes rarely. You avoid the lookup on every read, at the cost of refreshing the copied fields when they change — a worthwhile trade for stable data like a name or city.
-
-## Choosing a pattern by the problem
-
-Each pattern answers a specific pain. Match the symptom you have to the pattern that cures it:
+```text
+order list row, no lookup needed: {
+  _id: 'o1',
+  customer: { id: 'cust_77', name: 'Grace Hopper', city: 'Cambridge' },
+  total: 11
+}
+orders now showing the old city: 2500
+refresh copies: 2500 orders updated in 21 ms; still stale: 0
+```
 
 export const patternMapDiagram = `flowchart LR
   P1["Large array, only top few read"] --> S["Subset pattern"]
@@ -92,58 +259,145 @@ export const patternMapDiagram = `flowchart LR
 
 <Mermaid code={patternMapDiagram} title="Each design pattern maps to a specific recurring modeling problem" />
 
-These patterns combine freely. A time-series application might bucket its readings, store a computed hourly average on each bucket, and keep an extended reference to the sensor's name — three patterns in one document, each pulling its weight.
+The patterns combine freely: a sensor application can bucket its readings, store a computed hourly average on each bucket and keep an extended reference to the sensor's name. The blog series names many more (Attribute, Outlier, Polymorphic, Schema Versioning, Tree, Approximation, Pre-allocation, Document Versioning) that this lesson does not cover.
 
 ## Tips and gotchas
 
-- Patterns are trade-offs, not free wins. Subset and Extended Reference both introduce a copy you must keep current; Computed adds write-time work; Bucket adds a small amount of grouping logic.
-- The Computed and Extended Reference patterns both denormalize — they store derived or copied data. That is fine in MongoDB, as long as you own a clear plan for refreshing it.
-- The Bucket pattern is the standard answer to time-series data, and it directly defuses the unbounded-array problem by capping growth per window.
-- Do not apply a pattern speculatively. Reach for one when you can name the specific problem it solves in your workload.
+- Patterns are trade-offs, not free wins: Subset and Extended Reference add a copy to keep current, Computed adds write-time work and a stale-value risk, Bucket makes writes 14x costlier here.
+- Computed and Extended Reference denormalize; own a plan for refreshing them (an audit query, a batch `updateMany`).
+- For time-ordered data check the native time series collection before hand-rolling buckets.
+- Cap a bucket (here 200 readings) so it cannot become the unbounded array it was meant to avoid.
+- Do not apply a pattern speculatively; reach for one when you can name the problem in your workload.
 
 <Callout title="Patterns are named trade-offs">
-Each pattern trades something — a copy to maintain, a little write-time work — for a faster or simpler read. Learn the problem each one solves so that when you meet the symptom, you already know the cure. Use a pattern because you have its problem, never just because it exists.
+Each pattern trades something - a copy to maintain, a little write-time work - for a faster or simpler read. Learn the problem each one solves so that when you meet the symptom you already know the cure. Use a pattern because you have its problem, never just because it exists.
 </Callout>
+
+## Reading AI-generated code
+
+Asked to "keep the order total up to date", an assistant adds the item and recomputes nothing - it relies on the total being right from before:
+
+<SpotTheBug lang="js" code={`// AI comment: "total is a Computed field, so we only need to update the item"
+await db.collection("orders").updateOne(
+  { _id: "order_1", "items.sku": "BK-2" },
+  { $set: { "items.$.price": 20 } }
+);`}>
+
+The Computed pattern only works if **every** write path maintains the computed field. This one changes an item price and leaves `total` alone: the run above ended with a stored total of 134 while the items summed to 137, the `$expr` audit found 1 order out of sync, and no error was raised anywhere. The fix is to change both in one atomic update (`$inc` the difference, or rewrite the total), and to run the audit query regularly:
+
+```js
+// mongosh/pat-computed-fix.js
+db.orders.updateOne(
+  { _id: "order_1", "items.sku": "BK-2" },
+  [{ $set: { items: { $map: { input: "$items", in: { $cond: [{ $eq: ["$$this.sku", "BK-2"] }, { $mergeObjects: ["$$this", { price: 20 }] }, "$$this"] } } } } },
+   { $set: { total: { $sum: { $map: { input: "$items", in: { $multiply: ["$$this.qty", "$$this.price"] } } } } } }]      // items and total change in ONE update
+);
+const o = db.orders.findOne({ _id: "order_1" });
+const real = o.items.reduce((n, i) => n + i.qty * i.price, 0);
+console.log({ stored_total: o.total, real_total: real, ordersOutOfSync: db.orders.countDocuments({ $expr: { $ne: ["$total", { $sum: { $map: { input: "$items", in: { $multiply: ["$$this.qty", "$$this.price"] } } } }] } }) });
+assert.strictEqual(o.total, real);
+```
+
+```text
+{ stored_total: 137, real_total: 137, ordersOutOfSync: 0 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Every pattern moves work from read time to write time (Computed, Bucket, Subset) or moves a join into the document (Extended Reference). The bill arrives as a copy to keep correct or a write path to maintain. Before adopting one, name the read you are speeding up, and the write path that now has one more job.
 
 ## Trade-offs
 
 | Pattern | Benefit | Cost |
 |---------|---------|------|
-| Bucket pattern | Far fewer documents per read, much lower index overhead | Requires designing the bucket size in advance, and cross-bucket queries get more complex |
-| Computed pattern | Very fast reads, no need to recompute the same value on every read | Adds write-time work, and risks a stale computed field if you forget to refresh it |
+| Subset | 2.16 MB read becomes 1 154 bytes | A second write; the inline copy must stay current |
+| Computed | No recomputation on read; atomic with the item | Stale if any write path forgets it (134 vs 137) |
+| Bucket | 112 documents and 28 KB of indexes instead of 20 000 and 760 KB | 14x slower ingest here; bucket size to choose |
+| Time series collection | 75 KB, no bucket code | Only for time-ordered measurements; limited in-place updates |
+| Extended Reference | No lookup for the common fields | Refresh on change: 2 500 orders to update |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Applying a pattern before you actually have the problem** — Bucket, Computed, Subset, and Extended Reference all add schema complexity. Do not reach for one speculatively before measuring the real workload.
-- **Using the Computed pattern and forgetting to refresh the computed value** — a precomputed field goes stale immediately if the source changes with no job or trigger keeping it updated.
-- **Picking the wrong bucket size in the Bucket pattern** — too small and it is barely different from not bucketing at all; too large and it risks hitting the document size limit just like the original unbounded array.
+- **"A `$slice` projection makes a fat document cheap to read."** - the server still loaded it: 1 675 ms vs 218 ms.
+- **"A computed field maintains itself."** - the one forgotten write left it 3 off with no error.
+- **"Bucketing is a pure win."** - reads and storage improved; ingest was 14x slower.
+- **"Hand-made buckets are the way to store time series."** - the native collection stored the same data in 75 KB.
+- **"Copying fields is always wrong in a database."** - Extended Reference does it on purpose, for fields that rarely change.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A typical Bucket pattern for IoT data** — groups telemetry readings into one document per time window (say, per hour) instead of creating a new document per reading, cutting the document count by a large factor. Bosch uses MongoDB to store and analyze IoT data in real time this way, and is planning to move to MongoDB's Time Series Collections instead of grouping data by hand ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)).
->
-> **A typical online game backend** — uses a Computed-pattern approach to precompute player stats and leaderboards ahead of time, instead of re-aggregating scores from every match each time someone views them.
+> Bosch uses MongoDB (via Bosch IoT Insights) to store and analyze IoT data in real time, and is planning to move to MongoDB's Time Series Collections instead of grouping data by hand ([mongodb.com/customers/bosch](https://www.mongodb.com/customers/bosch)) - the same choice measured above between a hand-made Bucket and the native collection.
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the `$push` with `$slice` kept five reviews and counted six) but they are not executed by the course's automated checker._
 
 export const quizPatterns = [
   {
-    q: 'Which pattern keeps only the few frequently-read elements in the main document and stores the full list elsewhere?',
-    options: ['Computed', 'Subset', 'Bucket', 'Extended Reference'],
-    answer: 1,
-  },
-  {
-    q: 'You store an order total instead of re-summing items on every read. Which pattern is that?',
-    options: ['Subset', 'Bucket', 'Computed', 'Extended Reference'],
-    answer: 2,
-  },
-  {
-    q: 'Which pattern groups many small time-series records into one document per window to cap growth?',
-    options: ['Bucket', 'Subset', 'Extended Reference', 'Computed'],
+    q: 'A product page needs only the 5 newest of 10 000 reviews. Which pattern fits, and what did it save?',
+    options: [
+      'Subset: 1 154 bytes instead of 2.16 MB per read (218 ms vs 1 675 ms for 1 000 reads)',
+      'Computed',
+      'Bucket',
+      'Extended Reference',
+    ],
     answer: 0,
+    explain: 'Even a $slice projection on the fat document loaded it server-side; the subset document was 1 154 bytes.',
   },
   {
-    q: 'You copy a customer name next to a customerId so you avoid a lookup when rendering an order. Which pattern is that?',
-    options: ['Computed', 'Subset', 'Bucket', 'Extended Reference'],
-    answer: 3,
+    q: 'What keeps a Computed total correct when an item is added?',
+    options: [
+      'One updateOne that both $push-es the item and $inc-s the total, so they change atomically',
+      'Recomputing on every read',
+      'Nothing needs to be done',
+      'A unique index',
+    ],
+    answer: 0,
+    explain: 'stored_total 134 equalled the value recomputed from the items; changing a price without touching total left 134 vs a real 137.',
+  },
+  {
+    q: 'What did bucketing 20 000 readings into hourly documents change?',
+    options: [
+      '112 documents and 28 KB of indexes instead of 20 000 and 760 KB - but ingest took 1 903 ms instead of 140 ms',
+      'Nothing',
+      'Everything got faster',
+      'The readings were lost',
+    ],
+    answer: 0,
+    explain: 'All 20 000 readings were still there (asserted); the cost moved to write time because each reading was an upsert with $push.',
+  },
+  {
+    q: 'When should you use a native time series collection instead of a hand-made Bucket?',
+    options: [
+      'When the data is time-ordered measurements with a timeField and metaField - the server buckets and compresses them (75 KB vs 731 KB here)',
+      'Never',
+      'Only on sharded clusters',
+      'Only for text data',
+    ],
+    answer: 0,
+    explain: 'createCollection with timeseries produced 56 buckets for 20 000 readings and was queried like a normal collection.',
+  },
+  {
+    q: 'A customer moves city. In the Extended Reference pattern, what is the price?',
+    options: [
+      'Refreshing every copy: 2 500 orders had to be updated (22 ms) and were stale until then',
+      'Nothing',
+      'Dropping the index',
+      'A transaction is impossible',
+    ],
+    answer: 0,
+    explain: 'Before the refresh 2 500 orders showed Cambridge; updateMany changed them all. Copy fields that rarely change.',
+  },
+  {
+    q: 'Why apply a pattern only when you can name its problem?',
+    options: [
+      'Every pattern adds a copy or write-time work; the bucket version was 14x slower to ingest',
+      'Patterns are deprecated',
+      'They break replication',
+      'They need Atlas',
+    ],
+    answer: 0,
+    explain: '1 903 ms vs 140 ms ingest for the bucket pattern; Subset and Extended Reference each add a copy to keep current.',
   },
 ]
 
