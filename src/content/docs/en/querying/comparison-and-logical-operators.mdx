@@ -1,6 +1,6 @@
 ---
 title: Comparison and logical operators
-description: Filter beyond exact matches with $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, combine conditions with $and, $or, $not, $nor, and test fields with $exists and $type.
+description: Filter beyond exact matches with $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, combine conditions with $and, $or, $not, $nor, and test fields with $exists and $type - including what missing fields, null and mixed types do, and what the planner does with each.
 sidebar:
   order: 2
 ---
@@ -8,11 +8,48 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-An exact-match filter — field equals value — only gets you so far. Real questions are ranges and sets: "who owes more than three fines?", "who joined in 2022 or 2023?", "which records are missing a field entirely?". MongoDB answers these with **query operators**, special keys that begin with a dollar sign and live *inside* the value position of a field. The pattern is always the same: instead of giving a field a plain value, you give it a small document whose key is an operator.
+An exact-match filter - field equals value - only gets you so far. Real questions are ranges and sets: "who owes more than three fines?", "who joined in 2022 or 2023?", "which records are missing a field entirely?". MongoDB answers these with **query operators**, special keys that begin with a dollar sign and live *inside* the value position of a field. The pattern is always the same: instead of giving a field a plain value, you give it a small document whose key is an operator.
 
-We keep editing our library `members`. Each example shows the filter and the documents it would return.
+We keep querying our library `members`. Every output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 (Python, Go and Rust tabs were each run once in a scratch program on the same server). This lesson's data is deliberately a little messy - one member with no `fines` field, one with `fines: null`, one whose `joined` is a *string* - because that is where operators surprise people.
+
+## The data we query
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/cmp-seed.js
+    db.members.insertMany([
+      { name: "Ada",      joined: 2024 },                    // no fines field at all
+      { name: "Grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 0 },
+      { name: "Barbara",  joined: 2025, fines: null },       // fines exists, but null
+      { name: "Alan",     joined: "2020", fines: 1 },        // joined stored as a string by mistake
+    ]);
+    globalThis.names = (f) => db.members.find(f, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 7);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/cmp-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      joined: 2024 },
+      { name: "Grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 0 },
+      { name: "Barbara",  joined: 2025, fines: null },
+      { name: "Alan",     joined: "2020", fines: 1 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 7) throw new Error("expected 7");
+    ```
+  </TabItem>
+</Tabs>
 
 ## Comparison operators
 
@@ -21,15 +58,20 @@ The comparison family compares a field against a value: `$eq` (equal), `$ne` (no
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ fines: { $gt: 2 } })
+    // mongosh/cmp-gt.js
+    const docs = db.members.find({ fines: { $gt: 2 } }, { _id: 0 }).sort({ name: 1 }).toArray();
+    console.log(docs);
+    assert.strictEqual(docs.map((d) => d.name).join(), "Grace,Linus");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-gt.mjs
     const docs = await db.collection("members")
       .find({ fines: { $gt: 2 } })
       .toArray();
-    console.log(docs);
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 2) throw new Error("expected 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -62,20 +104,33 @@ The comparison family compares a field against a value: `$eq` (equal), `$ne` (no
   </TabItem>
 </Tabs>
 
-Only members above the threshold come back:
+Only members above the threshold come back (`missing`, `null` and other-typed values never satisfy `$gt`):
 
-```json
+```text
 [
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+  { name: 'Grace', joined: 2021, fines: 3 },
+  { name: 'Linus', joined: 2023, fines: 5 }
 ]
 ```
 
-You can combine two comparisons on the **same** field by putting both operators in one document — here, members who joined in a window of years:
+You can combine two comparisons on the **same** field by putting both operators in one document - here, members who joined in a window of years. And note what `$gt: 2000` does to the member whose `joined` is the *string* `"2020"`:
 
 ```js
-db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
+// mongosh/cmp-range-and-types.js
+console.log("joined 2022..2023   :", names({ joined: { $gte: 2022, $lte: 2023 } }));
+console.log("joined > 2000       :", names({ joined: { $gt: 2000 } }));        // Alan's "2020" is a string
+console.log("joined type string  :", names({ joined: { $type: "string" } }));
+assert.strictEqual(names({ joined: { $gt: 2000 } }).includes("Alan"), false);
+assert.strictEqual(names({ joined: { $type: "string" } }), "Alan");
 ```
+
+```text
+joined 2022..2023   : Edsger, Linus, Margaret
+joined > 2000       : Ada, Barbara, Edsger, Grace, Linus, Margaret
+joined type string  : Alan
+```
+
+MongoDB compares a number only with other numbers, so the mistyped `"2020"` is silently absent from every numeric range - it does not error and it does not sort as 2020 (a single type-bracketing rule: a range query only sees values of the same type as its operand).
 
 ## Membership: $in and $nin
 
@@ -84,14 +139,20 @@ db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ joined: { $in: [2021, 2023] } })
+    // mongosh/cmp-in.js
+    console.log("joined $in [2021,2023]:", names({ joined: { $in: [2021, 2023] } }));
+    console.log("fines $nin [0,5]      :", names({ fines: { $nin: [0, 5] } }));
+    assert.strictEqual(names({ joined: { $in: [2021, 2023] } }), "Grace, Linus, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-in.mjs
     const docs = await db.collection("members")
       .find({ joined: { $in: [2021, 2023] } })
       .toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 3) throw new Error("expected 3");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -120,32 +181,35 @@ db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
   </TabItem>
 </Tabs>
 
-Both matching years are returned together:
+Both matching years are returned together - and look at `$nin`: it returned four members, including Ada (no `fines` at all), Barbara (`null`) and Alan (1), because "not in [0, 5]" is true for anything that is not literally 0 or 5:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
-]
+```text
+joined $in [2021,2023]: Grace, Linus, Margaret
+fines $nin [0,5]      : Ada, Alan, Barbara, Grace
 ```
 
 ## Combining conditions: $and, $or, $not, $nor
 
-Several field/value pairs in one filter already mean AND, so `$and` is only needed when you would otherwise write the same field twice. `$or` is the everyday one — it takes a list of filters and matches if **any** holds. Here we find members who either owe nothing or joined in 2021:
+Several field/value pairs in one filter already mean AND, so `$and` is only needed when you would otherwise write the same field twice. `$or` is the everyday one - it takes a list of filters and matches if **any** holds. Here we find members who either owe nothing or joined in 2021:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      $or: [{ fines: 0 }, { joined: 2021 }]
-    })
+    // mongosh/cmp-or-nor.js
+    console.log("$or fines 0 / joined 2021:", names({ $or: [{ fines: 0 }, { joined: 2021 }] }));
+    console.log("$nor (same branches)     :", names({ $nor: [{ fines: 0 }, { joined: 2021 }] }));
+    console.log("$not { $gt: 2 }          :", names({ fines: { $not: { $gt: 2 } } }));
+    assert.strictEqual(names({ $or: [{ fines: 0 }, { joined: 2021 }] }), "Edsger, Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-or.mjs
     const docs = await db.collection("members").find({
       $or: [{ fines: 0 }, { joined: 2021 }]
     }).toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 3) throw new Error("expected 3");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -186,36 +250,47 @@ Several field/value pairs in one filter already mean AND, so `$and` is only need
   </TabItem>
 </Tabs>
 
-Anyone matching either branch appears:
+Anyone matching either branch appears. `$nor` is the logical opposite of `$or` - and notice that it **includes members who do not have the field at all** (Ada) or have it as `null` (Barbara): "none of these branches hold" is true when there is nothing to compare. `$not` inverts a single operator expression and, likewise, matches missing fields:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d2", "name": "Margaret", "joined": 2023, "fines": 0 },
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
-]
+```text
+$or fines 0 / joined 2021: Edsger, Grace, Margaret
+$nor (same branches)     : Ada, Alan, Barbara, Linus
+$not { $gt: 2 }          : Ada, Alan, Barbara, Edsger, Margaret
 ```
 
-`$not` inverts a single operator expression, and `$nor` matches documents where **none** of its branches hold — the logical opposite of `$or`. As an example, "owes a non-zero amount AND did not join in 2021" reads naturally with `$nor`:
+`$not` only wraps an *operator expression*. Handing it a bare value is rejected by the server:
 
-```js
-db.members.find({ $nor: [{ fines: 0 }, { joined: 2021 }] })
+```text
+> db.members.find({ fines: { $not: 5 } }).toArray()
+MongoServerError: $not argument must be a regex or an object
+> db.members.find({ fines: { $not: { $eq: 5 } } })     -> Ada, Alan, Barbara, Edsger, Grace, Margaret
 ```
 
 ## Testing for a field: $exists and $type
 
-Documents in one collection need not all share the same fields. `$exists` asks whether a field is present at all, regardless of its value, and `$type` asks what BSON type the value has. Here we find members who have *no* `fines` field recorded yet:
+Documents in one collection need not all share the same fields. `$exists` asks whether a field is present at all, regardless of its value, and `$type` asks what BSON type the value has. Here we find members who have *no* `fines` field recorded yet - and compare with `null`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ fines: { $exists: false } })
+    // mongosh/cmp-exists-type.js
+    console.log("fines $exists false :", names({ fines: { $exists: false } }));
+    console.log("fines null          :", names({ fines: null }));
+    console.log("fines $type null    :", names({ fines: { $type: "null" } }));
+    console.log("joined $type number :", names({ joined: { $type: "number" } }));
+    console.log("joined $type [int,double]:", names({ joined: { $type: ["int", "double"] } }));
+    assert.strictEqual(names({ fines: { $exists: false } }), "Ada");
+    assert.strictEqual(names({ fines: null }), "Ada, Barbara");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-exists.mjs
     const docs = await db.collection("members")
       .find({ fines: { $exists: false } })
       .toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1) throw new Error("expected 1");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -244,52 +319,135 @@ Documents in one collection need not all share the same fields. `$exists` asks w
   </TabItem>
 </Tabs>
 
-Only the document that never got a `fines` field comes back:
+Three different questions with three different answers:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d5", "name": "Ada", "joined": 2024 }
-]
+```text
+fines $exists false : Ada
+fines null          : Ada, Barbara
+fines $type null    : Barbara
+joined $type number : Ada, Barbara, Edsger, Grace, Linus, Margaret
+joined $type [int,double]: Ada, Barbara, Edsger, Grace, Linus, Margaret
 ```
 
-To match by type instead — say, every document where `joined` is stored as a number rather than a string someone typed by mistake — name the type:
+`{ fines: null }` matches **both** the missing field (Ada) and the explicit null (Barbara); `$exists: false` is only the missing one; `$type: "null"` is only the explicit null. `$type` takes either a type alias (`"int"`, `"string"`, `"number"` = any numeric type) or an array of aliases.
+
+**In Compass:** type any of these filters straight into the **Filter** field at the top of the Documents tab, for example `{ fines: { $gt: 2 } }`, and press **Find** (Compass accepts every query operator except `$text` and `$expr`, per its documentation, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/)).
+
+## What the planner does with each
+
+The old lesson said `$ne` makes the planner "often choose not to use an index at all". We measured on 20 000 documents with a single-field index on `city` and one on `joined`; `explain("executionStats")` reports keys and documents examined:
 
 ```js
-db.members.find({ joined: { $type: "int" } })
+// mongosh/cmp-explain.js
+const cities = ["Berlin", "Cambridge", "Helsinki", "Austin", "Boston"];
+db.big.insertMany(Array.from({ length: 20000 }, (_, i) => ({ i, city: cities[i % 5], joined: 2020 + (i % 6), fines: i % 4 })));
+db.big.createIndex({ city: 1 });
+db.big.createIndex({ joined: 1 });
+const stage = (p) => p.inputStage ? p.stage + " > " + stage(p.inputStage) : (p.inputStages ? p.stage + " > [" + p.inputStages.map(stage).join(", ") + "]" : p.stage);
+const stats = (label, cursor) => {
+  const e = cursor.explain("executionStats"), es = e.executionStats, wp = e.queryPlanner.winningPlan;
+  console.log(label.padEnd(26), stage(wp.queryPlan ?? wp), "| returned", es.nReturned, "| keys", es.totalKeysExamined, "| docs", es.totalDocsExamined);
+  return es;
+};
+stats("city = Berlin", db.big.find({ city: "Berlin" }));
+const ne = stats("city $ne Berlin", db.big.find({ city: { $ne: "Berlin" } }));
+stats("city $nin [Berlin,Boston]", db.big.find({ city: { $nin: ["Berlin", "Boston"] } }));
+stats("joined $gte 2025", db.big.find({ joined: { $gte: 2025 } }));
+stats("joined $in [2021,2023]", db.big.find({ joined: { $in: [2021, 2023] } }));
+stats("$or joined 2021 / 2023", db.big.find({ $or: [{ joined: 2021 }, { joined: 2023 }] }));
+const noIdx = stats("$or city / fines (no idx)", db.big.find({ $or: [{ city: "Berlin" }, { fines: 3 }] }));
+stats("$or city / joined", db.big.find({ $or: [{ city: "Berlin" }, { joined: 2021 }] }));
+assert.strictEqual(ne.totalKeysExamined, 16001);
+assert.strictEqual(noIdx.totalDocsExamined, 20000);
 ```
 
-**In Compass:** type any of these filters straight into the filter bar at the top of the Documents tab, for example `{ fines: { $gt: 2 } }`, and press **Find**. Compass parses the same operator syntax the shell uses.
+```text
+city = Berlin              FETCH > IXSCAN | returned 4000 | keys 4000 | docs 4000
+city $ne Berlin            FETCH > IXSCAN | returned 16000 | keys 16001 | docs 16000
+city $nin [Berlin,Boston]  FETCH > IXSCAN | returned 12000 | keys 12002 | docs 12000
+joined $gte 2025           FETCH > IXSCAN | returned 3333 | keys 3333 | docs 3333
+joined $in [2021,2023]     FETCH > IXSCAN | returned 6667 | keys 6669 | docs 6667
+$or joined 2021 / 2023     FETCH > IXSCAN | returned 6667 | keys 6669 | docs 6667
+$or city / fines (no idx)  SUBPLAN > COLLSCAN | returned 8000 | keys 0 | docs 20000
+$or city / joined          SUBPLAN > FETCH > OR > [IXSCAN, IXSCAN] | returned 6668 | keys 7334 | docs 6668
+```
+
+What this shows:
+
+- `$ne` and `$nin` **do use the index** (`IXSCAN`) - the planner walks the ranges on either side of the excluded value. What they cannot do is be *selective*: `$ne "Berlin"` examined 16 001 keys and fetched 16 000 documents out of 20 000. It is an index scan that behaves like a near-full scan, which is the accurate version of the old warning.
+- `$in` on one field and an `$or` of equalities on the same field produce **the same plan** (`FETCH > IXSCAN`, 6 669 keys) - the optimizer rewrites one into the other, so choose whichever reads better.
+- An `$or` needs an index for **every** branch to use them: with indexes on both `city` and `joined` it ran an `OR` of two `IXSCAN`s; when one branch (`fines: 3`) had no index, the whole query fell back to `COLLSCAN` and examined all 20 000 documents.
 
 ## Tips and gotchas
 
 - **A plain value is `$eq`.** Writing `{ fines: 0 }` and `{ fines: { $eq: 0 } }` are identical. Reach for the explicit operators only when you need a comparison other than equality.
-- **`$ne` and `$nin` also match missing fields.** A document with no `fines` field is "not equal to 5", so it satisfies `{ fines: { $ne: 5 } }`. If you mean "has a fines field and it is not 5", combine with `$exists`.
-- **Two operators on one field go in one document.** Range queries like `{ $gte: 2022, $lte: 2023 }` are a single value document, not two separate filters — you cannot repeat the same field key at the top level.
-- **Prefer `$in` over a pile of `$or` equalities.** They mean the same thing, but `$in` is shorter, reads better, and lets the query planner use an index more directly.
+- **`$ne`, `$nin`, `$nor` and `$not` also match missing fields.** Proven above: `fines: { $ne: 0 }` matched Ada (no field) and Barbara (`null`). If you mean "has a fines field and it is not 0", combine with `$exists` or use `$gt`.
+- **Range operators only see their own type.** `{ joined: { $gt: 2000 } }` skipped the string `"2020"`; a mistyped value hides from numeric ranges silently.
+- **Two operators on one field go in one document.** Range queries like `{ $gte: 2022, $lte: 2023 }` are a single value document, not two separate filters - repeating the same field key at the top level drops the first (see the find lesson).
+- **Prefer `$in` over a pile of `$or` equalities.** They compile to the same plan here, but `$in` is shorter and reads better.
 
 <Callout title="Operators live in the value, logic lives at the top">
 Comparison and element operators ($gt, $in, $exists, $type) sit inside a field's value. Logical operators ($and, $or, $not, $nor) sit at the top level of the filter and take whole sub-filters. Keeping that split straight in your head prevents most malformed queries.
 </Callout>
 
+## Reading AI-generated code
+
+Ask an assistant for "members who owe money" and you will often see the negated form:
+
+<SpotTheBug lang="js" code={`// AI comment: "everyone whose fines are not zero owes money"
+const debtors = await db.collection("members")
+  .find({ fines: { $ne: 0 } })
+  .toArray();
+await sendReminderEmails(debtors);`}>
+
+`$ne: 0` also matches every document where `fines` is missing or `null`. On our seven members it returned **five** names - Ada (no field), Alan, Barbara (`null`), Grace and Linus - although only three of them (Alan 1, Grace 3, Linus 5) really owe anything. Ada and Barbara would get a reminder for a debt that does not exist. Ask the positive question instead:
+
+```js
+// mongosh/cmp-debtors-fix.js
+const bug = names({ fines: { $ne: 0 } });
+const fixed = names({ fines: { $gt: 0 } });
+console.log("$ne 0 :", bug);
+console.log("$gt 0 :", fixed);
+assert.strictEqual(bug, "Ada, Alan, Barbara, Grace, Linus");
+assert.strictEqual(fixed, "Alan, Grace, Linus");
+```
+
+```text
+$ne 0 : Ada, Alan, Barbara, Grace, Linus
+$gt 0 : Alan, Grace, Linus
+```
+
+`$gt: 0` only ever matches numbers above zero, so missing and `null` drop out on their own.
+
+</SpotTheBug>
+
+## Mental Model
+
+Every query operator answers "does the value **at this path** satisfy the predicate?" - and a missing path or a value of another type is a legitimate input that the predicate must decide about. **Positive** operators (`$eq`, `$gt`, `$in`, `$exists: true`) fail on missing/mistyped values; **negative** operators (`$ne`, `$nin`, `$not`, `$nor`) *succeed* on them. When results look too broad, look for a negative operator; when they look too narrow, look for a type mismatch.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Equality filter (`$eq` or a plain value) | Fastest, always fully uses an index | Cannot answer range or set questions |
-| Range/set operators (`$gt`, `$gte`, `$lt`, `$lte`, `$in`) | Answers range/set questions, still indexable if the field has a matching index | Lower selectivity than equality, especially for wide ranges — can read more documents than necessary |
-| Combining with `$and`/`$or`/`$nor` | Answers complex logical questions in one call | Harder to plan indexes for, especially `$or`, which can force scanning multiple paths or the whole collection |
+| Equality filter (`$eq` or a plain value) | Most selective, fully uses an index (4 000 keys for 4 000 hits) | Cannot answer range or set questions |
+| Range/set operators (`$gt`, `$gte`, `$lt`, `$lte`, `$in`) | Answers range/set questions, still indexable if the field has a matching index | Lower selectivity than equality, especially for wide ranges - can read more keys and documents than necessary |
+| Negative operators (`$ne`, `$nin`, `$nor`, `$not`) | Express "everything except" directly | Match missing/`null`/mistyped values; use the index but examine nearly everything (16 001 keys for `$ne`) |
+| Combining with `$and`/`$or`/`$nor` | Answers complex logical questions in one call | `$or` needs an index on every branch or it falls back to a collection scan (20 000 documents examined) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming `$ne`/`$nin` use an index as efficiently as `$eq`** — in practice `$ne` usually has low selectivity (it must consider nearly every document that does not match), so the query planner often chooses not to use an index at all, even if one exists on that field.
-- **Using `$or` across different fields per clause and expecting one index to cover all of them** — MongoDB must run a separate index scan for each `$or` clause and merge the results. If a clause has no suitable index, that clause falls back to scanning the whole collection.
-- **Wrapping `$not` around a plain value instead of an operator expression** — `{ field: { $not: { $eq: 5 } } }` is correct, but `{ field: { $not: 5 } }` is not a form `$not` supports. `$not` must always wrap an operator expression, never a bare value.
+- **"`$ne` / `$nin` skip the index."** - they use it, but with near-zero selectivity (16 001 keys examined for 16 000 results).
+- **"`$or` across different fields is covered by one index."** - each branch needs its own index; one unindexed branch turned the whole query into a `COLLSCAN`.
+- **"`$not: 5` works."** - the server answers `$not argument must be a regex or an object`; wrap an operator: `$not: { $eq: 5 }`.
+- **"`{ field: null }` means the field is null."** - it also matches documents where the field is missing.
+- **"A number stored as a string still falls in numeric ranges."** - `"2020"` was absent from `$gt: 2000`.
+- **"`$nor` finds documents that do not match."** - it matches those where none of the branches hold, which includes documents missing the fields entirely.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An e-commerce price-range filter** — a min/max price slider on a product page translates directly into `{ price: { $gte: min, $lte: max } }`, and a multi-select brand dropdown translates into `$in`.
->
-> **A fintech fraud-detection system** — rules flagging suspicious transactions are commonly written with `$or` combining several conditions, such as an unusually large amount, or a country the account has never transacted from before, or an unusually high frequency in a short time.
+> The MongoDB manual's query-predicates page groups exactly these operators - "Comparison" (`$eq`, `$gt`, `$in` ...), "Logical" (`$and`, `$or`, `$nor`, `$not`) and "Data Type" (`$exists`, `$type`, returning data "based on field existence or data types") - alongside the array, bitwise and geospatial families the next lessons and later modules meet ([Query predicates](https://www.mongodb.com/docs/manual/reference/mql/query-predicates/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server and returned the same members (`$gt`: Grace and Linus; `$in`: Grace, Linus, Margaret; `$or`: Grace, Margaret, Edsger; `$exists: false`: Ada) but they are not executed by the course's automated checker._
 
 export const quizComparison = [
   {
@@ -301,6 +459,7 @@ export const quizComparison = [
       '{ fines: ">2" }',
     ],
     answer: 1,
+    explain: 'Operators live inside the field value: { fines: { $gt: 2 } } returned Grace and Linus.',
   },
   {
     q: 'A document has no fines field. Does it match { fines: { $ne: 5 } }?',
@@ -311,11 +470,13 @@ export const quizComparison = [
       'It raises an error',
     ],
     answer: 1,
+    explain: 'Negative operators match missing fields: $ne: 5 returned Ada (no fines) and Barbara (null) along with the others.',
   },
   {
     q: 'Which operator matches when a field equals any value in a list?',
     options: ['$or', '$all', '$in', '$exists'],
     answer: 2,
+    explain: '$in takes a list; it produced the same query plan as an $or of equalities on one field.',
   },
   {
     q: 'Where do logical operators like $or belong in a filter?',
@@ -326,6 +487,29 @@ export const quizComparison = [
       'They cannot be combined with field conditions',
     ],
     answer: 1,
+    explain: '$and, $or, $nor sit at the top level and take whole sub-filters; comparison operators sit inside a field.',
+  },
+  {
+    q: '{ city: { $ne: "Berlin" } } on 20 000 documents with an index on city. What does explain show?',
+    options: [
+      'COLLSCAN - $ne cannot use an index',
+      'An IXSCAN that examined 16 001 keys to return 16 000 documents',
+      'An IXSCAN that examined 1 key',
+      'An error: $ne needs a hint',
+    ],
+    answer: 1,
+    explain: '$ne uses the index but is not selective: FETCH > IXSCAN, 16001 keys, 16000 docs.',
+  },
+  {
+    q: 'A collection has documents with fines missing, fines: null and fines: 3. Which filter matches ONLY the explicit null?',
+    options: [
+      '{ fines: null }',
+      '{ fines: { $exists: false } }',
+      '{ fines: { $type: "null" } }',
+      '{ fines: { $ne: null } }',
+    ],
+    answer: 2,
+    explain: '{ fines: null } matches both missing and null; $exists: false only the missing one; $type: "null" only the explicit null.',
   },
 ]
 

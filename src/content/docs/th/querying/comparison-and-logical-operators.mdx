@@ -1,6 +1,6 @@
 ---
 title: Comparison และ logical operator
-description: Filter ที่มากกว่าการจับคู่แบบตรงเป๊ะด้วย $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin รวมเงื่อนไขด้วย $and, $or, $not, $nor และทดสอบ field ด้วย $exists และ $type
+description: กรองเกินกว่าการจับคู่ตรงด้วย $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin รวมเงื่อนไขด้วย $and, $or, $not, $nor และทดสอบ field ด้วย $exists และ $type — รวมถึงสิ่งที่ field ที่ขาด, null และชนิดข้อมูลผสมทำ และสิ่งที่ planner ทำกับแต่ละตัว
 sidebar:
   order: 2
 ---
@@ -8,30 +8,70 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-แอปจริงแทบไม่เคยถามแค่ "field นี้เท่ากับค่านี้ไหม" คำถามที่เจอบ่อยกว่าคือเรื่องช่วง เซ็ตของค่าที่ยอมรับได้ หรือเงื่อนไขหลายอย่างรวมกัน — สิ่งที่ filter แบบจับคู่ตรงเป๊ะเพียงอย่างเดียวตอบไม่ได้
+filter แบบจับคู่ตรงเป๊ะ — field เท่ากับค่า — พาคุณไปได้แค่ระดับหนึ่ง คำถามจริง ๆ คือช่วงและเซ็ต: "ใครค้างค่าปรับมากกว่าสามครั้ง?", "ใครเข้าร่วมปี 2022 หรือ 2023?", "ระเบียนไหนขาด field ไปเลย?" MongoDB ตอบสิ่งเหล่านี้ด้วย **query operator** คือ key พิเศษที่ขึ้นต้นด้วยเครื่องหมายดอลลาร์และอยู่ *ข้างใน* ตำแหน่งค่าของ field รูปแบบเหมือนเดิมเสมอ: แทนที่จะให้ค่าธรรมดากับ field คุณให้ document เล็ก ๆ ที่ key คือ operator
 
-filter แบบจับคู่ตรงเป๊ะ — field เท่ากับค่า — พาคุณไปได้แค่ระดับหนึ่ง คำถามจริง ๆ คือช่วงและเซ็ต: "ใครค้างค่าปรับมากกว่าสามรายการ?", "ใครเข้าร่วมในปี 2022 หรือ 2023?", "ระเบียนไหนไม่มี field นั้นเลย?" MongoDB ตอบคำถามเหล่านี้ด้วย **query operator** ที่เป็น key พิเศษที่ขึ้นต้นด้วยเครื่องหมายดอลลาร์และอยู่ *ภายใน* ตำแหน่งค่าของ field รูปแบบเป็นแบบเดียวกันเสมอ: แทนที่จะให้ค่าธรรมดากับ field คุณให้ document เล็ก ๆ ที่ key ของตัวเองคือ operator
+เรายังคง query `members` ของห้องสมุดต่อไป ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน) ข้อมูลของบทนี้จงใจให้ค่อนข้างรก — สมาชิกหนึ่งคนไม่มี field `fines` หนึ่งคนมี `fines: null` หนึ่งคนมี `joined` เป็น *string* — เพราะนั่นคือจุดที่ operator ทำให้คนแปลกใจ
 
-เรายังคงแก้ไขสมาชิกห้องสมุด `members` ของเราต่อไป แต่ละตัวอย่างจะโชว์ filter คู่กับ document ที่ได้กลับมา
-
-## Comparison operator
-
-ตระกูล comparison เปรียบเทียบ field กับค่าหนึ่ง: `$eq` (เท่ากับ), `$ne` (ไม่เท่ากับ), `$gt` (มากกว่า), `$gte` (มากกว่าหรือเท่ากับ), `$lt` (น้อยกว่า) และ `$lte` (น้อยกว่าหรือเท่ากับ) การเขียนค่าธรรมดาก็เป็นเพียงรูปย่อของ `$eq` ตรงนี้เราขอสมาชิกทุกคนที่ค้างค่าปรับมากกว่าสองรายการ:
+## ข้อมูลที่เรา query
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ fines: { $gt: 2 } })
+    // mongosh/cmp-seed.js
+    db.members.insertMany([
+      { name: "Ada",      joined: 2024 },                    // no fines field at all
+      { name: "Grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 0 },
+      { name: "Barbara",  joined: 2025, fines: null },       // fines exists, but null
+      { name: "Alan",     joined: "2020", fines: 1 },        // joined stored as a string by mistake
+    ]);
+    globalThis.names = (f) => db.members.find(f, { _id: 0, name: 1 }).sort({ name: 1 }).toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 7);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      joined: 2024 },
+      { name: "Grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 0 },
+      { name: "Barbara",  joined: 2025, fines: null },
+      { name: "Alan",     joined: "2020", fines: 1 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 7) throw new Error("expected 7");
+    ```
+  </TabItem>
+</Tabs>
+
+## Comparison operator
+
+ตระกูล comparison เทียบ field กับค่า: `$eq` (เท่ากับ), `$ne` (ไม่เท่ากับ), `$gt` (มากกว่า), `$gte` (มากกว่าหรือเท่ากับ), `$lt` (น้อยกว่า) และ `$lte` (น้อยกว่าหรือเท่ากับ) การเขียนค่าธรรมดาเป็นเพียงชวเลขของ `$eq` ที่นี่เราขอสมาชิกทุกคนที่ค้างค่าปรับมากกว่าสอง:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/cmp-gt.js
+    const docs = db.members.find({ fines: { $gt: 2 } }, { _id: 0 }).sort({ name: 1 }).toArray();
+    console.log(docs);
+    assert.strictEqual(docs.map((d) => d.name).join(), "Grace,Linus");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/cmp-gt.mjs
     const docs = await db.collection("members")
       .find({ fines: { $gt: 2 } })
       .toArray();
-    console.log(docs);
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 2) throw new Error("expected 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -64,36 +104,55 @@ filter แบบจับคู่ตรงเป๊ะ — field เท่า�
   </TabItem>
 </Tabs>
 
-เฉพาะสมาชิกที่เกินเกณฑ์เท่านั้นที่ส่งกลับมา:
+เฉพาะสมาชิกที่เกินเกณฑ์กลับมา (ค่าที่ขาด, `null` และค่าชนิดอื่นไม่เคยผ่าน `$gt`):
 
-```json
+```text
 [
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
+  { name: 'Grace', joined: 2021, fines: 3 },
+  { name: 'Linus', joined: 2023, fines: 5 }
 ]
 ```
 
-คุณสามารถรวมการเปรียบเทียบสองอันบน field **เดียวกัน** ได้โดยใส่ operator ทั้งสองไว้ใน document เดียว — ตรงนี้คือสมาชิกที่เข้าร่วมในช่วงปีที่กำหนด:
+คุณรวมสอง comparison บน field **เดียวกัน** ได้โดยใส่ทั้งสอง operator ใน document เดียว — ที่นี่คือสมาชิกที่เข้าร่วมในช่วงปี และสังเกตว่า `$gt: 2000` ทำอะไรกับสมาชิกที่ `joined` เป็น *string* `"2020"`:
 
 ```js
-db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
+// mongosh/cmp-range-and-types.js
+console.log("joined 2022..2023   :", names({ joined: { $gte: 2022, $lte: 2023 } }));
+console.log("joined > 2000       :", names({ joined: { $gt: 2000 } }));        // Alan's "2020" is a string
+console.log("joined type string  :", names({ joined: { $type: "string" } }));
+assert.strictEqual(names({ joined: { $gt: 2000 } }).includes("Alan"), false);
+assert.strictEqual(names({ joined: { $type: "string" } }), "Alan");
 ```
+
+```text
+joined 2022..2023   : Edsger, Linus, Margaret
+joined > 2000       : Ada, Barbara, Edsger, Grace, Linus, Margaret
+joined type string  : Alan
+```
+
+MongoDB เทียบตัวเลขกับตัวเลขเท่านั้น `"2020"` ที่ชนิดผิดจึงหายไปเงียบ ๆ จากทุกช่วงตัวเลข — ไม่ error และไม่ถูกเรียงเป็น 2020 (กฎการแบ่งกลุ่มชนิดข้อมูลข้อเดียว: query แบบช่วงเห็นเฉพาะค่าที่ชนิดเดียวกับ operand)
 
 ## การเป็นสมาชิก: $in และ $nin
 
-`$in` จับคู่เมื่อ field เท่ากับค่า **ใดก็ได้** ในรายการ ส่วน `$nin` จะ match เมื่อค่านั้น **ไม่ตรงกับค่าใดเลย** ในรายการ วิธีนี้สะอาดกว่าการต่อ `$or` ของความเท่ากันหลาย ๆ อันมาก ตรงนี้เราดึงสมาชิกที่เข้าร่วมในปี 2021 หรือ 2023:
+`$in` ตรงเมื่อ field เท่ากับค่า **ใดค่าหนึ่ง** ในลิสต์ และ `$nin` ตรงเมื่อเท่ากับ **ไม่มีค่าใดเลย** สะอาดกว่าการต่อ `$or` ของ equality มาก ที่นี่เราดึงสมาชิกที่เข้าร่วมปี 2021 หรือ 2023:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ joined: { $in: [2021, 2023] } })
+    // mongosh/cmp-in.js
+    console.log("joined $in [2021,2023]:", names({ joined: { $in: [2021, 2023] } }));
+    console.log("fines $nin [0,5]      :", names({ fines: { $nin: [0, 5] } }));
+    assert.strictEqual(names({ joined: { $in: [2021, 2023] } }), "Grace, Linus, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-in.mjs
     const docs = await db.collection("members")
       .find({ joined: { $in: [2021, 2023] } })
       .toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 3) throw new Error("expected 3");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -122,32 +181,35 @@ db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
   </TabItem>
 </Tabs>
 
-ปีที่ match ทั้งสองค่าจะกลับมาด้วยกัน:
+ทั้งสองปีที่ตรงกลับมาพร้อมกัน — และดู `$nin`: มันคืนสมาชิกสี่คน รวม Ada (ไม่มี `fines` เลย), Barbara (`null`) และ Alan (1) เพราะ "ไม่อยู่ใน [0, 5]" เป็นจริงกับทุกอย่างที่ไม่ใช่ 0 หรือ 5 เป๊ะ:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d1", "name": "Linus", "joined": 2023, "fines": 5 },
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
-]
+```text
+joined $in [2021,2023]: Grace, Linus, Margaret
+fines $nin [0,5]      : Ada, Alan, Barbara, Grace
 ```
 
 ## การรวมเงื่อนไข: $and, $or, $not, $nor
 
-คู่ field/value หลายคู่ใน filter เดียวมีความหมายเป็น AND อยู่แล้ว ดังนั้น `$and` จึงจำเป็นเฉพาะเมื่อคุณต้องเขียน field เดียวกันซ้ำสองครั้งเท่านั้น `$or` คือตัวที่ใช้กันประจำวัน โดยรับ list ของ filter และจับคู่ถ้า **อันใดอันหนึ่ง** เป็นจริง ตรงนี้เราหาสมาชิกที่ไม่ค้างค่าปรับเลย หรือเข้าร่วมในปี 2021:
+หลายคู่ field/ค่าใน filter เดียวหมายถึง AND อยู่แล้ว `$and` จึงจำเป็นเมื่อคุณต้องเขียน field เดียวกันสองครั้ง `$or` คือตัวที่ใช้ทุกวัน — รับลิสต์ของ filter และตรงถ้า **ข้อใดข้อหนึ่ง** เป็นจริง ที่นี่เราหาสมาชิกที่ไม่ค้างเลยหรือเข้าร่วมปี 2021:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({
-      $or: [{ fines: 0 }, { joined: 2021 }]
-    })
+    // mongosh/cmp-or-nor.js
+    console.log("$or fines 0 / joined 2021:", names({ $or: [{ fines: 0 }, { joined: 2021 }] }));
+    console.log("$nor (same branches)     :", names({ $nor: [{ fines: 0 }, { joined: 2021 }] }));
+    console.log("$not { $gt: 2 }          :", names({ fines: { $not: { $gt: 2 } } }));
+    assert.strictEqual(names({ $or: [{ fines: 0 }, { joined: 2021 }] }), "Edsger, Grace, Margaret");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-or.mjs
     const docs = await db.collection("members").find({
       $or: [{ fines: 0 }, { joined: 2021 }]
     }).toArray();
+    console.log(docs.map((d) => d.name).sort());
+    if (docs.length !== 3) throw new Error("expected 3");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -188,36 +250,47 @@ db.members.find({ joined: { $gte: 2022, $lte: 2023 } })
   </TabItem>
 </Tabs>
 
-ใครก็ตามที่ตรงกับสาขาใดสาขาหนึ่งจะปรากฏขึ้น:
+ใครก็ตามที่ตรงกิ่งใดกิ่งหนึ่งปรากฏ `$nor` คือด้านตรงข้ามเชิงตรรกะของ `$or` — และสังเกตว่ามัน **รวมสมาชิกที่ไม่มี field เลย** (Ada) หรือมันเป็น `null` (Barbara): "ไม่มีกิ่งใดเป็นจริง" เป็นจริงเมื่อไม่มีอะไรให้เทียบ `$not` กลับด้านนิพจน์ operator เดียวและตรงกับ field ที่ขาดเช่นกัน:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d2", "name": "Margaret", "joined": 2023, "fines": 0 },
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d4", "name": "Grace", "joined": 2021, "fines": 3 }
-]
+```text
+$or fines 0 / joined 2021: Edsger, Grace, Margaret
+$nor (same branches)     : Ada, Alan, Barbara, Linus
+$not { $gt: 2 }          : Ada, Alan, Barbara, Edsger, Margaret
 ```
 
-`$not` กลับด้านนิพจน์ operator เดียว และ `$nor` จับคู่ document ที่ **ไม่มี** สาขาใดเป็นจริงเลย — ตรงข้ามทาง logic ของ `$or` ตัวอย่างเช่น "ค้างค่าปรับเป็นจำนวนที่ไม่ใช่ศูนย์ และ ไม่ได้เข้าร่วมในปี 2021" อ่านได้อย่างเป็นธรรมชาติด้วย `$nor`:
+`$not` ห่อได้เฉพาะ *นิพจน์ operator* การส่งค่าเปล่า ๆ ให้ถูก server ปฏิเสธ:
 
-```js
-db.members.find({ $nor: [{ fines: 0 }, { joined: 2021 }] })
+```text
+> db.members.find({ fines: { $not: 5 } }).toArray()
+MongoServerError: $not argument must be a regex or an object
+> db.members.find({ fines: { $not: { $eq: 5 } } })     -> Ada, Alan, Barbara, Edsger, Grace, Margaret
 ```
 
 ## การทดสอบ field: $exists และ $type
 
-document ใน collection เดียวกันไม่จำเป็นต้องมี field เหมือนกันทั้งหมด `$exists` ถามว่ามี field อยู่หรือไม่ไม่ว่าค่าจะเป็นอะไร และ `$type` ถามว่าค่ามี BSON type อะไร ตรงนี้เราหาสมาชิกที่ยัง *ไม่มี* field `fines` บันทึกไว้:
+document ใน collection เดียวกันไม่จำเป็นต้องมี field เหมือนกันทั้งหมด `$exists` ถามว่า field มีอยู่หรือไม่ ไม่ว่าค่าเป็นอะไร และ `$type` ถามว่าค่าเป็น BSON type อะไร ที่นี่เราหาสมาชิกที่ *ยังไม่มี* field `fines` — และเทียบกับ `null`:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find({ fines: { $exists: false } })
+    // mongosh/cmp-exists-type.js
+    console.log("fines $exists false :", names({ fines: { $exists: false } }));
+    console.log("fines null          :", names({ fines: null }));
+    console.log("fines $type null    :", names({ fines: { $type: "null" } }));
+    console.log("joined $type number :", names({ joined: { $type: "number" } }));
+    console.log("joined $type [int,double]:", names({ joined: { $type: ["int", "double"] } }));
+    assert.strictEqual(names({ fines: { $exists: false } }), "Ada");
+    assert.strictEqual(names({ fines: null }), "Ada, Barbara");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/cmp-exists.mjs
     const docs = await db.collection("members")
       .find({ fines: { $exists: false } })
       .toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 1) throw new Error("expected 1");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -246,56 +319,139 @@ document ใน collection เดียวกันไม่จำเป็น�
   </TabItem>
 </Tabs>
 
-เฉพาะ document ที่ไม่เคยมี field `fines` เลยเท่านั้นที่ส่งกลับมา:
+สามคำถามต่างกัน สามคำตอบต่างกัน:
 
-```json
-[
-  { "_id": "65f0b3d4e4b0a1c2e4b0a1d5", "name": "Ada", "joined": 2024 }
-]
+```text
+fines $exists false : Ada
+fines null          : Ada, Barbara
+fines $type null    : Barbara
+joined $type number : Ada, Barbara, Edsger, Grace, Linus, Margaret
+joined $type [int,double]: Ada, Barbara, Edsger, Grace, Linus, Margaret
 ```
 
-หากต้องการจับคู่ตาม type แทน — เช่น ทุก document ที่ `joined` ถูกเก็บเป็นตัวเลขแทนที่จะเป็น string ที่บางคนพิมพ์ผิด — ให้ระบุชื่อ type:
+`{ fines: null }` ตรงกับ **ทั้ง** field ที่ขาด (Ada) และ null ที่ระบุชัด (Barbara); `$exists: false` คือเฉพาะที่ขาด; `$type: "null"` คือเฉพาะ null ที่ระบุชัด `$type` รับได้ทั้ง alias ของ type (`"int"`, `"string"`, `"number"` = ตัวเลขทุกชนิด) หรือ array ของ alias
+
+**ใน Compass:** พิมพ์ filter เหล่านี้ลงในช่อง **Filter** ที่ด้านบนของ tab Documents เช่น `{ fines: { $gt: 2 } }` แล้วกด **Find** (Compass รับทุก query operator ยกเว้น `$text` และ `$expr` ตามเอกสารของมัน, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/))
+
+## planner ทำอะไรกับแต่ละตัว
+
+บทเก่าบอกว่า `$ne` ทำให้ planner "มักเลือกไม่ใช้ index" เราวัดบน 20 000 document ที่มี index เดี่ยวบน `city` และอีกอันบน `joined`; `explain("executionStats")` รายงาน key และ document ที่ตรวจ:
 
 ```js
-db.members.find({ joined: { $type: "int" } })
+// mongosh/cmp-explain.js
+const cities = ["Berlin", "Cambridge", "Helsinki", "Austin", "Boston"];
+db.big.insertMany(Array.from({ length: 20000 }, (_, i) => ({ i, city: cities[i % 5], joined: 2020 + (i % 6), fines: i % 4 })));
+db.big.createIndex({ city: 1 });
+db.big.createIndex({ joined: 1 });
+const stage = (p) => p.inputStage ? p.stage + " > " + stage(p.inputStage) : (p.inputStages ? p.stage + " > [" + p.inputStages.map(stage).join(", ") + "]" : p.stage);
+const stats = (label, cursor) => {
+  const e = cursor.explain("executionStats"), es = e.executionStats, wp = e.queryPlanner.winningPlan;
+  console.log(label.padEnd(26), stage(wp.queryPlan ?? wp), "| returned", es.nReturned, "| keys", es.totalKeysExamined, "| docs", es.totalDocsExamined);
+  return es;
+};
+stats("city = Berlin", db.big.find({ city: "Berlin" }));
+const ne = stats("city $ne Berlin", db.big.find({ city: { $ne: "Berlin" } }));
+stats("city $nin [Berlin,Boston]", db.big.find({ city: { $nin: ["Berlin", "Boston"] } }));
+stats("joined $gte 2025", db.big.find({ joined: { $gte: 2025 } }));
+stats("joined $in [2021,2023]", db.big.find({ joined: { $in: [2021, 2023] } }));
+stats("$or joined 2021 / 2023", db.big.find({ $or: [{ joined: 2021 }, { joined: 2023 }] }));
+const noIdx = stats("$or city / fines (no idx)", db.big.find({ $or: [{ city: "Berlin" }, { fines: 3 }] }));
+stats("$or city / joined", db.big.find({ $or: [{ city: "Berlin" }, { joined: 2021 }] }));
+assert.strictEqual(ne.totalKeysExamined, 16001);
+assert.strictEqual(noIdx.totalDocsExamined, 20000);
 ```
 
-**ใน Compass:** พิมพ์ filter เหล่านี้ลงไปตรง ๆ ในแถบ filter ด้านบนของแท็บ Documents เช่น `{ fines: { $gt: 2 } }` แล้วกด **Find** Compass แปลง syntax ของ operator แบบเดียวกับที่ shell ใช้
+```text
+city = Berlin              FETCH > IXSCAN | returned 4000 | keys 4000 | docs 4000
+city $ne Berlin            FETCH > IXSCAN | returned 16000 | keys 16001 | docs 16000
+city $nin [Berlin,Boston]  FETCH > IXSCAN | returned 12000 | keys 12002 | docs 12000
+joined $gte 2025           FETCH > IXSCAN | returned 3333 | keys 3333 | docs 3333
+joined $in [2021,2023]     FETCH > IXSCAN | returned 6667 | keys 6669 | docs 6667
+$or joined 2021 / 2023     FETCH > IXSCAN | returned 6667 | keys 6669 | docs 6667
+$or city / fines (no idx)  SUBPLAN > COLLSCAN | returned 8000 | keys 0 | docs 20000
+$or city / joined          SUBPLAN > FETCH > OR > [IXSCAN, IXSCAN] | returned 6668 | keys 7334 | docs 6668
+```
 
-## เคล็ดลับและจุดที่พลาดง่าย
+สิ่งที่แสดง:
 
-- **ค่าธรรมดาคือ `$eq`** การเขียน `{ fines: 0 }` กับ `{ fines: { $eq: 0 } }` เหมือนกันทุกประการ ใช้ operator แบบชัดเจนเฉพาะเมื่อคุณต้องการการเปรียบเทียบอื่นนอกเหนือจากความเท่ากัน
-- **`$ne` และ `$nin` จับคู่ field ที่หายไปด้วย** document ที่ไม่มี field `fines` ถือว่า "ไม่เท่ากับ 5" จึงผ่านเงื่อนไข `{ fines: { $ne: 5 } }` ไปด้วย ถ้าคุณหมายถึง "มี field fines อยู่ และค่าไม่ใช่ 5" ให้รวมกับ `$exists`
-- **operator สองตัวบน field เดียวกันอยู่ใน document เดียว** range query เช่น `{ $gte: 2022, $lte: 2023 }` เป็น value document ตัวเดียว ไม่ใช่ filter แยกสองอัน — คุณไม่สามารถใส่ key ของ field เดียวกันซ้ำที่ระดับบนสุดได้
-- **เลือก `$in` แทนกอง `$or` ของความเท่ากัน** ทั้งสองมีความหมายเหมือนกัน แต่ `$in` สั้นกว่า อ่านง่ายกว่า และช่วยให้ query planner ใช้ index ได้ตรงกว่า
+- `$ne` และ `$nin` **ใช้ index** (`IXSCAN`) — planner เดินช่วงทั้งสองข้างของค่าที่ยกเว้น สิ่งที่ทำไม่ได้คือ *เลือกสรร*: `$ne "Berlin"` ตรวจ 16 001 key และ fetch 16 000 document จาก 20 000 มันคือการสแกน index ที่ทำตัวเหมือนสแกนเกือบทั้งหมด ซึ่งเป็นเวอร์ชันที่ถูกต้องของคำเตือนเก่า
+- `$in` บน field เดียวกับ `$or` ของ equality บน field เดียวกันให้ **plan เดียวกัน** (`FETCH > IXSCAN`, 6 669 key) — optimizer เขียนอันหนึ่งเป็นอีกอัน เลือกอันที่อ่านง่ายกว่า
+- `$or` ต้องการ index สำหรับ **ทุก** กิ่งจึงจะใช้ได้: เมื่อมี index บนทั้ง `city` และ `joined` มันรัน `OR` ของสอง `IXSCAN`; เมื่อกิ่งหนึ่ง (`fines: 3`) ไม่มี index ทั้ง query ถอยไปเป็น `COLLSCAN` และตรวจทั้ง 20 000 document
 
-<Callout title="operator อยู่ในค่า, logic อยู่ที่ระดับบนสุด">
-comparison และ element operator ($gt, $in, $exists, $type) อยู่ภายในค่าของ field ส่วน logical operator ($and, $or, $not, $nor) อยู่ที่ระดับบนสุดของ filter และรับ sub-filter ทั้งก้อน การแยกความต่างนี้ให้ชัดในหัวช่วยป้องกัน query ที่ผิดรูปได้เกือบทั้งหมด
+## เคล็ดลับและข้อควรระวัง
+
+- **ค่าธรรมดาคือ `$eq`** การเขียน `{ fines: 0 }` และ `{ fines: { $eq: 0 } }` เหมือนกัน ใช้ operator ชัดเจนเมื่อต้องการเทียบแบบอื่นนอกจากเท่ากับ
+- **`$ne`, `$nin`, `$nor` และ `$not` ตรงกับ field ที่ขาดด้วย** พิสูจน์ด้านบน: `fines: { $ne: 0 }` ตรง Ada (ไม่มี field) และ Barbara (`null`) ถ้าหมายถึง "มี field fines และไม่ใช่ 0" ให้ใช้ `$exists` ร่วมหรือใช้ `$gt`
+- **operator ช่วงเห็นเฉพาะชนิดของตัวเอง** `{ joined: { $gt: 2000 } }` ข้าม string `"2020"`; ค่าที่ชนิดผิดซ่อนจากช่วงตัวเลขอย่างเงียบ ๆ
+- **สอง operator บน field เดียวใส่ใน document เดียว** query ช่วงอย่าง `{ $gte: 2022, $lte: 2023 }` คือ document ค่าเดียว ไม่ใช่สอง filter — การเขียน key field เดียวกันซ้ำที่ระดับบนทิ้งอันแรก (ดูบท find)
+- **ใช้ `$in` แทน `$or` ของ equality หลายตัว** ได้ plan เดียวกันที่นี่ แต่ `$in` สั้นกว่าและอ่านง่ายกว่า
+
+<Callout title="operator อยู่ในค่า ตรรกะอยู่ระดับบน">
+comparison และ element operator ($gt, $in, $exists, $type) อยู่ภายในค่าของ field ส่วน logical operator ($and, $or, $not, $nor) อยู่ที่ระดับบนของ filter และรับ sub-filter ทั้งก้อน การแยกสองอย่างนี้ให้ชัดในหัวป้องกัน query ที่ผิดรูปส่วนใหญ่
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ขอผู้ช่วย AI ว่า "สมาชิกที่ติดหนี้" คุณมักเห็นรูปแบบปฏิเสธ:
+
+<SpotTheBug lang="js" code={`// AI comment: "everyone whose fines are not zero owes money"
+const debtors = await db.collection("members")
+  .find({ fines: { $ne: 0 } })
+  .toArray();
+await sendReminderEmails(debtors);`}>
+
+`$ne: 0` ตรงกับทุก document ที่ `fines` ขาดหรือเป็น `null` ด้วย บนสมาชิกเจ็ดคนของเรา มันคืน **ห้า** ชื่อ — Ada (ไม่มี field), Alan, Barbara (`null`), Grace และ Linus — ทั้งที่มีเพียงสามคน (Alan 1, Grace 3, Linus 5) ที่ค้างจริง Ada และ Barbara จะได้อีเมลเตือนสำหรับหนี้ที่ไม่มี ถามคำถามเชิงบวกแทน:
+
+```js
+// mongosh/cmp-debtors-fix.js
+const bug = names({ fines: { $ne: 0 } });
+const fixed = names({ fines: { $gt: 0 } });
+console.log("$ne 0 :", bug);
+console.log("$gt 0 :", fixed);
+assert.strictEqual(bug, "Ada, Alan, Barbara, Grace, Linus");
+assert.strictEqual(fixed, "Alan, Grace, Linus");
+```
+
+```text
+$ne 0 : Ada, Alan, Barbara, Grace, Linus
+$gt 0 : Alan, Grace, Linus
+```
+
+`$gt: 0` ตรงเฉพาะตัวเลขที่มากกว่าศูนย์ ค่าที่ขาดและ `null` จึงหลุดไปเอง
+
+</SpotTheBug>
+
+## Mental Model
+
+query operator ทุกตัวตอบว่า "ค่า **ที่ path นี้** ผ่าน predicate ไหม?" — และ path ที่ขาดหรือค่าชนิดอื่นเป็น input ที่ถูกต้องซึ่ง predicate ต้องตัดสิน operator **เชิงบวก** (`$eq`, `$gt`, `$in`, `$exists: true`) ไม่ผ่านกับค่าที่ขาด/ชนิดผิด; operator **เชิงลบ** (`$ne`, `$nin`, `$not`, `$nor`) *ผ่าน* เมื่อผลลัพธ์กว้างเกินไป ให้มองหา operator เชิงลบ; เมื่อแคบเกินไป ให้มองหาชนิดที่ไม่ตรง
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| equality filter (`$eq` หรือค่าตรง ๆ) | เร็วที่สุด ใช้ index ได้เต็มประสิทธิภาพเสมอ | ตอบคำถามเชิงช่วงหรือเซ็ตไม่ได้ |
-| range/set operator (`$gt`, `$gte`, `$lt`, `$lte`, `$in`) | ตอบคำถามเชิงช่วง/เซ็ตได้ ยังคง index ได้ถ้า field มี index ตรงกับที่ query | selectivity ต่ำกว่า equality โดยเฉพาะช่วงกว้าง อาจอ่าน document เกินความจำเป็น |
-| รวมด้วย `$and`/`$or`/`$nor` | ตอบคำถามเชิง logic ซับซ้อนได้ในคำสั่งเดียว | วางแผน index ยากขึ้น โดยเฉพาะ `$or` ที่อาจบังคับให้สแกนหลาย path หรือทั้ง collection |
+| filter แบบ equality (`$eq` หรือค่าธรรมดา) | เลือกสรรที่สุด ใช้ index เต็มที่ (4 000 key สำหรับ 4 000 ผลลัพธ์) | ตอบคำถามช่วงหรือเซ็ตไม่ได้ |
+| operator ช่วง/เซ็ต (`$gt`, `$gte`, `$lt`, `$lte`, `$in`) | ตอบคำถามช่วง/เซ็ต ยัง index ได้ถ้า field มี index ที่ตรงกัน | selectivity ต่ำกว่า equality โดยเฉพาะช่วงกว้าง — อ่าน key และ document มากกว่าจำเป็น |
+| operator เชิงลบ (`$ne`, `$nin`, `$nor`, `$not`) | แสดง "ทุกอย่างยกเว้น" ตรง ๆ | ตรงกับค่าที่ขาด/`null`/ชนิดผิด; ใช้ index แต่ตรวจเกือบทั้งหมด (16 001 key สำหรับ `$ne`) |
+| รวมด้วย `$and`/`$or`/`$nor` | ตอบคำถามตรรกะซับซ้อนในการเรียกเดียว | `$or` ต้องมี index ทุกกิ่ง ไม่เช่นนั้นถอยเป็นสแกนทั้ง collection (ตรวจ 20 000 document) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **มองว่า `$ne`/`$nin` ใช้ index ได้มีประสิทธิภาพเหมือน `$eq`** — ในทางปฏิบัติ `$ne` มัก selectivity ต่ำ (ต้องพิจารณาแทบทุก document ที่ไม่ตรงเงื่อนไข) query planner จึงมักตัดสินใจไม่ใช้ index เลยแม้ field นั้นจะมี index อยู่ก็ตาม
-- **ใช้ `$or` คนละ field ต่างกันในแต่ละ clause แล้วคาดหวังว่า index เดียวจะครอบคลุมทั้งหมด** — MongoDB ต้องรัน index scan แยกต่างหากสำหรับแต่ละ clause ของ `$or` แล้วนำผลมารวมกัน ถ้า clause ไหนไม่มี index ที่เหมาะ clause นั้นจะ fallback ไปสแกนทั้ง collection
-- **เขียน `$not` ครอบค่าตรง ๆ แทนที่จะครอบ operator expression** — `{ field: { $not: { $eq: 5 } } }` ถูกต้อง แต่ `{ field: { $not: 5 } }` ไม่ใช่รูปแบบที่ `$not` รองรับ `$not` ต้องห่อ operator expression เสมอ ไม่ใช่ค่าเปล่า ๆ
+- **"`$ne` / `$nin` ข้าม index"** — ใช้ แต่ selectivity เกือบศูนย์ (ตรวจ 16 001 key สำหรับ 16 000 ผลลัพธ์)
+- **"`$or` ข้ามหลาย field ครอบคลุมด้วย index เดียว"** — แต่ละกิ่งต้องมี index ของตัวเอง; กิ่งเดียวที่ไม่มี index ทำให้ทั้ง query เป็น `COLLSCAN`
+- **"`$not: 5` ใช้ได้"** — server ตอบ `$not argument must be a regex or an object`; ห่อ operator: `$not: { $eq: 5 }`
+- **"`{ field: null }` แปลว่า field เป็น null"** — มันตรงกับ document ที่ field ขาดด้วย
+- **"ตัวเลขที่เก็บเป็น string ยังอยู่ในช่วงตัวเลข"** — `"2020"` หายไปจาก `$gt: 2000`
+- **"`$nor` หา document ที่ไม่ตรง"** — มันตรงกับ document ที่ไม่มีกิ่งใดเป็นจริง ซึ่งรวม document ที่ขาด field เหล่านั้นไปเลย
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบ e-commerce กรองช่วงราคา** — slider ราคาต่ำสุด-สูงสุดบนหน้าสินค้าแปลงตรงเป็น `{ price: { $gte: min, $lte: max } }` และ dropdown แบรนด์แบบเลือกได้หลายอันแปลงเป็น `$in`
->
-> **ระบบตรวจจับ fraud ของธุรกิจ fintech** — กฎแจ้งเตือนธุรกรรมต้องสงสัยมักเขียนด้วย `$or` รวมหลายเงื่อนไข เช่น ยอดสูงผิดปกติ หรือมาจากประเทศที่ไม่เคยทำธุรกรรมมาก่อน หรือเกิดถี่ผิดปกติในเวลาสั้น ๆ
+> หน้า query predicates ของคู่มือ MongoDB จัดกลุ่ม operator เหล่านี้พอดี — "Comparison" (`$eq`, `$gt`, `$in` ...), "Logical" (`$and`, `$or`, `$nor`, `$not`) และ "Data Type" (`$exists`, `$type` คืนข้อมูล "based on field existence or data types") — ควบคู่กับตระกูล array, bitwise และ geospatial ที่บทถัดไปและโมดูลหลังจะพบ ([Query predicates](https://www.mongodb.com/docs/manual/reference/mql/query-predicates/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกันและคืนสมาชิกชุดเดียวกัน (`$gt`: Grace และ Linus; `$in`: Grace, Linus, Margaret; `$or`: Grace, Margaret, Edsger; `$exists: false`: Ada) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizComparison = [
   {
-    q: 'คุณจะหา document ที่ fines มากกว่า 2 ได้อย่างไร?',
+    q: 'จะหา document ที่ fines มากกว่า 2 ได้อย่างไร?',
     options: [
       '{ fines > 2 }',
       '{ fines: { $gt: 2 } }',
@@ -303,31 +459,57 @@ export const quizComparison = [
       '{ fines: ">2" }',
     ],
     answer: 1,
+    explain: 'operator อยู่ในค่าของ field: { fines: { $gt: 2 } } คืน Grace และ Linus',
   },
   {
-    q: 'document ที่ไม่มี field fines จะ match กับ { fines: { $ne: 5 } } ไหม?',
+    q: 'document ที่ไม่มี field fines ตรงกับ { fines: { $ne: 5 } } หรือไม่?',
     options: [
-      'ไม่ field ที่หายไปไม่เคยตรงกับอะไรเลย',
-      'ใช่ field ที่หายไปนับว่าไม่เท่ากับ 5',
-      'เฉพาะเมื่อคุณส่ง $exists: true ด้วยเท่านั้น',
+      'ไม่ตรง field ที่ขาดไม่ตรงอะไรเลย',
+      'ตรง field ที่ขาดถือว่าไม่เท่ากับ 5',
+      'ตรงเฉพาะเมื่อส่ง $exists: true ด้วย',
       'เกิด error',
     ],
     answer: 1,
+    explain: 'operator เชิงลบตรงกับ field ที่ขาด: $ne: 5 คืน Ada (ไม่มี fines) และ Barbara (null) รวมกับคนอื่น',
   },
   {
-    q: 'operator ใดจับคู่เมื่อ field เท่ากับค่าใดก็ได้ในรายการ?',
+    q: 'operator ใดตรงเมื่อ field เท่ากับค่าใดค่าหนึ่งในลิสต์?',
     options: ['$or', '$all', '$in', '$exists'],
     answer: 2,
+    explain: '$in รับลิสต์; ให้ query plan เดียวกับ $or ของ equality บน field เดียว',
   },
   {
     q: 'logical operator อย่าง $or ควรอยู่ตรงไหนใน filter?',
     options: [
-      'ภายในค่าของ field เหมือน comparison operator',
-      'ที่ระดับบนสุดของ filter โดยรับ list ของ sub-filter',
-      'เฉพาะภายใน projection เท่านั้น',
-      'ไม่สามารถรวมกับเงื่อนไขของ field ได้',
+      'ในค่าของ field เหมือน comparison operator',
+      'ที่ระดับบนของ filter รับลิสต์ของ sub-filter',
+      'เฉพาะใน projection',
+      'รวมกับเงื่อนไข field ไม่ได้',
     ],
     answer: 1,
+    explain: '$and, $or, $nor อยู่ระดับบนและรับ sub-filter ทั้งก้อน; comparison operator อยู่ภายใน field',
+  },
+  {
+    q: '{ city: { $ne: "Berlin" } } บน 20 000 document ที่มี index บน city explain แสดงอะไร?',
+    options: [
+      'COLLSCAN — $ne ใช้ index ไม่ได้',
+      'IXSCAN ที่ตรวจ 16 001 key เพื่อคืน 16 000 document',
+      'IXSCAN ที่ตรวจ 1 key',
+      'error: $ne ต้องใช้ hint',
+    ],
+    answer: 1,
+    explain: '$ne ใช้ index แต่ไม่เลือกสรร: FETCH > IXSCAN, 16001 key, 16000 doc',
+  },
+  {
+    q: 'collection มี document ที่ fines ขาด, fines: null และ fines: 3 filter ใดตรงเฉพาะ null ที่ระบุชัด?',
+    options: [
+      '{ fines: null }',
+      '{ fines: { $exists: false } }',
+      '{ fines: { $type: "null" } }',
+      '{ fines: { $ne: null } }',
+    ],
+    answer: 2,
+    explain: '{ fines: null } ตรงทั้งที่ขาดและ null; $exists: false เฉพาะที่ขาด; $type: "null" เฉพาะ null ที่ระบุชัด',
   },
 ]
 
