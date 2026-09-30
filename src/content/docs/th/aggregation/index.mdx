@@ -1,6 +1,6 @@
 ---
 title: aggregation pipeline
-description: document ไหลผ่านชุดของ stage ที่เรียงลำดับกันอย่างไร โดยแต่ละ stage แปลง stream ของข้อมูล และต่างจาก find ธรรมดาอย่างไร
+description: document ไหลผ่านลำดับของ stage อย่างไร โดยแต่ละ stage แปลงสายข้อมูล - พร้อมชุดข้อมูล sales มาตรฐาน 200 000 order, output ของ explain และต้นทุนที่วัดได้ของการทำงานเดียวกันในโค้ดแอป
 sidebar:
   order: 1
 ---
@@ -9,47 +9,83 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การเรียก `find` ตอบคำถามได้แบบเดียว: "คืน document ที่ตรงกับ filter นี้กลับมาให้ฉัน" แค่นี้พอสำหรับการอ่านข้อมูล แต่ *สรุป* ข้อมูลไม่ได้ บอกคุณไม่ได้ว่าค่าเฉลี่ย rating ต่อ genre เป็นเท่าไร ลูกค้าแต่ละคนสั่งซื้อกี่ครั้ง หรือหนังสือสามอันดับขายดีที่สุดเดือนที่แล้วคืออะไร คำถามพวกนี้ต้องยุบ document จำนวนมากให้เหลือคำตอบที่เล็กลงและจัดรูปใหม่ MongoDB จึงมี **aggregation pipeline** มาให้
+`find` ตอบคำถามได้ชนิดเดียว: "คืน document ที่ตรง filter นี้" ซึ่งพอสำหรับการอ่านเรคคอร์ด แต่ *สรุป* ไม่ได้ มันบอกไม่ได้ว่าแต่ละ title ขายได้กี่เล่ม ลูกค้าแต่ละคนสั่งกี่ครั้ง หรือหนังสือขายดีสามอันดับแรก สำหรับคำถามที่ยุบ document จำนวนมากเป็นคำตอบที่เล็กและถูกปรับรูป MongoDB มี **aggregation pipeline**
 
-pipeline เป็นแนวคิดที่ทรงพลังที่สุดใน MongoDB รองจากตัว document เอง ลองนึกภาพสายพานลำเลียง: document เข้ามาทางปลายด้านหนึ่ง ไหลผ่านชุดของ **stage** แล้ว stream ที่แปลงเสร็จแล้วออกมาทางปลายอีกด้าน แต่ละ stage รับ document ที่ส่งมาให้ ทำงานอย่างเดียวที่นิยามไว้ชัดเจน แล้วส่งผลลัพธ์ต่อไปยัง stage ถัดไป คุณเป็นคนเลือกลำดับเอง และลำดับก็สำคัญ — stage หนึ่งเห็นเฉพาะสิ่งที่ stage ก่อนหน้าผลิตออกมาเท่านั้น
+ลองนึกภาพสายพาน: document เข้าที่ปลายหนึ่ง ผ่านแถวของ **stage** และสายข้อมูลที่ถูกแปลงออกอีกปลาย แต่ละ stage ทำงานหน้าที่เดียวที่ชัดเจนแล้วส่งผลต่อให้ stage ถัดไป ลำดับเป็นของคุณ และมีผล - stage เห็นได้เฉพาะสิ่งที่ stage ก่อนหน้าผลิต
 
-ตลอดทั้งโมดูลนี้เราจะทำงานกับชุดข้อมูลเล็ก ๆ ที่สมมติขึ้น: collection `sales` เก็บออเดอร์หนังสือของร้านในจินตนาการ ข้อมูลยิ่งเล็ก *รูปร่าง* ของการแปลงแต่ละครั้งยิ่งเห็นชัด
+**ชุดข้อมูลเดียวทั้งโมดูล** ทุกบทที่นี่เตรียม collection `sales` เดียวกันในบล็อกแรก: order หนังสือ 200 000 รายการ `{ title, genre, quantity, price, buyer }` จาก 500 title, 5 genre, ราคา 5-25 และผู้ซื้อ 1 000 คน (บท unwind ใช้ collection `orders` ของตัวเองที่มี array `items`) output จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch `aplan()` คือ helper ที่ย่อ `explain("executionStats")` ของ aggregation เป็นบรรทัดเดียว: สิ่งที่ stage แรกอ่านจาก collection แล้วตามด้วย stage ที่ยังเหลือให้รันใน pipeline
 
-## pipeline คือลิสต์ของ stage
+```js
+// mongosh/agg-seed.js
+const genres = ["fiction", "science", "history", "poetry", "comics"];
+globalThis.aplan = (pipeline) => {               // one line per aggregate explain: what the first stage read, then the stages left in the pipeline
+  const e = db.sales.explain("executionStats").aggregate(pipeline);
+  const cursor = e.stages ? e.stages[0].$cursor : e, rest = e.stages ? e.stages.slice(1).map((s) => Object.keys(s)[0]) : [];
+  const chain = (p) => { const out = []; for (p = p.queryPlan ?? p; p; p = p.inputStage) out.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : "")); return out.join(" > "); };
+  const s = cursor.executionStats;
+  return chain(cursor.queryPlanner.winningPlan) + "  keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + (rest.length ? "  | left in pipeline: " + rest.join(" > ") : "");
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.sales.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;                                          // 500 titles, 5 genres, quantity 1..5, price 5..25, 1000 buyers (pseudo-random but repeatable)
+    return { title: "T" + (i % 500), genre: genres[(i % 500) % 5], quantity: 1 + ((Math.imul(i, 2654435761) >>> 0) % 5), price: 5 + ((Math.imul(i, 40503) >>> 0) % 21), buyer: "b" + (i % 1000) };
+  }), { ordered: false });
+}
+db.sales.createIndex({ price: 1 });
+console.log("sales:", db.sales.countDocuments(), "orders");
+```
 
-คุณส่ง **array** ของ stage object ให้กับ aggregation แต่ละ stage ตั้งชื่อด้วยคีย์ที่นำหน้าด้วย `$` — `$match`, `$group`, `$sort` เป็นต้น รูปแบบมาตรฐานคือ: filter stream ยุบเข้ากลุ่ม แล้วเรียงลำดับผลลัพธ์
+```text
+sales: 200000 orders
+```
+
+## pipeline คือรายการของ stage
+
+คุณส่ง **array** ของ stage object ให้ aggregation แต่ละ stage ตั้งชื่อด้วย key ที่ขึ้นต้น `$` - `$match`, `$group`, `$sort` เป็นต้น รูปแบบมาตรฐาน: กรองสาย พับเป็นกลุ่ม เรียงผลลัพธ์ นี่คือ: สามอันดับ title นิยายที่ขายดีที่สุด
 
 export const pipelineFlow = `flowchart LR
   In["sales documents"] --> M["$match: filter the stream"]
   M --> G["$group: fold into groups"]
   G --> S["$sort: order the groups"]
-  S --> Out["result documents"]`
+  S --> L["$limit: keep three"]
+  L --> Out["result documents"]`
 
-<Mermaid code={pipelineFlow} title="document ไหลจากซ้ายไปขวา แต่ละ stage แปลง stream และป้อนต่อไปยัง stage ถัดไป" />
-
-array ของ stage ชุดเดียวกันนี้คือสิ่งที่คุณส่งเข้าไป ไม่ว่าจะใช้ภาษาไหน สังเกตว่าเมธอดที่เรียกคือ `aggregate` และ argument คือ pipeline:
+<Mermaid code={pipelineFlow} title="document ไหลจากซ้ายไปขวา แต่ละ stage แปลงสายข้อมูลและป้อนต่อให้ stage ถัดไป" />
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.sales.aggregate([
+    // mongosh/agg-first-pipeline.js
+    const rows = db.sales.aggregate([
       { $match: { genre: "fiction" } },
       { $group: { _id: "$title", copies: { $sum: "$quantity" } } },
-      { $sort: { copies: -1 } }
-    ])
+      { $sort: { copies: -1, _id: 1 } },
+      { $limit: 3 },
+    ]).toArray();
+    console.log(rows);
+    assert.strictEqual(rows.length, 3);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const cursor = db.collection("sales").aggregate([
+    // app/agg-first-pipeline.mjs
+    const sales = db.collection("sales");
+    await sales.insertMany([
+      { title: "Dune", genre: "fiction", quantity: 3, price: 12, buyer: "Ada" },
+      { title: "Dune", genre: "fiction", quantity: 4, price: 12, buyer: "Linus" },
+      { title: "Neuromancer", genre: "fiction", quantity: 4, price: 9, buyer: "Grace" },
+      { title: "Cosmos", genre: "science", quantity: 5, price: 20, buyer: "Ada" },
+    ]);
+    const rows = await sales.aggregate([
       { $match: { genre: "fiction" } },
       { $group: { _id: "$title", copies: { $sum: "$quantity" } } },
       { $sort: { copies: -1 } },
-    ]);
-    const rows = await cursor.toArray();
+    ]).toArray();
     console.log(rows);
+    if (rows.length !== 2 || rows[0]._id !== "Dune" || rows[0].copies !== 7) throw new Error("unexpected pipeline result");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -59,125 +95,221 @@ array ของ stage ชุดเดียวกันนี้คือสิ�
         {"$group": {"_id": "$title", "copies": {"$sum": "$quantity"}}},
         {"$sort": {"copies": -1}},
     ]))
-    print(rows)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     pipeline := mongo.Pipeline{
-        {{"$match", bson.D{{"genre", "fiction"}}}},
-        {{"$group", bson.D{{"_id", "$title"}, {"copies", bson.D{{"$sum", "$quantity"}}}}}},
-        {{"$sort", bson.D{{"copies", -1}}}},
+        {{Key: "$match", Value: bson.D{{Key: "genre", Value: "fiction"}}}},
+        {{Key: "$group", Value: bson.D{
+            {Key: "_id", Value: "$title"},
+            {Key: "copies", Value: bson.D{{Key: "$sum", Value: "$quantity"}}},
+        }}},
+        {{Key: "$sort", Value: bson.D{{Key: "copies", Value: -1}}}},
     }
-    cursor, err := coll.Aggregate(ctx, pipeline)
+    cur, err := coll.Aggregate(ctx, pipeline)
     if err != nil {
         return err
     }
     var rows []bson.M
-    if err := cursor.All(ctx, &rows); err != nil {
+    if err := cur.All(ctx, &rows); err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pipeline = vec![
-        doc! { "$match": { "genre": "fiction" } },
-        doc! { "$group": { "_id": "$title", "copies": { "$sum": "$quantity" } } },
-        doc! { "$sort": { "copies": -1 } },
-    ];
-    let mut cursor = coll.aggregate(pipeline).await?;
-    while let Some(doc) = cursor.try_next().await? {
-        println!("{:?}", doc);
-    }
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$match": { "genre": "fiction" } },
+            doc! { "$group": { "_id": "$title", "copies": { "$sum": "$quantity" } } },
+            doc! { "$sort": { "copies": -1 } },
+        ])
+        .await?;
     ```
   </TabItem>
 </Tabs>
 
-จากออเดอร์ fiction ไม่กี่รายการ pipeline คืนหนึ่ง document ต่อหนึ่งชื่อเรื่อง พร้อมผลรวมจำนวนเล่ม โดยเรียงชื่อเรื่องที่ขายดีที่สุดไว้บนสุด:
-
-```json
+```text
 [
-  { "_id": "Dune", "copies": 7 },
-  { "_id": "Neuromancer", "copies": 4 },
-  { "_id": "Foundation", "copies": 2 }
+  { _id: 'T305', copies: 1205 },
+  { _id: 'T345', copies: 1205 },
+  { _id: 'T30', copies: 1204 }
 ]
 ```
 
-**ใน Compass:** เปิด collection แล้วคลิกแท็บ **Aggregations** ตัวสร้าง pipeline ให้คุณเพิ่ม stage ทีละตัวจาก dropdown แก้เนื้อหาของแต่ละ stage และดู document ที่ไหลออกจาก stage นั้นแบบสด ๆ จากข้อมูลตัวอย่าง — เป็นวิธีที่ดีที่สุดในการ *เฝ้าดู* สายพานลำเลียงทำงาน
+แท็บ Node.js รันบน collection สี่ order ของตัวเองและคืนหนึ่งแถวต่อ title:
+
+```text
+[ { _id: 'Dune', copies: 7 }, { _id: 'Neuromancer', copies: 4 } ]
+```
+
+**In Compass:** เปิด collection แล้วคลิกแท็บ **Aggregations** ตัวสร้าง pipeline ให้เพิ่มทีละ stage แก้เนื้อหา และดูตัวอย่าง document ที่ไหลออกจากแต่ละ stage สด ๆ - วิธีที่ดีที่สุดที่จะ *ดู* สายพานทำงาน
 
 ## ต่างจาก find อย่างไร
 
-`find` filter และ project ได้ แต่คืนได้แค่สับเซตของ document *ต้นฉบับ* เสมอ ส่วน aggregation ทำแบบนั้นได้เหมือนกัน และยังสร้าง document ใหม่ทั้งก้อนขึ้นมาได้ด้วย: จำนวนนับ ค่าเฉลี่ย ระเบียนที่ join แล้ว หรือ array ที่แบนราบแล้ว อะไรที่ `find` ทำได้ aggregation ก็ทำได้ด้วย `$match` และ `$project` แต่ทางกลับกันไม่จริง
+`find` กรองและ project แต่คืน document *ต้นฉบับ* บางส่วนเสมอ aggregation ทำเช่นนั้นได้ด้วย (`$match` และ `$project`) และยังสร้าง document ใหม่ทั้งหมดได้: ยอดนับ ค่าเฉลี่ย เรคคอร์ดที่ join แล้ว array ที่ถูกคลี่
 
-- `find` อ่าน document ออกมา ส่วน aggregation **จัดรูป stream ** ของ document ใหม่
-- `find` คืน document ที่มีอยู่แล้ว ส่วน aggregation **สังเคราะห์** document ใหม่ขึ้นมาได้
-- pipeline **เรียงลำดับและประกอบกันได้** — คุณเรียงซ้อน stage เหมือนต่อ Lego และเพิ่มได้เรื่อย ๆ
+- `find` อ่าน document ออกมา; aggregation **ปรับรูปสาย** ของมัน
+- `find` คืน document ที่มีอยู่แล้ว; aggregation **สังเคราะห์** ใหม่ได้
+- pipeline **มีลำดับและประกอบได้** - ต่อ stage เหมือนเลโก้
+
+ความต่างวัดได้ การหาจำนวนเล่มต่อ title นิยายด้วย `find` แล้วบวกในเชลล์ย้าย 40 000 document ไปยัง client; pipeline ย้ายแค่ 100 คำตอบ:
+
+```js
+// mongosh/agg-client-vs-server.js
+const bytes = (docs) => docs.reduce((n, d) => n + bsonsize(d), 0);
+let t = Date.now();
+const all = db.sales.find({ genre: "fiction" }).toArray();              // pull every fiction order to the client ...
+const totals = {};
+for (const d of all) totals[d.title] = (totals[d.title] ?? 0) + d.quantity;   // ... and sum there
+const clientMs = Date.now() - t;
+t = Date.now();
+const rows = db.sales.aggregate([{ $match: { genre: "fiction" } }, { $group: { _id: "$title", copies: { $sum: "$quantity" } } }]).toArray();
+const serverMs = Date.now() - t;
+console.log({ clientDocsTransferred: all.length, clientMB: +(bytes(all) / 1048576).toFixed(1), clientMs });
+console.log({ serverDocsTransferred: rows.length, serverKB: +(bytes(rows) / 1024).toFixed(1), serverMs });
+assert.strictEqual(rows.length, Object.keys(totals).length);
+assert.ok(rows.every((r) => totals[r._id] === r.copies));
+```
+
+```text
+{ clientDocsTransferred: 40000, clientMB: 3.7, clientMs: 159 }
+{ serverDocsTransferred: 100, serverKB: 3, serverMs: 52 }
+```
+
+ยอดรวมเท่ากัน (fence ยืนยัน) ไบต์บนสายน้อยกว่าราว 1 000 เท่า บนเครือข่ายจริงช่องว่างกว้างกว่ามิลลิวินาทีในเครื่องเหล่านี้มาก
+
+## pipeline ใช้ index ของคุณ
+
+pipeline ที่เริ่มด้วย `$match` ถูกวาง plan เหมือน `find` บน filter นั้น จึงใช้ index ได้ `explain` แสดง plan ของ stage แรก (ส่วนที่อ่าน collection) และ stage ที่เหลือ; ที่นี่ตัว `$group` เองรันอยู่ใน plan เดียวกัน
+
+```js
+// mongosh/agg-explain.js
+const p = [{ $match: { price: { $gte: 24 } } }, { $group: { _id: "$genre", n: { $sum: 1 } } }];
+console.log("with price_1  :", aplan(p));
+db.sales.dropIndex("price_1");
+console.log("without index :", aplan(p));
+db.sales.createIndex({ price: 1 });
+```
+
+```text
+with price_1  : GROUP > FETCH > IXSCAN(price_1)  keys=13422 docs=13422
+without index : GROUP > COLLSCAN  keys=0 docs=200000
+```
 
 ## โมดูลนี้ครอบคลุมอะไรบ้าง
 
-บทเรียนข้างหน้าจะพา stage ที่คุณจะหยิบมาใช้บ่อยที่สุดมาแนะนำทีละแนวคิด:
+1. **พื้นฐาน pipeline** - `$match`, `$project`, `$set` ทำไมลำดับสำคัญ และ optimizer แก้ให้คุณอะไร
+2. **Group และ accumulator** - `$group`, `$sum`, `$avg`, `$push`, `$first` และเพดานหน่วยความจำ
+3. **Lookup join** - `$lookup` และกลยุทธ์ join ที่ server เลือก
+4. **Unwind array** - `$unwind` และกรณีขอบ
+5. **Facet และ bucket** - `$facet`, `$bucket`, `$bucketAuto` และขีดจำกัด
 
-1. **Pipeline basics** — `$match` filter ตั้งแต่เนิ่น ๆ `$project` จัดรูปใหม่ และทำไมลำดับของ stage ถึงเปลี่ยนทั้งความถูกต้องและความเร็ว
-2. **Group and accumulators** — `$group` คู่กับ `$sum`, `$avg`, `$min`, `$max`, `$push` และพวกพ้อง บวกกับยอดรวมทั้งหมด
-3. **Lookup joins** — `$lookup` ดึง document ที่เกี่ยวข้องจาก collection อื่น
-4. **Unwind arrays** — `$unwind` แตก document เดียวที่มี array ออกเป็นหลาย document
-5. **Facets and buckets** — `$facet` ตอบหลายคำถามในการประมวลผลครั้งเดียว และ `$bucket` จัดกลุ่มแบบฮิสโทแกรม
+## เคล็ดลับและข้อควรระวัง
+
+- แต่ละ stage เห็นเฉพาะ output ของ stage ก่อนหน้า: field ที่ทิ้งไปเร็วจะหายสำหรับ stage หลัง
+- เริ่มด้วย `$match` เพื่อให้ index ช่วยได้ (13 422 key แทน 200 000 document ข้างบน)
+- `find` ธรรมดาอ่านง่ายกว่าเมื่อคุณแค่กรอง ใช้ pipeline เมื่อต้องสรุปหรือสร้าง document ใหม่
 
 <Callout title="แบบจำลองความคิด">
-aggregation pipeline คือ array ของ stage ตัว document ไหลเข้ามา แต่ละ stage แปลง stream แล้วส่งต่อ ผลลัพธ์ของ stage สุดท้ายคือผลลัพธ์ที่คุณได้ ลองคิดว่าเป็นสายพานลำเลียง ไม่ใช่ query เดี่ยว ๆ
+aggregation pipeline คือ array ของ stage document เข้ามา แต่ละ stage แปลงสายข้อมูลแล้วส่งต่อ และ output ของ stage สุดท้ายคือผลลัพธ์ของคุณ คิดว่าเป็นสายพาน ไม่ใช่ query เดียว
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ "title ที่ขายดีที่สุด" AI มักเก็บทุกอย่างไว้ในโค้ดแอป:
+
+<SpotTheBug lang="js" code={`// AI comment: "load the fiction orders, then total copies per title in JavaScript"
+const orders = await db.collection("sales").find({ genre: "fiction" }).toArray();
+const totals = {};
+for (const o of orders) totals[o.title] = (totals[o.title] ?? 0) + o.quantity;
+return Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 3);`}>
+
+มันถูกต้อง และนั่นคือเหตุผลที่หลุดรีวิว มันลาก 40 000 document (3.7 MB, 159 ms ในการรันข้างบน) ผ่าน driver และ heap ของแอปเพื่อเก็บตัวเลขสามตัว และต้นทุนโตตาม collection ไม่ใช่ตามคำตอบ pipeline คำนวณยอดรวมเดียวกันในตัว server และคืน 100 แถว (3 KB, 52 ms) - fence ในหัวข้อก่อนหน้ายืนยันว่าทั้งสองตรงกัน ใช้ `$group` + `$sort` + `$limit` และให้ฐานข้อมูลพับข้อมูล
+
+</SpotTheBug>
+
+## Mental Model
+
+มอง `find` เป็นการเลือกแถว และ `aggregate` เป็นการเขียนโปรแกรม data-flow เล็ก ๆ: แต่ละ stage คือฟังก์ชันจากสาย document ไปยังสาย document โปรแกรมที่ถูกทำให้สายเล็กลงเร็ว (`$match`) แล้วพับ (`$group`) และค่อยปรับรูปให้ client
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| aggregation pipeline | คำนวณและสรุปข้อมูลฝั่ง server ลดข้อมูลที่ต้องส่งผ่านเครือข่าย | pipeline อ่านยากกว่า query ธรรมดา และ debug ทีละ stage ต้องใช้เวลา |
-| find + ประมวลผลใน application code | เขียนง่าย เข้าใจง่าย เหมาะกับ logic ที่ซับซ้อนซึ่งยากจะแสดงเป็น stage | ต้องดึง document ทั้งหมดผ่านเครือข่ายก่อนคำนวณ ทำให้ช้าและกิน memory เมื่อข้อมูลใหญ่ |
-| pipeline ที่มีหลาย stage | ประกอบ stage ทีละอันได้ยืดหยุ่น ต่อยอดง่าย | ยิ่งมี stage เยอะ ยิ่งต้องระวังลำดับที่ส่งผลต่อ performance และความถูกต้อง |
+| aggregation pipeline | สรุปฝั่ง server: 100 แถวแทน 40 000 document | อ่านยากกว่า query ธรรมดา; debug ทีละ stage |
+| find + application code | ง่าย; ใช้ logic ใดก็ได้ | ต้องย้ายทุก document ก่อน: 3.7 MB, 159 ms เทียบ 3 KB, 52 ms |
+| pipeline หลาย stage | ประกอบทีละขั้น | ลำดับกระทบทั้งความเร็วและความถูกต้อง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า aggregation pipeline แทน find ได้เสมอ** — ถ้าคุณแค่อยากได้ document ที่ตรง filter โดยไม่ต้องแปลงรูป `find` ธรรมดาอ่านง่ายกว่าและมักเร็วพอ ๆ กัน ใช้ pipeline ตอนที่ต้องสรุปหรือสร้าง document ใหม่จริง ๆ
-- **มองว่า stage แต่ละตัวเห็น collection ต้นฉบับ** — ทุก stage เห็นเฉพาะผลลัพธ์ของ stage ก่อนหน้า ไม่ใช่ collection ทั้งก้อน ถ้า stage ก่อนหน้าทิ้ง field ไปแล้ว stage ถัดมาก็อ้าง field นั้นไม่ได้
-- **ลืมว่า pipeline คือ array ที่ลำดับสำคัญ** — สลับตำแหน่ง stage สองตัวอาจได้ผลลัพธ์คนละแบบหรือช้าลงมาก การจัดลำดับ stage ไม่ใช่แค่เรื่องความสวยงามของโค้ด
+- **"aggregation แทน `find` ได้เสมอ"** - สำหรับการกรองธรรมดา `find` ชัดกว่าและเร็วเท่ากัน
+- **"ทุก stage เห็น collection ต้นฉบับ"** - แต่ละอันเห็นเฉพาะ output ของ stage ก่อนหน้า
+- **"aggregation ไม่สนใจ index"** - `$match` นำหน้าใช้ `price_1` (13 422 key); ไม่มี index สแกน 200 000 document
+- **"บวกในแอปก็ได้ ผลเหมือนกัน"** - ผลเหมือนกัน แต่ไบต์มากกว่า 1 000 เท่า
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **Analytics dashboard ทั่วไป** — หน้า dashboard ที่ต้องแสดงยอดขายรวม ยอดขายแยกตามหมวด และ top product ในคำขอเดียว มักใช้ aggregation pipeline (`$group`, `$facet`) แทนการดึง document ทั้งหมดมาคำนวณใน backend เพราะลด round-trip และภาระของ application server
->
-> **Keller Williams (real estate)** — ทีมข้อมูลใช้ Aggregation Pipeline Builder ใน MongoDB Compass เพื่อสร้าง pipeline สรุปข้อมูลจากข้อมูล listing กว่า 70 ล้านระเบียนบน MongoDB Atlas แทนที่จะย้ายข้อมูลดิบทั้งหมดมาประมวลผลที่ application layer ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams))
+> **Keller Williams (real estate)** - ทีมข้อมูลใช้ Aggregation Pipeline Builder ใน MongoDB Compass สร้าง pipeline สรุปผลบนเรคคอร์ดรายการอสังหาฯ กว่า 70 ล้านรายการบน MongoDB Atlas แทนการย้ายข้อมูลดิบทั้งหมดเข้าเลเยอร์แอปเพื่อประมวลผล ([mongodb.com/customers/keller-williams](https://www.mongodb.com/customers/keller-williams)).
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (pipeline match-group-sort เดียวกันคืน title ชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizIndex = [
   {
-    q: 'stage หนึ่ง ๆ ของ aggregation รับอะไรเป็น input?',
+    q: 'stage หนึ่งของ aggregation รับอะไรเป็น input',
     options: [
-      'collection ต้นฉบับ ทุกครั้ง',
-      'document ผลลัพธ์ที่ stage ก่อนหน้าผลิตออกมา',
+      'collection ต้นฉบับทุกครั้ง',
+      'document ที่ stage ก่อนหน้าผลิตออกมา',
       'ตัวอย่างสุ่มของ collection',
       'เฉพาะ document ที่ตรงกับ stage สุดท้าย',
     ],
     answer: 1,
+    explain: '$match เก็บ 40 000 จาก 200 000 order; $group เห็นแค่ 40 000 รายการนั้นและสร้าง 100 title; $sort และ $limit เห็นแค่ 100 รายการ',
   },
   {
-    q: 'aggregation มีความสามารถใดที่ find ธรรมดาไม่มี?',
+    q: 'ความสามารถใดที่ aggregation มีแต่ find ธรรมดาไม่มี',
     options: [
-      'การ filter document ด้วยค่าของ field',
-      'การคืนสับเซตของ field',
-      'การสรุป document จำนวนมากให้เป็น document ใหม่ที่คำนวณขึ้น',
-      'การเรียงลำดับผลลัพธ์',
+      'กรอง document ตามค่าของ field',
+      'คืนเฉพาะบาง field',
+      'สรุป document จำนวนมากเป็น document ใหม่ที่คำนวณได้',
+      'เรียงผลลัพธ์',
     ],
     answer: 2,
+    explain: 'pipeline เปลี่ยน 40 000 order เป็น 100 แถวที่คำนวณ; find คืนได้แต่ document ที่เก็บไว้',
   },
   {
-    q: 'คุณส่ง pipeline เข้าไปในรูปแบบไหนเมื่อเรียก aggregate?',
+    q: 'เมื่อเรียก aggregate เขียน pipeline อย่างไร',
     options: [
       'เป็น document เดียวที่มี operator เดียว',
-      'เป็น array ของ stage object ที่เรียงลำดับ',
-      'เป็น string ของชื่อ stage คั่นด้วยคอมมา',
-      'เป็น filter object ที่ซ้อนกัน',
+      'เป็น array ของ stage object ที่มีลำดับ',
+      'เป็น string ชื่อ stage คั่นด้วยจุลภาค',
+      'เป็น filter object ซ้อนกัน',
     ],
     answer: 1,
+    explain: 'ทุกแท็บส่ง array: [ { $match }, { $group }, { $sort } ]',
+  },
+  {
+    q: 'ทำไมจึงคำนวณยอดรวมต่อ title ใน pipeline แทนหลัง find',
+    options: [
+      'find คืนตัวเลขไม่ได้',
+      'server คืน 100 แถวเล็กแทน 40 000 document (3 KB แทน 3.7 MB ที่นี่)',
+      'aggregation เร็วกว่า find เสมอ',
+      'โค้ดฝั่ง client วนผลลัพธ์ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'ทั้งสองวิธีให้ยอดรวมเท่ากัน; ฝั่ง client ย้าย 40 000 document (3.7 MB, 159 ms) เทียบกับ 100 แถว (3 KB, 52 ms)',
+  },
+  {
+    q: 'pipeline เริ่มด้วย $match บน field ที่มี index explain แสดงอะไร',
+    options: [
+      'COLLSCAN เพราะ aggregation ไม่สนใจ index',
+      'IXSCAN ที่ป้อนส่วนที่เหลือของ pipeline (13 422 key แทนการสแกน 200 000 document)',
+      'error',
+      'covered query',
+    ],
+    answer: 1,
+    explain: 'GROUP > FETCH > IXSCAN(price_1) ด้วย keys=13422; หลัง drop index pipeline เดิมเป็น GROUP > COLLSCAN ด้วย docs=200000',
   },
 ]
 
