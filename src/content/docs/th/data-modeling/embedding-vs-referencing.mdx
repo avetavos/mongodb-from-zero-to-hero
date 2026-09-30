@@ -1,6 +1,6 @@
 ---
-title: Embedding กับ referencing
-description: สองวิธีในการเชื่อมโยง document ใน MongoDB — การ nest ข้อมูลที่เกี่ยวข้องไว้ใน document เดียว หรือเก็บ id แล้วค้นหา — และวิธีชั่งน้ำหนักระหว่าง read locality กับความซ้ำซ้อนและการเติบโตของ document
+title: Embed เทียบ reference
+description: "สองวิธีเชื่อม document วัดผลบน order 10 000 รายการ: read locality, ต้นทุนของ $lookup, สำเนาที่เลื่อนไหล (และเมื่อสำเนาคือ snapshot ที่ต้องเก็บ) และ atomicity ระดับ document เดียว"
 sidebar:
   order: 2
 ---
@@ -9,151 +9,326 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-มีสองวิธีเท่านั้นในการแสดงความสัมพันธ์ระหว่าง document ใน MongoDB และเกือบทุกการตัดสินใจในการ modeling คือการเลือกระหว่างสองวิธีนี้ คุณสามารถ **embed**: วางข้อมูลที่เกี่ยวข้องไว้ภายใน parent document โดย nest เป็น sub-object หรือ array หรือ **reference**: เก็บข้อมูลที่เกี่ยวข้องไว้อีก collection แล้วเก็บตัวระบุ (ปกติคือ `_id` ของ document นั้น) ไว้ใน parent แล้วค่อยยิง query รอบสองไปดึงตอนต้องใช้ Embedding เอื้อต่อการอ่าน ส่วน referencing เอื้อต่อความยืดหยุ่นและหลีกเลี่ยงสำเนา การรู้ว่าควรหยิบอันไหนมาใช้คือสัญชาตญาณที่มีประโยชน์ที่สุดอย่างหนึ่งในการ modeling แบบ document
+มีสองวิธีแสดงความสัมพันธ์ระหว่าง document และแทบทุกการตัดสินใจออกแบบคือการเลือกระหว่างสองวิธีนี้ คุณ **embed** ได้: วางข้อมูลที่เกี่ยวข้องไว้ใน document แม่ ซ้อนเป็น sub-object หรือ array หรือ **reference**: เก็บข้อมูลที่เกี่ยวข้องใน collection ของมันเองและเก็บ identifier - มักเป็น `_id` - ไว้ในตัวแม่ แล้วค้นเมื่อต้องการ การ embed เอื้อต่อการอ่าน; การ reference เอื้อต่อ single source of truth
 
-เราจะใช้คำสั่งซื้อและรายการสินค้าในนั้นเป็นตัวอย่างที่ใช้ต่อเนื่อง เพราะข้อมูลเดียวกันสามารถไปได้ทั้งสองทางอย่างสมเหตุสมผล ขึ้นอยู่กับว่าแอปพลิเคชันทำงานอย่างไร
+บทนี้ใช้ข้อมูล order ของโมดูล: `products` 500 รายการ และ order 10 000 รายการสองเวอร์ชัน (`ordersEmb` ที่แต่ละรายการมีสำเนา title และราคา, `ordersRef` ที่มีแค่ `productId`) กับ helper `revenue()` ที่รวม qty x ราคา จับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว; แท็บ Python, Go และ Rust ถูกรันอย่างละครั้งในโปรแกรม scratch
 
-## Embedding: เก็บไว้ด้วยกัน
+```js
+// mongosh/evr-seed.js
+const rnd = (() => { let x = 7; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();   // repeatable pseudo-random numbers
+db.products.insertMany(Array.from({ length: 500 }, (_, i) => ({ _id: "BK-" + i, title: "Book " + i, price: 10 + (i % 40) })));
+const specs = Array.from({ length: 10000 }, (_, i) => ({
+  _id: "order_" + i, customerId: "cust_" + (i % 500), status: i % 3 ? "shipped" : "new",
+  lines: Array.from({ length: 2 + Math.floor(rnd() * 4) }, () => { const p = Math.floor(rnd() * 500); return { p, qty: 1 + Math.floor(rnd() * 3) }; }),
+}));
+db.ordersEmb.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ sku: "BK-" + l.p, title: "Book " + l.p, qty: l.qty, price: 10 + (l.p % 40) })) })));   // embedded copies
+db.ordersRef.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ productId: "BK-" + l.p, qty: l.qty })) })));                                 // references only
+console.log("products:", db.products.countDocuments(), "| orders:", db.ordersEmb.countDocuments(), "embedded /", db.ordersRef.countDocuments(), "referenced");
 
-เมื่อคุณ embed ข้อมูลที่เกี่ยวข้องจะอยู่ภายใน parent คำสั่งซื้อด้านล่างพารายการสินค้ามาด้วยเป็น array ที่ nest อยู่ ทำให้ document คือคำตอบที่สมบูรณ์ของ "แสดงคำสั่งซื้อนี้ให้ฉันดู":
+globalThis.revenue = (coll) => coll.aggregate([{ $unwind: "$items" }, { $group: { _id: null, total: { $sum: { $multiply: ["$items.qty", "$items.price"] } } } }]).toArray()[0].total;
+```
 
-```json
+```text
+products: 500 | orders: 10000 embedded / 10000 referenced
+```
+
+## Embed: เก็บไว้ด้วยกัน
+
+order แบบ embed มีรายการของมันอยู่ในตัว document จึงเป็นคำตอบครบของ "แสดง order นี้" (ดูตัวอย่าง `ordersEmb` ในบทก่อน) ข้อดีคือ **read locality**: อ่านครั้งเดียว ไม่ต้อง join ข้อมูลที่ embed ยังเปลี่ยนแบบ atomic ไปกับตัวแม่: คู่มือระบุว่า "write operations are atomic on the single-document level, even if modifying multiple values" ([atomicity](https://www.mongodb.com/docs/manual/core/write-operations-atomicity/), ตรวจ 2026-09-30) `updateOne` เดียวที่เปลี่ยนจำนวนของรายการและสถานะ:
+
+```js
+// mongosh/evr-atomic.js
+db.scratch.insertOne(db.ordersEmb.findOne({ _id: "order_1" }));                                   // work on a copy so later totals stay untouched
+const before = db.scratch.findOne({ _id: "order_1" });
+const r = db.scratch.updateOne({ _id: "order_1" }, { $set: { status: "returned" }, $inc: { "items.0.qty": 1 } });   // two changes, one document: one atomic write
+const after = db.scratch.findOne({ _id: "order_1" });
+console.log({ matched: r.matchedCount, modified: r.modifiedCount }, "| items.0.qty", before.items[0].qty, "->", after.items[0].qty, "| status", before.status, "->", after.status);
+assert.strictEqual(r.modifiedCount, 1);
+```
+
+```text
+{ matched: 1, modified: 1 } | items.0.qty 3 -> 4 | status shipped -> returned
+```
+
+ต้นทุนคือ **ข้อมูลซ้ำ** (title และราคาเป็นสำเนา) และ **การโตของ document** (ทุกรายการที่ embed ทำให้ order ใหญ่ขึ้น และ array ที่โตไม่หยุดจะชนเพดาน 16 MiB - ดูบทถัดไป)
+
+## Reference: แยกไว้
+
+เมื่อ reference ตัวแม่เก็บแค่ identifier และข้อมูลจริงอยู่ครั้งเดียวใน collection ของมันเอง ไม่มีข้อมูลซ้ำและ order เล็ก ต้นทุนเป็นภาพสะท้อนของ embed - การ resolve id ต้อง **ค้นครั้งที่สอง** ไม่ว่าในโค้ดแอปหรือด้วย `$lookup` คำถามรายได้รวมเดียวกัน ตอบจากแต่ละรูปแบบ (แท็บ Node.js resolve สินค้าของหนึ่ง order ด้วย `$lookup`):
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/evr-lookup-cost.js
+    const time = (f) => { const t = Date.now(); const r = f(); return [r, Date.now() - t]; };
+    const [e, eMs] = time(() => revenue(db.ordersEmb));
+    const [r, rMs] = time(() => db.ordersRef.aggregate([{ $unwind: "$items" }, { $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "p" } }, { $unwind: "$p" }, { $group: { _id: null, total: { $sum: { $multiply: ["$items.qty", "$p.price"] } } } }]).toArray()[0].total);
+    console.log({ embeddedRevenue: e, embeddedMs: eMs, referencedRevenue: r, referencedLookupMs: rMs });
+    assert.strictEqual(e, r);                                                        // same revenue both ways (before any price change)
+    const x = db.ordersRef.explain().aggregate([{ $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "p" } }]);
+    console.log("how the server joins them:", JSON.stringify(x).match(/"strategy":"\w+"/)[0], "- the old lesson said $lookup had no strategy choice");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/evr-lookup.mjs
+    const products = db.collection("products"), orders = db.collection("ordersRef");
+    await products.insertMany([{ _id: "BK-1", title: "Distributed Systems", price: 42 }, { _id: "BK-2", title: "The Mythical Man-Month", price: 18.5 }]);
+    await orders.insertOne({ _id: "o1", items: [{ productId: "BK-1", qty: 1 }, { productId: "BK-2", qty: 2 }] });
+    const [o] = await orders.aggregate([
+      { $match: { _id: "o1" } },
+      { $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "products" } },
+    ]).toArray();
+    console.log(o.products.map((p) => p.title));
+    if (o.products.length !== 2) throw new Error("lookup should resolve both products");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.ordersRef.aggregate([
+        {"$match": {"_id": "o1"}},
+        {"$lookup": {
+            "from": "products",
+            "localField": "items.productId",
+            "foreignField": "_id",
+            "as": "products",
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{Key: "$match", Value: bson.D{{Key: "_id", Value: "o1"}}}},
+        {{Key: "$lookup", Value: bson.D{
+            {Key: "from", Value: "products"},
+            {Key: "localField", Value: "items.productId"},
+            {Key: "foreignField", Value: "_id"},
+            {Key: "as", Value: "products"},
+        }}},
+    }
+    cur, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$match": { "_id": "o1" } },
+            doc! { "$lookup": {
+                "from": "products",
+                "localField": "items.productId",
+                "foreignField": "_id",
+                "as": "products",
+            } },
+        ])
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
 {
-  "_id": "order_5001",
-  "customer": "Grace Hopper",
-  "status": "shipped",
-  "items": [
-    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
-    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
-  ]
+  embeddedRevenue: 2040193,
+  embeddedMs: 26,
+  referencedRevenue: 2040193,
+  referencedLookupMs: 324
 }
+how the server joins them: "strategy":"IndexedLoopJoin" - the old lesson said $lookup had no strategy choice
 ```
 
-สิ่งที่ได้คือ **read locality**: ทุกอย่างที่คุณต้องการมาถึงในการอ่านครั้งเดียว ไม่มี join ไม่มี round trip รอบสอง ข้อมูลที่ embed ยัง update แบบ atomic ไปพร้อม parent ได้ด้วย — การเขียนครั้งเดียวแตะทั้งคำสั่งซื้อและรายการสินค้าทั้งหมดไปพร้อมกัน ต้นทุนมีสองอย่าง อย่างแรกคือ **ความซ้ำซ้อน**: ชื่อและราคาของสินค้าเป็นสำเนา หากราคาสินค้าตัวจริง (canonical) เปลี่ยน สำเนานี้จะไม่เปลี่ยนตาม อย่างที่สองคือ **การเติบโตของ document**: ทุกรายการที่ embed ทำให้คำสั่งซื้อใหญ่ขึ้น และ document ที่เติบโตโดยไม่มีขอบเขตในที่สุดจะชนเพดานแข็ง 16 MB
-
-## Referencing: เก็บแยกไว้
-
-เมื่อคุณ reference parent จะเก็บแค่ตัวระบุ ส่วนข้อมูลจริงอยู่ที่อื่น ตรงนี้คำสั่งซื้อเก็บลูกค้าเป็น reference และเก็บ id ของสินค้าสำหรับรายการต่าง ๆ แทนที่จะคัดลอกรายละเอียดสินค้า:
-
-```json
-{
-  "_id": "order_5001",
-  "customerId": "cust_77",
-  "status": "shipped",
-  "items": [
-    { "productId": "BK-204", "qty": 1 },
-    { "productId": "BK-991", "qty": 2 }
-  ]
-}
+```text
+[ 'Distributed Systems', 'The Mythical Man-Month' ]
 ```
 
-รายละเอียดสินค้าอยู่ที่เดียว คือใน collection ของสินค้า:
+ทั้งสองรูปแบบได้ยอดรวมตรงกัน (fence ยืนยัน) แต่การสแกนแบบ embed ใช้ 26 ms และแบบ `$lookup` ใช้ 324 ms - ราว 12 เท่า บทเดิมอ้างว่า `$lookup` "no optimizer choosing a join strategy"; explain รายงาน **IndexedLoopJoin** เพราะ `products._id` มี index (บท lookup แสดง HashJoin และ NestedLoopJoin ด้วย) reference ไม่ได้แพ้เพราะไม่มี optimizer แต่จ่ายค่า join จริงต่อรายการ
 
-```json
-{ "_id": "BK-204", "title": "Distributed Systems", "price": 42.0 }
+## สำเนาเลื่อนไหล - และบางครั้งควรเป็นเช่นนั้น
+
+ทีนี้ราคาแคตตาล็อกของ `BK-7` เปลี่ยนจาก 17 เป็น 99:
+
+```js
+// mongosh/evr-drift.js
+const line = (c, p) => db[c].aggregate([{ $match: { "items.sku": p } }, { $count: "orders" }]).toArray()[0]?.orders;
+console.log("orders containing BK-7 (embedded):", db.ordersEmb.countDocuments({ "items.sku": "BK-7" }), "| (referenced):", db.ordersRef.countDocuments({ "items.productId": "BK-7" }));
+console.log("catalogue price before:", db.products.findOne({ _id: "BK-7" }).price);
+db.products.updateOne({ _id: "BK-7" }, { $set: { price: 99 } });                               // the catalogue price changes
+console.log("catalogue price after :", db.products.findOne({ _id: "BK-7" }).price);
+console.log("an embedded order still shows :", db.ordersEmb.findOne({ "items.sku": "BK-7" }).items.find((i) => i.sku === "BK-7").price, "(its copy did not change)");
+console.log("a referenced order resolves to :", db.products.findOne({ _id: "BK-7" }).price, "(one place to update)");
 ```
 
-ตอนนี้ **ไม่มีความซ้ำซ้อน** — การเปลี่ยนราคาใน `products` collection ถูกเห็นทุกที่ทันที — และ document คำสั่งซื้อยังคงเล็ก ต้นทุนคือภาพสะท้อนกลับด้านของ embedding: การ render คำสั่งซื้อต้องใช้ **การค้นหาครั้งที่สอง** (join ฝั่งแอปพลิเคชัน หรือ `$lookup` ใน aggregation pipeline) เพื่อแปลง id เหล่านั้นให้เป็นชื่อและราคา คุณแลกการอ่านครั้งเดียวที่รวดเร็วกับการรับประกันว่าข้อมูลจะไม่มีวันเก่าค้าง
+```text
+orders containing BK-7 (embedded): 69 | (referenced): 69
+catalogue price before: 17
+catalogue price after : 99
+an embedded order still shows : 17 (its copy did not change)
+a referenced order resolves to : 99 (one place to update)
+```
 
-## เปรียบเทียบทั้งสองแบบเคียงข้างกัน
+รูปแบบ reference ตามแคตตาล็อกทันที - เปลี่ยนแค่ document เดียว สำเนาที่ embed ยังเป็น 17 นั่นเป็นบั๊กหรือไม่ขึ้นกับข้อมูล: ราคา *ปัจจุบัน* ของสินค้าควร reference แต่ราคา *ที่จ่ายใน order* เป็นข้อเท็จจริงในอดีต และสำเนาที่ embed คือ snapshot ที่คุณต้องการพอดี การเขียนทับคือบั๊ก:
 
-การตัดสินใจมาลงที่ว่าคุณอยากเจ็บแบบไหนมากกว่า: ต้นทุนของสำเนาที่อาจคลาดเคลื่อน หรือต้นทุนของการค้นหาเพิ่มในทุกการอ่าน
+## เทียบสองแบบ
 
 export const embedRefDiagram = `flowchart TB
-  subgraph Embed["Embedding — one document"]
+  subgraph Embed["Embedding - one document"]
     E0["Read the order"] --> E1["Order document"]
     E1 --> E2["items array nested inside"]
-    E2 --> E3["Done — one read, no join"]
+    E2 --> E3["Done - one read, no join"]
   end
-  subgraph Reference["Referencing — linked documents"]
+  subgraph Reference["Referencing - linked documents"]
     F0["Read the order"] --> F1["Order document with productId values"]
     F1 --> F2["Second lookup into products"]
     F2 --> F3["Join results to render"]
   end`
 
-<Mermaid code={embedRefDiagram} title="Embedding ตอบการอ่านในครั้งเดียวแต่คัดลอกข้อมูล ส่วน referencing หลีกเลี่ยงสำเนาแต่ต้องการการค้นหาครั้งที่สอง" />
+<Mermaid code={embedRefDiagram} title="การ embed ตอบการอ่านในครั้งเดียวแต่ทำสำเนาข้อมูล; การ reference หลีกเลี่ยงสำเนาแต่ต้องค้นครั้งที่สอง" />
 
-กฎคร่าว ๆ ที่มีประโยชน์: embed ข้อมูลที่ **อ่านด้วยกัน เขียนด้วยกัน และมีขนาดจำกัด** ส่วน reference ข้อมูลที่ **ใหญ่ ถูกแชร์ข้าม parent หลายตัว ถูกอัปเดตบ่อยด้วยตัวเอง หรือมีจำนวนไม่จำกัด** ชื่อลูกค้าและรายการสินค้าที่เป็นของคำสั่งซื้อเดียวเท่านั้นคือการ embed ที่เป็นธรรมชาติ ส่วน product catalog ที่แชร์โดยคำสั่งซื้อนับพัน หรือรายการ comment ที่อาจโตได้ไม่จำกัด คือ reference ที่เป็นธรรมชาติ
+กฎเบื้องต้นที่ใช้ได้: embed ข้อมูลที่ **อ่านด้วยกัน เขียนด้วยกัน และมีขนาดจำกัด**; reference ข้อมูลที่ **ใหญ่ ใช้ร่วมกันหลายแม่ อัปเดตบ่อยด้วยตัวเอง หรือจำนวนไม่จำกัด**
 
-**ใน Compass:** เปิดแท็บ **Schema** บน collection แล้ว Compass จะสุ่มตัวอย่าง document ของคุณเพื่อบอกว่ามี field อะไรบ้าง เป็น type ไหน และ array กับ nested object โผล่บ่อยแค่ไหน — เป็นวิธีรวดเร็วในการดูว่าจริง ๆ แล้วคุณได้ embedding หรือ referencing อยู่ และ array ที่ embed ของคุณโตขึ้นมากแค่ไหน
+**In Compass:** เปิดแท็บ **Schema** ของ collection: Compass สุ่มตัวอย่าง document เพื่อแสดง field ที่มี ชนิด และความถี่ของ array และ object ซ้อน - วิธีเร็วที่จะดูว่าจริง ๆ คุณ embed หรือ reference
 
 ## เคล็ดลับและข้อควรระวัง
 
-- Embedding ให้การเขียนแบบ atomic แก่คุณฟรี ๆ: parent และลูกที่ embed ไว้เปลี่ยนในการทำงานครั้งเดียว โดยไม่ต้องประสานงานแบบ multi-document
-- Referencing เก็บข้อมูลที่แชร์กันไว้ที่เดียว ดังนั้นการอัปเดตจึงถูกเห็นทุกที่ — แต่ทุกการอ่านที่ต้องการข้อมูลที่ resolve แล้วต้องจ่ายค่าค้นหาเพิ่ม
-- คุณสามารถผสมทั้งสองแบบใน document เดียวได้ เป็นเรื่องปกติที่จะ embed snapshot ขนาดเล็กแบบ denormalize (ไม่กี่ field ที่คุณแสดงบ่อย ๆ) *และ* เก็บ reference ไปยังเรคคอร์ดฉบับเต็มไว้ใช้เมื่อต้องการทุกอย่าง
-- จับตาการเติบโตของ document บน array ที่ embed array ที่มีแต่โตขึ้นเรื่อย ๆ คือวิธีที่พบบ่อยที่สุดที่การตัดสินใจ embed จะค่อย ๆ กลายเป็นปัญหาอย่างเงียบ ๆ
+- การ embed ให้การเขียนแบบ atomic ฟรี: แม่และลูกที่ embed เปลี่ยนในการดำเนินการเดียว
+- การ reference เก็บข้อมูลที่ใช้ร่วมกันไว้ที่เดียว - อัปเดตแล้วเห็นทุกที่ - แต่ทุกการอ่านที่ต้องใช้มันต้องจ่ายค่าค้น (324 ms เทียบ 26 ms ข้างบน)
+- ผสมทั้งสอง: embed snapshot เล็ก ๆ ที่แสดงเสมอ และเก็บ reference ไปยังเรคคอร์ดเต็ม
+- ถามทุกสำเนาที่ embed: เป็น snapshot (เก็บไว้) หรือกระจกเงา (ต้องซิงก์)
+- array ที่มีแต่โตคือวิธีที่พบบ่อยที่สุดที่การตัดสินใจ embed กลายเป็นปัญหา
 
-<Callout title="Embed สิ่งที่คุณอ่านด้วยกัน">
-สัญญาณที่ชัดเจนที่สุดสำหรับ embedding คือ co-access: ถ้าแอปพลิเคชันของคุณเกือบทุกครั้งอ่านข้อมูลสองชิ้นในจังหวะเดียวกัน และลูกมีขอบเขตจำกัด เป็นของ parent เดียวเท่านั้น ก็ embed ไปเลย ถ้าข้อมูลถูกแชร์ ใหญ่ หรือโตได้ไม่จำกัด ให้ reference แทน
+<Callout title="embed สิ่งที่อ่านด้วยกัน">
+สัญญาณชัดที่สุดของการ embed คือการเข้าถึงร่วมกัน: ถ้าแอปแทบทุกครั้งอ่านข้อมูลสองส่วนด้วยกัน และลูกมีขอบเขตและเป็นของแม่เพียงตัวเดียว ให้ embed ถ้าข้อมูลใช้ร่วมกัน ใหญ่ หรือโตไม่จำกัด ให้ reference แทน
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+หลังราคาแคตตาล็อกเปลี่ยน AI ถูกขอให้ "ทำให้ order สอดคล้องกัน" และใช้ `updateMany` กับ `arrayFilters`:
+
+<SpotTheBug lang="js" code={`// AI comment: "propagate the new catalogue price so embedded prices are not stale"
+await db.collection("ordersEmb").updateMany(
+  { "items.sku": "BK-7" },
+  { $set: { "items.$[i].price": 99 } },
+  { arrayFilters: [{ "i.sku": "BK-7" }] }
+);`}>
+
+มันรันได้โดยไม่ error และแม้แต่เป็นการใช้ `arrayFilters` ที่ถูกต้อง - ซึ่งเป็นเหตุผลที่มันอันตราย มันเขียนทับ **order ในอดีต 69 รายการ**; รายได้รวมเปลี่ยนจาก 2 040 193 เป็น 2 051 509 และ `order_373` เปลี่ยนจาก 356 เป็น 602 หลังลูกค้าจ่ายไปแล้ว 356 ราคาที่ embed ใน order คือสิ่งที่เรียกเก็บจริง ไม่ใช่กระจกของแคตตาล็อก ปล่อยไว้ และ resolve เฉพาะข้อมูลแสดงผล (title) ผ่าน reference ถ้าต้องการให้ตามแคตตาล็อก:
+
+```js
+// mongosh/evr-bug.js
+const total = () => +revenue(db.ordersEmb).toFixed(2);
+const revenueBefore = total();
+const order = db.ordersEmb.findOne({ "items.sku": "BK-7" });
+const oldTotal = order.items.reduce((n, i) => n + i.qty * i.price, 0);
+// AI: "keep embedded prices consistent with the catalogue" (the catalogue price of BK-7 is now 99)
+const r = db.ordersEmb.updateMany({ "items.sku": "BK-7" }, { $set: { "items.$[i].price": 99 } }, { arrayFilters: [{ "i.sku": "BK-7" }] });
+const newTotal = db.ordersEmb.findOne({ _id: order._id }).items.reduce((n, i) => n + i.qty * i.price, 0);
+console.log({ ordersRewritten: r.modifiedCount, revenueBefore, revenueAfter: total() });
+console.log("one past order:", order._id, "was worth", oldTotal, "and is now", newTotal);
+assert.notStrictEqual(revenueBefore, total());
+```
+
+```text
+{ ordersRewritten: 69, revenueBefore: 2040193, revenueAfter: 2051509 }
+one past order: order_373 was worth 356 and is now 602
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+ถามว่าแต่ละ field *มีความหมายว่าอะไร* ถ้าหมายถึง "ค่าปัจจุบันของสิ่งที่อยู่ที่อื่น" ให้ reference ถ้าหมายถึง "ค่า ณ ขณะที่ document นี้ถูกสร้าง" ให้ embed - มันเป็นข้อเท็จจริงของ document นี้ และสำเนาคือประเด็น จากนั้นตรวจขอบเขต: embed เฉพาะสิ่งที่ไม่โตไม่จำกัด
 
 ## ข้อแลกเปลี่ยน
 
-| สถานการณ์ | Benefit ของตัวเลือกที่แนะนำ | Cost |
+| กรณี | ข้อดีของตัวเลือกที่แนะนำ | ต้นทุน |
 |---------|---------|------|
-| 1:1 (เช่น user + profile) — embed | อ่านครั้งเดียว เขียนแบบ atomic | document ใหญ่ขึ้นเล็กน้อย แยกออกทีหลังยากถ้าส่วนนั้นต้อง scale เดี่ยว ๆ |
-| 1:many bounded (เช่น post + tags) — embed | เร็ว เรียบง่าย ไม่ต้อง join | ต้องมั่นใจว่าขอบเขตจำกัดจริง ไม่งั้นย้อนกลับมาแก้ยากภายหลัง |
-| 1:many unbounded (เช่น user + posts) — reference จากฝั่งลูก | parent เล็กตลอดเวลา ลูก query และแบ่งหน้าได้อิสระ | ต้อง query ที่สองเพื่อดึงลูกทั้งหมด ไม่มี atomic write ข้าม parent-child |
-| many:many (เช่น student ↔ course) — reference array ทั้งสองฝั่ง | อ่านเร็วทั้งสองทิศทางโดยไม่ต้อง `$lookup` | เขียนสองเท่า ต้องคอย sync ทั้งสองฝั่งให้ตรงกันเสมอ |
+| 1:1 (ผู้ใช้ + โปรไฟล์) - embed | อ่านครั้งเดียว เขียนแบบ atomic | document ใหญ่ขึ้น; แยกทีหลังยากขึ้น |
+| 1:many จำกัด (โพสต์ + tag) - embed | เร็ว ง่าย ไม่มี join | ต้องมั่นใจว่าขอบเขตจริง |
+| 1:many ไม่จำกัด (ผู้ใช้ + โพสต์) - reference จากฝั่งลูก | ตัวแม่เล็กเสมอ; ลูกแบ่งหน้าได้อิสระ | query ที่สอง; ไม่มีการเขียน atomic ข้ามแม่และลูก |
+| ราคาที่จ่ายใน order - embed snapshot | ประวัติยังจริง; สแกน 26 ms | ไม่ตามแคตตาล็อก (โดยออกแบบ) |
+| many:many - array ของ id ทั้งสองฝั่ง | อ่านเร็วทั้งสองทิศทาง | เขียนสองเท่า; ต้องรักษาสองฝั่งให้ตรงกัน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า embedding เร็วกว่า referencing เสมอ** — ถ้า array ที่ embed โตไม่มีขอบเขต การอ่านและเขียนจะช้าลงเรื่อย ๆ เพราะ server ต้องจัดการ document ทั้งก้อนทุกครั้ง สุดท้ายช้ากว่าการ reference เสียอีก
-- **คิดว่า `$lookup` ทำงานเหมือน JOIN ใน SQL ทุกประการ** — `$lookup` ไม่มี query optimizer แบบ relational database คอยเลือก join strategy ให้ ยิง `$lookup` บน hot path บ่อย ๆ แล้ว performance จะแย่กว่าที่คิดไว้เยอะ
-- **ยึดกฎ embed-or-reference เดียวกับทุกความสัมพันธ์ใน schema** — ต้องตัดสินทีละความสัมพันธ์ตาม access pattern และการเติบโตของความสัมพันธ์นั้น ๆ ไม่ใช่นโยบายเดียวที่ใช้กับทุก field
+- **"embed เร็วกว่าเสมอ"** - เฉพาะเมื่อ array มีขอบเขต; array ที่ไม่จำกัดทำให้ทุกการอ่านและเขียนช้าลง (ดูบทถัดไป มีตัวเลข)
+- **"`$lookup` ไม่มีกลยุทธ์ join"** - explain รายงาน IndexedLoopJoin
+- **"สำเนา embed ที่ล้าสมัยเป็นบั๊กเสมอ"** - ราคาที่จ่ายใน order คือประวัติ; การซิงก์เขียนทับ 69 order
+- **"กฎเดียวใช้ได้ทุกความสัมพันธ์"** - ตัดสินแต่ละอันจากรูปแบบการเข้าถึงและการเติบโต
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **แพลตฟอร์มอีคอมเมิร์ซขนาดใหญ่ทั่วไป** — จัดการ product listing จำนวนมหาศาลด้วยการ reference แทนที่จะ embed ทุกอย่างไว้ที่เดียว เพื่อให้ seller อัปเดตราคาหรือสต๊อกได้โดยไม่ต้องแก้ document อื่นที่ point มาที่สินค้าเดียวกัน
->
-> **ระบบ CMS ทั่วไป** — embed field ของบทความ เช่น tag และ metadata สั้น ๆ ไว้ใน document เดียวกัน เพื่อให้หน้าแสดงบทความโหลดได้ในการอ่านครั้งเดียว โดยไม่ต้อง join ไปหลาย collection
+> แนวทางการออกแบบข้อมูลในคู่มือ MongoDB วางกรอบการตัดสินใจเดียวกัน: embed เมื่อ "Your application queries pieces of information together" และ reference เมื่อ "Your embedded data grows without bounds" หรือ "Data duplication is too complicated to manage and not preferred" ([Embedded Data Versus References](https://www.mongodb.com/docs/manual/data-modeling/concepts/embedding-vs-references/), ตรวจ 2026-09-30)
 
-export const quizEmbedRef = [
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (`$lookup` คืนสินค้าทั้งสองของ order) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
+
+export const quizEmbed = [
   {
-    q: 'ข้อได้เปรียบหลักของการ embed ข้อมูลที่เกี่ยวข้องไว้ใน document คืออะไร?',
+    q: 'ข้อดีหลักของการ embed คืออะไร',
     options: [
-      'รับประกันว่าข้อมูลจะไม่ซ้ำซ้อนเลย',
-      'การอ่านครั้งเดียวคืนทุกอย่างโดยไม่ต้อง join',
-      'ทำให้ document เล็กลง',
-      'ยกเลิกลิมิต document ขนาด 16 MB',
+      'read locality: ทุกอย่างมาในการอ่านครั้งเดียวโดยไม่ต้อง join',
+      'ใช้ดิสก์น้อยกว่า',
+      'ไม่ซ้ำข้อมูลเลย',
+      'ยกเลิกขีดจำกัด 16 MiB',
     ],
-    answer: 1,
+    answer: 0,
+    explain: 'รายได้รวมของ order แบบ embed 10 000 รายการใช้ 26 ms; แบบ reference ต้องใช้ $lookup และใช้ 324 ms',
   },
   {
-    q: 'ต้นทุนหลักของการ reference แทนที่จะ embed คืออะไร?',
+    q: 'ราคาแคตตาล็อกของ BK-7 เปลี่ยนจาก 17 เป็น 99 order แบบ embed แสดงอะไร',
     options: [
-      'parent document โตขึ้นโดยไม่มีขอบเขต',
-      'การอ่านต้องใช้การค้นหาครั้งที่สองเพื่อ resolve reference',
-      'การเขียนไม่สามารถถูก acknowledge ได้อีกต่อไป',
-      'คุณต้องคัดลอกข้อมูลที่ถูก reference',
+      '99',
+      '17 - สำเนาของมันไม่เปลี่ยน',
+      'null',
+      'error',
     ],
     answer: 1,
+    explain: 'รายการที่ embed ยังเป็น 17 ขณะที่ order แบบ reference resolve ได้ 99 ผ่าน products',
   },
   {
-    q: 'ข้อมูลใดเป็นตัวเลือกที่เป็นธรรมชาติที่สุดสำหรับการ reference มากกว่าการ embed?',
+    q: 'AI "ทำให้ราคาที่ embed สอดคล้อง" ด้วย updateMany หลังราคาเปลี่ยน ผิดตรงไหน',
     options: [
-      'field ที่อยู่ไม่กี่อันที่เป็นของผู้ใช้คนเดียว',
-      'product catalog ที่แชร์ข้ามคำสั่งซื้อนับพัน',
-      'string สถานะที่อยู่บน document ของตัวเอง',
-      'field timestamp อันเดียว',
+      'ไม่มีอะไรผิด',
+      'มันเขียนทับ order ในอดีต 69 รายการและเปลี่ยนรายได้ที่รายงาน - ราคาที่ embed คือราคาที่จ่ายจริง',
+      'ล้มเหลวด้วย duplicate key',
+      'เปลี่ยนแค่แคตตาล็อก',
     ],
     answer: 1,
+    explain: 'order_373 เปลี่ยนจาก 356 เป็น 602 และรายได้รวมจาก 2 040 193 เป็น 2 051 509 สำหรับ order สำเนาคือ snapshot; ควรเก็บไว้',
   },
   {
-    q: 'ทำไมความซ้ำซ้อนจาก embedding บางครั้งจึงเป็นปัญหา?',
+    q: 'explain รายงานกลยุทธ์ join ใดสำหรับ $lookup จาก orders ไป products ด้วย _id',
     options: [
-      'MongoDB ห้ามเก็บค่าเดียวกันสองครั้ง',
-      'สำเนาอาจคลาดเคลื่อนไม่ตรงกันเมื่อค่าตัวจริงเปลี่ยน',
-      'เกิน document limit เสมอ',
-      'ทำให้เขียนแบบ atomic ไม่ได้',
+      'ไม่มี - $lookup ไม่มี optimizer',
+      'IndexedLoopJoin',
+      'cartesian product เต็ม',
+      'MapReduce',
     ],
     answer: 1,
+    explain: '"strategy":"IndexedLoopJoin" - ข้ออ้างว่า $lookup ไม่มีการเลือกกลยุทธ์ผิด (ดูบท lookup ด้วย)',
+  },
+  {
+    q: 'updateOne เดียวเปลี่ยนจำนวนของรายการที่ embed และสถานะ order เป็น atomic หรือไม่',
+    options: [
+      'ใช่ - การเขียนเป็น atomic ระดับ document เดียว แม้แก้หลายค่า',
+      'ไม่ - แต่ละ field เป็นการเขียนแยก',
+      'เฉพาะใน transaction',
+      'เฉพาะ writeConcern majority',
+    ],
+    answer: 0,
+    explain: 'updateOne เดียว modified: 1: items.0.qty 3 -> 4 และ status shipped -> returned พร้อมกัน (คู่มือ MongoDB: การเขียน document เดียวเป็น atomic)',
   },
 ]
 
-<Quiz client:visible id="data-modeling/embedding-vs-referencing" questions={quizEmbedRef} />
+<Quiz client:visible id="data-modeling/embedding-vs-referencing" questions={quizEmbed} />
 
 <ProgressTracker client:visible id="data-modeling/embedding-vs-referencing" />

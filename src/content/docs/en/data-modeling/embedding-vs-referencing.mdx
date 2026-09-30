@@ -1,6 +1,6 @@
 ---
 title: Embedding versus referencing
-description: The two ways to relate documents in MongoDB — nesting related data inside one document or storing an id and looking it up — and how to weigh read locality against duplication and document growth.
+description: "The two ways to relate documents, measured on 10 000 orders: read locality, the cost of a $lookup, copies that drift (and when a copy is a snapshot you must keep), and single-document atomicity."
 sidebar:
   order: 2
 ---
@@ -9,65 +9,184 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-There are exactly two ways to express a relationship between documents in MongoDB, and almost every modeling decision is a choice between them. You can **embed**: place the related data inside the parent document, nested as a sub-object or an array. Or you can **reference**: keep the related data in its own collection and store an identifier — usually the related document's `_id` — in the parent, then look it up with a second query when you need it. Embedding favors reading; referencing favors flexibility and avoids copies. Knowing which to reach for is the single most useful instinct in document modeling.
+There are two ways to express a relationship between documents, and almost every modeling decision is a choice between them. You can **embed**: place the related data inside the parent document, nested as a sub-object or an array. Or you can **reference**: keep the related data in its own collection and store an identifier - usually the `_id` - in the parent, then look it up when you need it. Embedding favors reading; referencing favors a single source of truth.
 
-We will use an order and its line items as the running example, because the same data can sensibly go either way depending on how the application behaves.
+The lesson uses the module's order data: 500 `products`, and 10 000 orders in two versions (`ordersEmb` with a copy of title and price on each item, `ordersRef` with only `productId`), plus a `revenue()` helper that totals qty x price. Captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac; Python, Go and Rust tabs were each run once in a scratch program.
+
+```js
+// mongosh/evr-seed.js
+const rnd = (() => { let x = 7; return () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 4294967296; })();   // repeatable pseudo-random numbers
+db.products.insertMany(Array.from({ length: 500 }, (_, i) => ({ _id: "BK-" + i, title: "Book " + i, price: 10 + (i % 40) })));
+const specs = Array.from({ length: 10000 }, (_, i) => ({
+  _id: "order_" + i, customerId: "cust_" + (i % 500), status: i % 3 ? "shipped" : "new",
+  lines: Array.from({ length: 2 + Math.floor(rnd() * 4) }, () => { const p = Math.floor(rnd() * 500); return { p, qty: 1 + Math.floor(rnd() * 3) }; }),
+}));
+db.ordersEmb.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ sku: "BK-" + l.p, title: "Book " + l.p, qty: l.qty, price: 10 + (l.p % 40) })) })));   // embedded copies
+db.ordersRef.insertMany(specs.map(({ lines, ...o }) => ({ ...o, items: lines.map((l) => ({ productId: "BK-" + l.p, qty: l.qty })) })));                                 // references only
+console.log("products:", db.products.countDocuments(), "| orders:", db.ordersEmb.countDocuments(), "embedded /", db.ordersRef.countDocuments(), "referenced");
+
+globalThis.revenue = (coll) => coll.aggregate([{ $unwind: "$items" }, { $group: { _id: null, total: { $sum: { $multiply: ["$items.qty", "$items.price"] } } } }]).toArray()[0].total;
+```
+
+```text
+products: 500 | orders: 10000 embedded / 10000 referenced
+```
 
 ## Embedding: keep it together
 
-When you embed, the related data lives inside the parent. The order below carries its items as a nested array, so the document is the complete answer to "show me this order":
+An embedded order carries its items, so the document is the complete answer to "show me this order" (see the `ordersEmb` sample in the previous lesson). The win is **read locality**: one read, no join. Embedded data also changes atomically with its parent: the manual states that "write operations are atomic on the single-document level, even if modifying multiple values" ([atomicity](https://www.mongodb.com/docs/manual/core/write-operations-atomicity/), consulted 2026-09-30). One `updateOne` changing an item quantity and the status:
 
-```json
-{
-  "_id": "order_5001",
-  "customer": "Grace Hopper",
-  "status": "shipped",
-  "items": [
-    { "sku": "BK-204", "title": "Distributed Systems", "qty": 1, "price": 42.0 },
-    { "sku": "BK-991", "title": "The Mythical Man-Month", "qty": 2, "price": 18.5 }
-  ]
-}
+```js
+// mongosh/evr-atomic.js
+db.scratch.insertOne(db.ordersEmb.findOne({ _id: "order_1" }));                                   // work on a copy so later totals stay untouched
+const before = db.scratch.findOne({ _id: "order_1" });
+const r = db.scratch.updateOne({ _id: "order_1" }, { $set: { status: "returned" }, $inc: { "items.0.qty": 1 } });   // two changes, one document: one atomic write
+const after = db.scratch.findOne({ _id: "order_1" });
+console.log({ matched: r.matchedCount, modified: r.modifiedCount }, "| items.0.qty", before.items[0].qty, "->", after.items[0].qty, "| status", before.status, "->", after.status);
+assert.strictEqual(r.modifiedCount, 1);
 ```
 
-The win is **read locality**: everything you need arrives in a single read, with no join and no second round trip. Embedded data is also updated atomically with its parent — a single write touches the order and all its items together. The costs are two. First, **duplication**: the item titles and prices are copies; if the canonical product price changes, this copy does not. Second, **document growth**: every embedded item makes the order bigger, and a document that grows without bound eventually runs into the hard 16 MB ceiling.
+```text
+{ matched: 1, modified: 1 } | items.0.qty 3 -> 4 | status shipped -> returned
+```
+
+The costs are **duplication** (titles and prices are copies) and **document growth** (every embedded item makes the order bigger, and an array that grows forever meets the 16 MiB ceiling - see the next lesson).
 
 ## Referencing: keep it separate
 
-When you reference, the parent stores only an identifier and the real data lives elsewhere. Here the order keeps the customer as a reference and stores product ids for its items rather than copying product details:
+When you reference, the parent stores only an identifier and the real data lives once, in its own collection. There is no duplication and the order stays small; the cost is the mirror image of embedding - resolving the ids needs a **second lookup**, either in application code or with `$lookup`. The same total-revenue question, answered from each shape (the Node.js tab resolves one order's products with `$lookup`):
 
-```json
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/evr-lookup-cost.js
+    const time = (f) => { const t = Date.now(); const r = f(); return [r, Date.now() - t]; };
+    const [e, eMs] = time(() => revenue(db.ordersEmb));
+    const [r, rMs] = time(() => db.ordersRef.aggregate([{ $unwind: "$items" }, { $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "p" } }, { $unwind: "$p" }, { $group: { _id: null, total: { $sum: { $multiply: ["$items.qty", "$p.price"] } } } }]).toArray()[0].total);
+    console.log({ embeddedRevenue: e, embeddedMs: eMs, referencedRevenue: r, referencedLookupMs: rMs });
+    assert.strictEqual(e, r);                                                        // same revenue both ways (before any price change)
+    const x = db.ordersRef.explain().aggregate([{ $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "p" } }]);
+    console.log("how the server joins them:", JSON.stringify(x).match(/"strategy":"\w+"/)[0], "- the old lesson said $lookup had no strategy choice");
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/evr-lookup.mjs
+    const products = db.collection("products"), orders = db.collection("ordersRef");
+    await products.insertMany([{ _id: "BK-1", title: "Distributed Systems", price: 42 }, { _id: "BK-2", title: "The Mythical Man-Month", price: 18.5 }]);
+    await orders.insertOne({ _id: "o1", items: [{ productId: "BK-1", qty: 1 }, { productId: "BK-2", qty: 2 }] });
+    const [o] = await orders.aggregate([
+      { $match: { _id: "o1" } },
+      { $lookup: { from: "products", localField: "items.productId", foreignField: "_id", as: "products" } },
+    ]).toArray();
+    console.log(o.products.map((p) => p.title));
+    if (o.products.length !== 2) throw new Error("lookup should resolve both products");
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = list(db.ordersRef.aggregate([
+        {"$match": {"_id": "o1"}},
+        {"$lookup": {
+            "from": "products",
+            "localField": "items.productId",
+            "foreignField": "_id",
+            "as": "products",
+        }},
+    ]))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    pipeline := mongo.Pipeline{
+        {{Key: "$match", Value: bson.D{{Key: "_id", Value: "o1"}}}},
+        {{Key: "$lookup", Value: bson.D{
+            {Key: "from", Value: "products"},
+            {Key: "localField", Value: "items.productId"},
+            {Key: "foreignField", Value: "_id"},
+            {Key: "as", Value: "products"},
+        }}},
+    }
+    cur, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        return err
+    }
+    var rows []bson.M
+    if err := cur.All(ctx, &rows); err != nil {
+        return err
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut cursor = coll
+        .aggregate(vec![
+            doc! { "$match": { "_id": "o1" } },
+            doc! { "$lookup": {
+                "from": "products",
+                "localField": "items.productId",
+                "foreignField": "_id",
+                "as": "products",
+            } },
+        ])
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
 {
-  "_id": "order_5001",
-  "customerId": "cust_77",
-  "status": "shipped",
-  "items": [
-    { "productId": "BK-204", "qty": 1 },
-    { "productId": "BK-991", "qty": 2 }
-  ]
+  embeddedRevenue: 2040193,
+  embeddedMs: 26,
+  referencedRevenue: 2040193,
+  referencedLookupMs: 324
 }
+how the server joins them: "strategy":"IndexedLoopJoin" - the old lesson said $lookup had no strategy choice
 ```
 
-The product details live once, in their own collection:
-
-```json
-{ "_id": "BK-204", "title": "Distributed Systems", "price": 42.0 }
+```text
+[ 'Distributed Systems', 'The Mythical Man-Month' ]
 ```
 
-Now there is **no duplication** — a price change in the `products` collection is seen everywhere instantly — and the order document stays small. The cost is the mirror image of embedding: rendering the order needs a **second lookup** (an application-side join, or a `$lookup` in the aggregation pipeline) to resolve those ids into titles and prices. You traded a fast single read for a guarantee that the data is never stale.
+Both shapes agree on the total (the fence asserts it) but the embedded scan took 26 ms and the `$lookup` version 324 ms - about 12x. The old lesson claimed `$lookup` has "no optimizer choosing a join strategy"; explain reports **IndexedLoopJoin** because `products._id` is indexed (the lookup lesson shows HashJoin and NestedLoopJoin too). Referencing did not lose because of a missing optimizer; it paid for an actual join per item.
+
+## Copies drift - and sometimes should
+
+Now the catalogue price of `BK-7` changes from 17 to 99:
+
+```js
+// mongosh/evr-drift.js
+const line = (c, p) => db[c].aggregate([{ $match: { "items.sku": p } }, { $count: "orders" }]).toArray()[0]?.orders;
+console.log("orders containing BK-7 (embedded):", db.ordersEmb.countDocuments({ "items.sku": "BK-7" }), "| (referenced):", db.ordersRef.countDocuments({ "items.productId": "BK-7" }));
+console.log("catalogue price before:", db.products.findOne({ _id: "BK-7" }).price);
+db.products.updateOne({ _id: "BK-7" }, { $set: { price: 99 } });                               // the catalogue price changes
+console.log("catalogue price after :", db.products.findOne({ _id: "BK-7" }).price);
+console.log("an embedded order still shows :", db.ordersEmb.findOne({ "items.sku": "BK-7" }).items.find((i) => i.sku === "BK-7").price, "(its copy did not change)");
+console.log("a referenced order resolves to :", db.products.findOne({ _id: "BK-7" }).price, "(one place to update)");
+```
+
+```text
+orders containing BK-7 (embedded): 69 | (referenced): 69
+catalogue price before: 17
+catalogue price after : 99
+an embedded order still shows : 17 (its copy did not change)
+a referenced order resolves to : 99 (one place to update)
+```
+
+The referenced shape follows the catalogue instantly - one document changed. The embedded copy kept 17. Whether that is a bug depends on the data: a product's *current* price wants a reference, but the price *paid on an order* is a historical fact, and the embedded copy is exactly the snapshot you want. Rewriting it is the bug:
 
 ## The two side by side
 
-The decision comes down to which pain you would rather have: the cost of a copy that can drift, or the cost of an extra lookup on every read.
-
 export const embedRefDiagram = `flowchart TB
-  subgraph Embed["Embedding — one document"]
+  subgraph Embed["Embedding - one document"]
     E0["Read the order"] --> E1["Order document"]
     E1 --> E2["items array nested inside"]
-    E2 --> E3["Done — one read, no join"]
+    E2 --> E3["Done - one read, no join"]
   end
-  subgraph Reference["Referencing — linked documents"]
+  subgraph Reference["Referencing - linked documents"]
     F0["Read the order"] --> F1["Order document with productId values"]
     F1 --> F2["Second lookup into products"]
     F2 --> F3["Join results to render"]
@@ -75,85 +194,141 @@ export const embedRefDiagram = `flowchart TB
 
 <Mermaid code={embedRefDiagram} title="Embedding answers a read in one shot but copies data; referencing avoids copies but needs a second lookup" />
 
-A useful rule of thumb: embed data that is **read together, written together, and bounded in size**; reference data that is **large, shared across many parents, frequently updated on its own, or unbounded in count**. Customer names and order items that belong to exactly one order are natural embeds. A product catalog shared by thousands of orders, or a comment list that could grow forever, is a natural reference.
+A useful rule of thumb: embed data that is **read together, written together and bounded in size**; reference data that is **large, shared across many parents, frequently updated on its own, or unbounded in count**.
 
-**In Compass:** open the **Schema** tab on a collection and Compass samples your documents to show which fields exist, their types, and how often arrays and nested objects appear — a quick way to see whether you have been embedding or referencing in practice, and how large your embedded arrays have grown.
+**In Compass:** open the **Schema** tab on a collection: Compass samples your documents to show which fields exist, their types, and how often arrays and nested objects appear - a quick way to see whether you have been embedding or referencing in practice.
 
 ## Tips and gotchas
 
-- Embedding gives you atomic writes for free: the parent and its embedded children change in one operation, with no multi-document coordination.
-- Referencing keeps shared data in one place, so an update is seen everywhere — but every read that needs the resolved data pays for an extra lookup.
-- You can mix both in one document. It is common to embed a small, denormalized snapshot (a few fields you display often) *and* keep a reference to the full record for when you need everything.
-- Watch document growth on embedded arrays. An array that only ever grows is the most common way an embedding decision quietly turns into a problem.
+- Embedding gives atomic writes for free: parent and embedded children change in one operation.
+- Referencing keeps shared data in one place - an update is seen everywhere - but each read that needs it pays for the lookup (324 ms vs 26 ms above).
+- Mix both: embed a small snapshot you always display and keep a reference to the full record.
+- Ask of every embedded copy: is it a snapshot (keep it) or a mirror (keep it in sync)?
+- An array that only ever grows is the commonest way an embedding decision turns into a problem.
 
 <Callout title="Embed what you read together">
-The clearest signal for embedding is co-access: if your application almost always reads two pieces of data in the same breath, and the child is bounded and owned by exactly one parent, embed it. If the data is shared, large, or grows without limit, reference it instead.
+The clearest signal for embedding is co-access: if the application almost always reads two pieces of data in the same breath, and the child is bounded and owned by exactly one parent, embed it. If the data is shared, large, or grows without limit, reference it instead.
 </Callout>
+
+## Reading AI-generated code
+
+After a catalogue price change an assistant is asked to "make the orders consistent" and reaches for `updateMany` with `arrayFilters`:
+
+<SpotTheBug lang="js" code={`// AI comment: "propagate the new catalogue price so embedded prices are not stale"
+await db.collection("ordersEmb").updateMany(
+  { "items.sku": "BK-7" },
+  { $set: { "items.$[i].price": 99 } },
+  { arrayFilters: [{ "i.sku": "BK-7" }] }
+);`}>
+
+It runs without error and is even a correct use of `arrayFilters` - which is why it is dangerous. It rewrote **69 past orders**; total revenue moved from 2 040 193 to 2 051 509, and `order_373` changed from 356 to 602 after the customer had already paid 356. The embedded price on an order is what was charged, not a mirror of the catalogue. Leave it alone, and resolve only display data (titles) by reference if it should follow the catalogue:
+
+```js
+// mongosh/evr-bug.js
+const total = () => +revenue(db.ordersEmb).toFixed(2);
+const revenueBefore = total();
+const order = db.ordersEmb.findOne({ "items.sku": "BK-7" });
+const oldTotal = order.items.reduce((n, i) => n + i.qty * i.price, 0);
+// AI: "keep embedded prices consistent with the catalogue" (the catalogue price of BK-7 is now 99)
+const r = db.ordersEmb.updateMany({ "items.sku": "BK-7" }, { $set: { "items.$[i].price": 99 } }, { arrayFilters: [{ "i.sku": "BK-7" }] });
+const newTotal = db.ordersEmb.findOne({ _id: order._id }).items.reduce((n, i) => n + i.qty * i.price, 0);
+console.log({ ordersRewritten: r.modifiedCount, revenueBefore, revenueAfter: total() });
+console.log("one past order:", order._id, "was worth", oldTotal, "and is now", newTotal);
+assert.notStrictEqual(revenueBefore, total());
+```
+
+```text
+{ ordersRewritten: 69, revenueBefore: 2040193, revenueAfter: 2051509 }
+one past order: order_373 was worth 356 and is now 602
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Ask what each field *means*. If it means "the current value of something that lives elsewhere", reference it. If it means "the value at the moment this document was created", embed it - it is a fact about this document, and its copy is the point. Then check bounds: embed only what cannot grow without limit.
 
 ## Trade-offs
 
 | Scenario | Benefit of the recommended choice | Cost |
 |---------|---------|------|
-| 1:1 (e.g. user + profile) — embed | One read, atomic write | Slightly larger document; harder to split out later if that part needs to scale on its own |
-| 1:many bounded (e.g. post + tags) — embed | Fast, simple, no join | Must be confident the bound is real, or it is hard to walk back later |
-| 1:many unbounded (e.g. user + posts) — reference from the child side | Parent stays small forever; children can be queried and paginated independently | Needs a second query to fetch all children; no atomic write across parent and child |
-| many:many (e.g. student ↔ course) — reference arrays on both sides | Fast reads in both directions with no `$lookup` | Double the writes; both sides must always be kept in sync |
+| 1:1 (user + profile) - embed | One read, atomic write | Larger document; harder to split later |
+| 1:many bounded (post + tags) - embed | Fast, simple, no join | Must be sure the bound is real |
+| 1:many unbounded (user + posts) - reference from the child | Parent stays small; children paginate independently | Second query; no atomic write across parent and child |
+| Price paid on an order - embed a snapshot | History stays true; 26 ms scans | Never follows the catalogue (by design) |
+| many:many - id arrays on both sides | Fast reads both ways | Double the writes; keep both sides in sync |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming embedding is always faster than referencing** — if the embedded array grows without bound, reads and writes get progressively slower because the server must handle the whole document every time, eventually becoming slower than referencing would have been.
-- **Assuming `$lookup` behaves exactly like a SQL JOIN** — `$lookup` has no relational-database-style query optimizer choosing a join strategy for you. Firing `$lookup` frequently on a hot path performs far worse than expected.
-- **Applying the same embed-or-reference rule to every relationship in a schema** — each relationship must be decided on its own access pattern and growth, not one policy applied to every field.
+- **"Embedding is always faster."** - only while the array is bounded; an unbounded array slows every read and write (see the next lesson, measured).
+- **"`$lookup` has no join strategy."** - explain reported IndexedLoopJoin.
+- **"Stale embedded copies are always bugs."** - the price paid on an order is history; syncing it rewrote 69 orders.
+- **"One rule fits every relationship."** - decide each from its access pattern and growth.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A typical large e-commerce platform** — manages a huge volume of product listings by referencing rather than embedding everything in one place, so a seller can update price or stock without touching other documents that point to the same product.
->
-> **A typical CMS** — embeds an article's short fields, such as tags and metadata, in the same document, so the article page loads in one read without joining across several collections.
+> The MongoDB manual's data-modeling guidance frames the same decision: embed when "Your application queries pieces of information together", and reference when "Your embedded data grows without bounds" or "Data duplication is too complicated to manage and not preferred" ([Embedded Data Versus References](https://www.mongodb.com/docs/manual/data-modeling/concepts/embedding-vs-references/), consulted 2026-09-30).
 
-export const quizEmbedRef = [
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the `$lookup` returned both products for the order) but they are not executed by the course's automated checker._
+
+export const quizEmbed = [
   {
-    q: 'What is the main advantage of embedding related data in a document?',
+    q: 'What is the main win of embedding?',
     options: [
-      'It guarantees the data is never duplicated',
-      'A single read returns everything with no join',
-      'It makes documents smaller',
-      'It removes the 16 MB document limit',
+      'Read locality: everything arrives in one read with no join',
+      'It uses less disk',
+      'It never duplicates data',
+      'It removes the 16 MiB limit',
     ],
-    answer: 1,
+    answer: 0,
+    explain: 'Total revenue over 10 000 embedded orders took 26 ms; the referenced version needed a $lookup and took 324 ms.',
   },
   {
-    q: 'What is the chief cost of referencing instead of embedding?',
+    q: 'The catalogue price of BK-7 changes from 17 to 99. What does an embedded order show?',
     options: [
-      'The parent document grows without bound',
-      'Reads need a second lookup to resolve the references',
-      'Writes can no longer be acknowledged',
-      'You must duplicate the referenced data',
+      '99',
+      '17 - its copy is unchanged',
+      'null',
+      'An error',
     ],
     answer: 1,
+    explain: 'The embedded item still held 17 while a referenced order resolved to 99 through products.',
   },
   {
-    q: 'Which data is the most natural candidate for referencing rather than embedding?',
+    q: 'An AI "keeps embedded prices consistent" with updateMany after a price change. What went wrong?',
     options: [
-      'A few address fields owned by one user',
-      'A product catalog shared across thousands of orders',
-      'A status string on its own document',
-      'A single timestamp field',
+      'Nothing',
+      'It rewrote 69 past orders and changed reported revenue - the embedded price was the price paid',
+      'It failed with a duplicate key',
+      'It only changed the catalogue',
     ],
     answer: 1,
+    explain: 'order_373 went from 356 to 602 and total revenue from 2 040 193 to 2 051 509. For orders the copy is a snapshot; keep it.',
   },
   {
-    q: 'Why is duplication from embedding sometimes a problem?',
+    q: 'What join strategy did explain report for $lookup from orders to products by _id?',
     options: [
-      'MongoDB forbids storing the same value twice',
-      'The copy can drift out of sync when the canonical value changes',
-      'It always exceeds the document size limit',
-      'It disables atomic writes',
+      'None - $lookup has no optimizer',
+      'IndexedLoopJoin',
+      'A full cartesian product',
+      'MapReduce',
     ],
     answer: 1,
+    explain: '"strategy":"IndexedLoopJoin" - the claim that $lookup has no strategy choice was wrong (see also the lookup lesson).',
+  },
+  {
+    q: 'One updateOne changes an embedded item quantity and the order status. Is it atomic?',
+    options: [
+      'Yes - writes are atomic at the single-document level, even when modifying multiple values',
+      'No - each field is a separate write',
+      'Only inside a transaction',
+      'Only with writeConcern majority',
+    ],
+    answer: 0,
+    explain: 'One updateOne, modified: 1: items.0.qty 3 -> 4 and status shipped -> returned together (MongoDB manual: single-document writes are atomic).',
   },
 ]
 
-<Quiz client:visible id="data-modeling/embedding-vs-referencing" questions={quizEmbedRef} />
+<Quiz client:visible id="data-modeling/embedding-vs-referencing" questions={quizEmbed} />
 
 <ProgressTracker client:visible id="data-modeling/embedding-vs-referencing" />
