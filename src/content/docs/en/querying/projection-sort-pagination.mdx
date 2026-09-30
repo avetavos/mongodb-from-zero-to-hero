@@ -1,6 +1,6 @@
 ---
 title: Projection, sort, and pagination
-description: Choose which fields come back with projection, order results with sort, page through them with limit and skip, iterate a cursor, and learn why large skips get slow.
+description: Choose which fields come back with projection, order results with sort (and why ties break pagination), page through them with limit and skip, iterate a cursor, and see - with 1M documents - why large skips get slow and range pagination does not.
 sidebar:
   order: 5
 ---
@@ -9,31 +9,79 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-A filter decides *which* documents come back. Three more controls decide what those documents look like on the way to your app: **projection** trims the fields, **sort** fixes the order, and **limit** with **skip** carves the result into pages. Together they keep you from dragging whole documents and whole collections across the network when you wanted a name and a page of ten. This lesson covers all four, and ends with the one pagination trick that quietly gets slow.
+A filter decides *which* documents come back. Three more controls decide what those documents look like on the way to your app: **projection** trims the fields, **sort** fixes the order, and **limit** with **skip** carves the result into pages. Together they keep you from dragging whole documents and whole collections across the network when you wanted a name and a page of ten. This lesson covers all four, proves the two ways pagination quietly goes wrong, and ends with the numbers behind range-based pagination.
 
-We are back to the simple library `members`, each with a `name`, `joined` year, and `fines`.
+We are back to the simple library `members`, each with a `name`, `joined` year, and `fines`. Every output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac (Python, Go and Rust tabs were each run once in a scratch program on the same server); timings are from single runs and only their proportions matter.
 
-## Projection: choosing fields
+## The data we query
 
-A projection is a second document passed to `find` that lists which fields to keep. Set a field to `1` to include it; everything you do not list is dropped — except `_id`, which is returned unless you explicitly exclude it with `0`. Here we want names and join years only, with no `_id`:
+The names are chosen to expose sorting rules (lowercase `alan` and `grace`), and several members share `fines` values (ties):
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find(
-      { fines: 0 },
-      { name: 1, joined: 1, _id: 0 }
-    )
+    // mongosh/psp-seed.js
+    db.members.insertMany([
+      { name: "Ada",      joined: 2024, fines: 0 },
+      { name: "grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Barbara",  joined: 2025, fines: 1 },
+      { name: "alan",     joined: 2020, fines: 1 },
+      { name: "Zed",      joined: 2026, fines: 0 },
+    ]);
+    globalThis.nm = (c) => c.toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 8);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      joined: 2024, fines: 0 },
+      { name: "grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Barbara",  joined: 2025, fines: 1 },
+      { name: "alan",     joined: 2020, fines: 1 },
+      { name: "Zed",      joined: 2026, fines: 0 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 8) throw new Error("expected 8");
+    ```
+  </TabItem>
+</Tabs>
+
+## Projection: choosing fields
+
+A projection is a second document passed to `find` that lists which fields to keep. Set a field to `1` to include it; everything you do not list is dropped - except `_id`, which is returned unless you explicitly exclude it with `0`. Here we want names and join years only, with no `_id`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/psp-projection.js
+    const docs = db.members.find(
+      { fines: 0 },
+      { name: 1, joined: 1, _id: 0 }
+    ).toArray();
+    console.log(docs);
+    assert.strictEqual(docs.length, 3);
+    assert.strictEqual("_id" in docs[0], false);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/psp-projection.mjs
     const docs = await db.collection("members")
       .find({ fines: 0 })
       .project({ name: 1, joined: 1, _id: 0 })
       .toArray();
+    console.log(docs);
+    if (docs.length !== 3 || "_id" in docs[0]) throw new Error("unexpected projection");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -69,14 +117,35 @@ A projection is a second document passed to `find` that lists which fields to ke
 
 Only the requested fields arrive, and `_id` is gone:
 
-```json
+```text
 [
-  { "name": "Margaret", "joined": 2023 },
-  { "name": "Ada", "joined": 2024 }
+  { name: 'Ada', joined: 2024 },
+  { name: 'Margaret', joined: 2023 },
+  { name: 'Zed', joined: 2026 }
 ]
 ```
 
-You may include fields or exclude them, but not mix the two in one projection — the only exception is excluding `_id` alongside an include list, as above.
+You may include fields or exclude them, but not mix the two in one projection - the only exception is excluding `_id` alongside an include list, as above. `{ name: 1, joined: 0 }` fails with `Cannot do exclusion on field joined in inclusion projection`. A projection can also *compute* values (`{ upper: { $toUpper: "$name" }, owes: { $gt: ["$fines", 0] } }` returned `{ name: 'Ada', upper: 'ADA', owes: false }`).
+
+### Inclusion versus exclusion: what leaks
+
+The old lesson warned that an exclusion projection "leaks" fields added later, without showing it. Here it is - a schema change after the query was written (`Extra` gains `internalNotes` and `cost`):
+
+```js
+// mongosh/psp-leak.js
+db.members.insertOne({ name: "Extra", joined: 2026, fines: 0, internalNotes: "secret", cost: 12 });
+console.log("exclusion projection { internalNotes: 0 }:", db.members.findOne({ name: "Extra" }, { _id: 0, internalNotes: 0 }));
+console.log("inclusion projection { name, joined }    :", db.members.findOne({ name: "Extra" }, { _id: 0, name: 1, joined: 1 }));
+assert.strictEqual("cost" in db.members.findOne({ name: "Extra" }, { internalNotes: 0 }), true);
+assert.strictEqual("cost" in db.members.findOne({ name: "Extra" }, { name: 1, joined: 1 }), false);
+```
+
+```text
+exclusion projection { internalNotes: 0 }: { name: 'Extra', joined: 2026, fines: 0, cost: 12 }
+inclusion projection { name, joined }    : { name: 'Extra', joined: 2026 }
+```
+
+The exclusion query hid the one field its author knew about and let `cost` walk out; the inclusion query returns exactly the two fields listed, forever.
 
 ## Sorting results
 
@@ -85,15 +154,23 @@ You may include fields or exclude them, but not mix the two in one projection �
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find().sort({ fines: -1 })
+    // mongosh/psp-sort.js
+    console.log("fines desc          :", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ fines: -1 })));
+    console.log("fines desc, name asc:", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ fines: -1, name: 1 })));
+    console.log("name asc (binary)   :", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 })));
+    console.log("name asc, en collation:", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 }).collation({ locale: "en" })));
+    assert.strictEqual(nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 })).split(", ")[6], "alan");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-sort.mjs
     const docs = await db.collection("members")
       .find()
       .sort({ fines: -1 })
       .toArray();
+    console.log(docs.map((d) => `${d.name}:${d.fines}`).join(" "));
+    if (docs[0].fines !== 5) throw new Error("highest fines should come first");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -124,15 +201,16 @@ You may include fields or exclude them, but not mix the two in one projection �
   </TabItem>
 </Tabs>
 
-The highest balances come first:
+The highest balances come first (Linus and Edsger tie at 5, so add a second key for a defined order), and the *default string sort is binary*: uppercase letters sort before lowercase, so `Zed` lands before `alan` and `grace`. Ask for a locale-aware order with a collation:
 
-```json
-[
-  { "name": "Linus", "joined": 2023, "fines": 5 },
-  { "name": "Grace", "joined": 2021, "fines": 3 },
-  { "name": "Margaret", "joined": 2023, "fines": 0 }
-]
+```text
+fines desc          : Linus, Edsger, grace, Barbara, alan, Ada, Margaret, Zed
+fines desc, name asc: Edsger, Linus, grace, Barbara, alan, Ada, Margaret, Zed
+name asc (binary)   : Ada, Barbara, Edsger, Linus, Margaret, Zed, alan, grace
+name asc, en collation: Ada, alan, Barbara, Edsger, grace, Linus, Margaret, Zed
 ```
+
+The first line's tie (Linus before Edsger) is what the server happened to return - it is *not* guaranteed, which matters as soon as you paginate (see the bug below).
 
 ## Pagination: limit and skip
 
@@ -141,20 +219,28 @@ The highest balances come first:
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find()
+    // mongosh/psp-page.js
+    const page2 = db.members.find({ name: { $ne: "Extra" } }, { name: 1 })
       .sort({ name: 1 })
       .skip(2)
-      .limit(2)
+      .limit(2);
+    console.log(nm(page2));
+    // the order you chain the methods does not matter:
+    console.log(nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).limit(2).sort({ name: 1 }).skip(2)));
+    assert.strictEqual(nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 }).skip(2).limit(2)), "Edsger, Linus");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-page.mjs
     const docs = await db.collection("members")
       .find()
       .sort({ name: 1 })
       .skip(2)
       .limit(2)
       .toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 2) throw new Error("expected a page of 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -192,18 +278,16 @@ The highest balances come first:
   </TabItem>
 </Tabs>
 
-You get the third and fourth members in name order — page two:
+You get the third and fourth members in name order - page two (`Edsger, Linus` in binary order). Chaining `.limit(2).sort(...).skip(2)` in any order returned the identical page, which is the next section's point:
 
-```json
-[
-  { "name": "Grace", "joined": 2021, "fines": 3 },
-  { "name": "Linus", "joined": 2023, "fines": 5 }
-]
+```text
+Edsger, Linus
+Edsger, Linus
 ```
 
 ## How the pieces combine
 
-The server applies these stages in a fixed order, regardless of the order you chained the methods: it filters first, then sorts the matches, then skips, then limits. Knowing the order explains why a sort is needed for stable pages and why a big skip is wasteful.
+The server applies these stages in a fixed order, regardless of the order you chained the methods (proved above): it filters first, then sorts the matches, then skips, then limits. Knowing the order explains why a sort is needed for stable pages and why a big skip is wasteful.
 
 export const pipelineDiagram = `flowchart LR
   C["Collection"] --> F["find filter"]
@@ -212,27 +296,35 @@ export const pipelineDiagram = `flowchart LR
   SK --> L["limit k"]
   L --> R["Cursor of k documents"]`
 
-<Mermaid code={pipelineDiagram} title="A read flows through find, then sort, then skip, then limit — in that order — before the cursor reaches you" />
+<Mermaid code={pipelineDiagram} title="A read flows through find, then sort, then skip, then limit - in that order - before the cursor reaches you" />
 
 ## Iterating a cursor
 
-`find` returns a **cursor**, not a list. The driver pulls documents in batches as you iterate, so you can stream a large result without loading it all into memory at once. Calling `toArray` (or its equivalent) simply drains the cursor for you:
+`find` returns a **cursor**, not a list. The driver pulls documents in batches as you iterate (see the find lesson for the round-trip counts), so you can stream a large result without loading it all into memory at once. Calling `toArray` (or its equivalent) simply drains the cursor for you:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    const cursor = db.members.find().sort({ name: 1 })
+    // mongosh/psp-cursor.js
+    const cursor = db.members.find({ name: { $ne: "Extra" } }).sort({ name: 1 })
+    const out = [];
     while (cursor.hasNext()) {
-      printjson(cursor.next())
+      out.push(cursor.next().name)
     }
+    console.log(out.join(", "));
+    assert.strictEqual(out.length, 8);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-cursor.mjs
     const cursor = db.collection("members").find().sort({ name: 1 });
+    let n = 0;
     for await (const doc of cursor) {
       console.log(doc.name);
+      n++;
     }
+    if (n !== 8) throw new Error("expected 8");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -268,51 +360,225 @@ export const pipelineDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-## Why a large skip is slow
-
-`skip(n)` does not jump to the nth document — the server must still *walk past* the first `n` matches before it can return anything. On page two that is trivial, but on page 5,000 the database churns through hundreds of thousands of documents only to throw them away. The fix is **range-based pagination**: instead of skipping, remember the last value you saw and ask for documents *after* it. To continue past the last member named "Linus", you would filter forward rather than skip:
-
-```js
-db.members.find({ name: { $gt: "Linus" } })
-  .sort({ name: 1 })
-  .limit(2)
+```text
+Ada, Barbara, Edsger, Linus, Margaret, Zed, alan, grace
 ```
 
-This always reads only the page you want, no matter how deep you are. We will return to range-based pagination and the indexes that make it fast in a later module — for now, just know that `skip` is fine for shallow pages and a problem for deep ones.
+(The shell example in the old lesson used `printjson`, which prints one multi-line block per document; `console.log` keeps output compact.)
 
-**In Compass:** the Documents tab has dedicated controls for all of this — a **Project** box for the field list, a **Sort** box for the order, and **skip/limit** inputs beside the filter bar, so you can build the whole query without writing the method chain by hand.
+## Why a large skip is slow
+
+`skip(n)` does not jump to the nth document - the server must still *walk past* the first `n` matches before it can return anything. On page two that is trivial, but on page 90,000 the database churns through 900,000 index entries only to throw them away. We measured it: 1 000 000 small documents, an index on `i`, and a page of 10 at four depths (single runs, `explain("executionStats")` for the work done):
+
+```js
+// app/psp-skip-cost.mjs
+const c = db.collection("events");
+const N = 1000000;
+for (let s = 0; s < N; s += 100000) {
+  await c.insertMany(Array.from({ length: 100000 }, (_, k) => ({ i: s + k, bucket: (s + k) % 10, pad: "x".repeat(20) })), { ordered: false });
+}
+await c.createIndex({ i: 1 });
+const keys = async (cur) => { const e = await cur.explain("executionStats"); return e.executionStats.totalKeysExamined; };
+const rows = [];
+for (const skip of [0, 1000, 100000, 900000]) {
+  const q = () => c.find().sort({ i: 1 }).skip(skip).limit(10);
+  const t = Date.now(); await q().toArray(); const ms = Date.now() - t;
+  rows.push({ page: `skip(${skip})`, ms, keysExamined: await keys(q()) });
+}
+const range = () => c.find({ i: { $gt: 900000 } }).sort({ i: 1 }).limit(10);
+const t = Date.now(); await range().toArray();
+rows.push({ page: "range i > 900000", ms: Date.now() - t, keysExamined: await keys(range()) });
+console.table(rows);
+if (rows[3].keysExamined < 900000 || rows[4].keysExamined > 20) throw new Error("unexpected skip cost");
+```
+
+```text
+┌─────────┬────────────────────┬─────┬──────────────┐
+│ (index) │ page               │ ms  │ keysExamined │
+├─────────┼────────────────────┼─────┼──────────────┤
+│ 0       │ 'skip(0)'          │ 6   │ 10           │
+│ 1       │ 'skip(1000)'       │ 1   │ 1010         │
+│ 2       │ 'skip(100000)'     │ 26  │ 100010       │
+│ 3       │ 'skip(900000)'     │ 252 │ 900010       │
+│ 4       │ 'range i > 900000' │ 3   │ 10           │
+└─────────┴────────────────────┴─────┴──────────────┘
+```
+
+The page always returned 10 documents, but the work grew with the offset: **900 010 index entries walked** to deliver the last page, against 10 for the same page reached by range. Timings vary from run to run (an earlier run gave 8, 2, 33, 239 and 1 ms), but the keys-examined column is exact. The fix is **range-based pagination**: instead of skipping, remember the last value you saw and ask for documents *after* it:
+
+```js
+// mongosh/psp-range.js
+const lastSeen = "Linus";                            // the last name the client received
+const next = db.members.find({ name: { $gt: lastSeen } }, { name: 1 })
+  .sort({ name: 1 })
+  .limit(2);
+const names = nm(next);
+console.log(names);
+assert.strictEqual(names, "Margaret, Zed");
+```
+
+```text
+Margaret, Zed
+```
+
+This always reads only the page you want, no matter how deep you are - provided the sort key is unique (or you add a unique tie-breaker, next section) and indexed. The cost is that you cannot jump to "page 37"; you get "next" and "previous".
+
+## Ties break pagination
+
+A sort on a field with duplicate values does not define an order among the duplicates. Between two page queries the server may order tied documents differently, so a document can appear on two pages and another on none. We paged 20 000 documents (`grade` cycles through 0 to 4, so every value has 4 000 ties) in 20 pages of 1 000:
+
+```js
+// app/psp-ties.mjs
+const c = db.collection("ties");
+await c.insertMany(Array.from({ length: 20000 }, (_, i) => ({ i, grade: i % 5 })));
+async function pages(sort) {
+  const seen = [];
+  for (let p = 0; p < 20; p++) {
+    (await c.find({}, { projection: { i: 1 } }).sort(sort).skip(p * 1000).limit(1000).toArray()).forEach((d) => seen.push(d.i));
+  }
+  const distinct = new Set(seen).size;
+  return { rows: seen.length, distinct, missing: 20000 - distinct };
+}
+const tied = await pages({ grade: 1 });
+const broken = await pages({ grade: 1, _id: 1 });
+await c.createIndex({ grade: 1 });
+const indexed = await pages({ grade: 1 });
+console.log("sort { grade: 1 } (ties, no index)   :", tied);
+console.log("sort { grade: 1, _id: 1 } (tie-break):", broken);
+console.log("sort { grade: 1 } (with index)       :", indexed);
+if (broken.missing !== 0) throw new Error("a unique tie-breaker must give exact pages");
+```
+
+```text
+sort { grade: 1 } (ties, no index)   : { rows: 20000, distinct: 15084, missing: 4916 }
+sort { grade: 1, _id: 1 } (tie-break): { rows: 20000, distinct: 20000, missing: 0 }
+sort { grade: 1 } (with index)       : { rows: 20000, distinct: 20000, missing: 0 }
+```
+
+Without a unique tie-breaker, **4 916 of 20 000 documents were never delivered** (and others were delivered twice) - with the right number of rows and no error. Adding `_id` as the last sort key fixed it completely. With an index the run happened to be exact too, but only because the index scan order is stable in this quiet case; do not depend on that.
+
+## Sorting large results: memory and disk
+
+A sort that no index can serve runs in memory. The default ceiling is `internalQueryMaxBlockingSortMemoryUsageBytes` = 100 MB (`104857600` on the course server, read with `getParameter`). Since MongoDB 6.0, `allowDiskUseByDefault: true` lets an over-limit sort **spill to disk** instead of failing. The old lesson said it "errors outright"; to see the truth we started a **throwaway** `mongod` with the ceiling lowered to 1 MB (`--setParameter`, never done on the shared harness server) and sorted a 5 MB collection:
+
+```js
+// mongosh/psp-sort-spill.js @skip-verify needs mongod started with --setParameter internalQueryMaxBlockingSortMemoryUsageBytes=1048576
+console.log(db.adminCommand({ getParameter: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 1, allowDiskUseByDefault: 1 }));
+db.docs.insertMany(Array.from({ length: 5000 }, (_, i) => ({ i, r: Math.random(), pad: "x".repeat(1000) })));
+console.log("collection size MB:", (db.docs.stats().size / 1048576).toFixed(1));
+let t = Date.now();
+console.log("default sort ->", db.docs.find({}, { i: 1 }).sort({ r: 1 }).toArray().length, "docs in", Date.now() - t, "ms");
+try { db.docs.find({}, { i: 1 }).sort({ r: 1 }).allowDiskUse(false).toArray(); } catch (e) { console.log(e.name, e.code, e.message); }
+const es = db.docs.find({}, { i: 1 }).sort({ r: 1 }).explain("executionStats").executionStats;
+const sortStage = (s) => (s.stage === "SORT" ? s : sortStage(s.inputStage));
+const st = sortStage(es.executionStages.queryPlan ?? es.executionStages);
+console.log("explain: SORT usedDisk:", st.usedDisk, "spills:", st.spills, "spilledRecords:", st.spilledRecords);
+db.docs.createIndex({ r: 1 });
+t = Date.now();
+console.log("with index on r:", db.docs.find({}, { i: 1 }).sort({ r: 1 }).allowDiskUse(false).toArray().length, "docs in", Date.now() - t, "ms, no error");
+```
+
+```text
+{
+  allowDiskUseByDefault: true,
+  internalQueryMaxBlockingSortMemoryUsageBytes: Long('1048576'),
+  ok: 1
+}
+collection size MB: 5.0
+default sort -> 5000 docs in 22 ms
+MongoServerError 292 Executor error during find command: test.docs :: caused by :: Sort exceeded memory limit of 1048576 bytes, but did not opt in to external sorting.
+explain: SORT usedDisk: true spills: 6 spilledRecords: 5000
+with index on r: 5000 docs in 16 ms, no error
+```
+
+So: by default the over-limit sort **succeeded by spilling** (`usedDisk: true`, 6 spills, 5 000 records); it errors only if you opt out with `.allowDiskUse(false)`; and an index on the sort key removes the sort stage altogether. A spilled sort is still slower than an indexed one, so back the sort key with an index as the collection grows.
+
+**In Compass:** the query bar's **Options** drop-down adds **Project**, **Sort**, **Limit** and **Skip** boxes beside **Filter**, so you can build the whole query without writing the method chain by hand (Compass documentation, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/), fetched 2026-09-30).
 
 ## Tips and gotchas
 
-- **Always sort before you page.** Without an explicit `sort`, the order of results is not guaranteed, so `skip`/`limit` can return overlapping or missing documents between pages. A stable sort on a unique-enough field is what makes pagination correct.
+- **Always sort before you page, and make the sort total.** Without a sort the order is undefined; with a non-unique sort key, pages can repeat or skip documents (4 916 missing above). Add `_id` (or another unique field) as the last sort key.
 - **`_id` is included unless you exclude it.** Add `_id: 0` to a projection when you do not want it; this is the one case where you may mix exclusion with an include list.
-- **Do not mix include and exclude** otherwise. A projection is either a list of fields to keep or a list to drop, not both.
-- **Large `skip` costs grow with the page number.** For deep pages, switch to range-based pagination on an indexed field, which reads only the documents you actually return.
+- **Do not mix include and exclude** otherwise (`Cannot do exclusion on field joined in inclusion projection`).
+- **Prefer inclusion projections for anything public.** The exclusion example leaked `cost`.
+- **Large `skip` costs grow with the offset** (900 010 keys for the last page); use range-based pagination on an indexed, unique key for deep or infinite-scroll pages.
+- **String sort is binary by default**: `Zed` before `alan`. Use a collation (`{ locale: "en" }`) for human-friendly order.
+- **The method-chain order is irrelevant**; the server always filters, sorts, skips, limits.
 
-<Callout title="Filter, sort, skip, limit — in that order">
-The server always applies a read in the same sequence: pick the matches, order them, drop the skipped prefix, then cap the count. Internalizing that order tells you why pages need a sort and why a deep skip pays for every document it walks past — the seed of range-based pagination.
+<Callout title="Filter, sort, skip, limit - in that order">
+The server always applies a read in the same sequence: pick the matches, order them, drop the skipped prefix, then cap the count. Internalizing that order tells you why pages need a total sort and why a deep skip pays for every document it walks past - the seed of range-based pagination.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant asked to "paginate the members list, 1 000 per page" will write the textbook version:
+
+<SpotTheBug lang="js" code={`// AI comment: "stable pagination: sort by grade, then skip/limit"
+async function getPage(db, page) {
+  return db.collection("members")
+    .find({})
+    .sort({ grade: 1 })
+    .skip(page * 1000)
+    .limit(1000)
+    .toArray();
+}`}>
+
+`grade` is not unique, so the order among equal grades is undefined and can differ from one page query to the next. In the run above, this exact pattern over 20 000 documents delivered the right number of rows (20 000) but only **15 084 distinct documents** - 4 916 members never appeared on any page, and others appeared on two. No error, no warning. The fix is a *total* order - add a unique key last:
+
+```js
+// app/psp-getpage-fix.mjs
+const c = db.collection("paged");
+await c.insertMany(Array.from({ length: 5000 }, (_, i) => ({ i, grade: i % 5 })));
+
+async function getPage(page) {
+  return c.find({}, { projection: { i: 1 } })
+    .sort({ grade: 1, _id: 1 })                 // grade, then a unique tie-breaker
+    .skip(page * 1000)
+    .limit(1000)
+    .toArray();
+}
+
+const seen = new Set();
+for (let p = 0; p < 5; p++) (await getPage(p)).forEach((d) => seen.add(d.i));
+console.log({ pages: 5, distinctDocuments: seen.size });
+if (seen.size !== 5000) throw new Error("every document should appear on exactly one page");
+```
+
+```text
+{ pages: 5, distinctDocuments: 5000 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A read is a small pipeline: **filter -> sort -> skip -> limit -> project**, with the cursor delivering the result in batches. Projection shapes each document, sort shapes the sequence, and skip/limit slice it. Every stage that has to look at documents it will not return (a deep skip, an unindexed sort) costs work proportional to what it discards. Pagination is only correct when the sort is a *total* order, and only cheap when the next page can be reached by a range on an indexed key.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Inclusion projection (`{ name: 1, joined: 1 }`) | Explicit control over which fields go out — safe for public responses | Must update the query every time a new field is needed |
-| Exclusion projection (`{ internalNotes: 0 }`) | Convenient, short to write, no need to list every wanted field | A new field added to the schema later leaks out automatically, unintentionally |
-| skip/limit pagination | Simple to write, fine for shallow pages and page-number UIs | `skip` must walk past every skipped document every time, getting slower with deeper pages |
-| Range/cursor-based pagination | Always reads only the documents you need, no matter how deep — scales well with large data | Cannot jump directly to page N; needs a sortable, indexed field |
+| Inclusion projection (`{ name: 1, joined: 1 }`) | Explicit control over which fields go out - safe for public responses | Must update the query every time a new field is needed |
+| Exclusion projection (`{ internalNotes: 0 }`) | Convenient, short to write, no need to list every wanted field | A field added to the schema later leaks out automatically (`cost` above) |
+| skip/limit pagination | Simple to write, fine for shallow pages and page-number UIs | `skip` walks past every skipped document: 900 010 keys for the last page of 1M; needs a total sort |
+| Range/cursor-based pagination | Always reads only the documents you need (10 keys, 1 ms) - scales with data | Cannot jump directly to page N; needs a sortable, indexed, unique-enough field |
+| Sort without an index | Works on any field | In-memory sort; over the ceiling it spills to disk (slower) or errors with `allowDiskUse(false)` |
+| Collation sort | Human-friendly, locale-aware order | Extra option on every query (and index) that must match |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using an exclusion projection for a public response and forgetting it automatically "leaks" new fields** — when the backend team later adds an internal field (like cost or an internal flag) to the schema, an existing exclusion projection sends it out immediately, unintentionally. Public APIs should use an inclusion projection for clearer control.
-- **Sorting on a field with no index on a large collection** — the server must do an in-memory sort, which has a 100 MB memory ceiling per sort; since MongoDB 6.0 it spills to disk instead of failing (`allowDiskUseByDefault`), but a spilled sort is much slower. Back the sort key with an index as the collection grows.
-- **Assuming `limit()` alone always makes a query fast** — without a good filter or index, the server still has to scan and sort a large number of documents before trimming down to what `limit` asked for. `limit` does not reduce the scan work, only how many results come back.
+- **"Chaining `.limit()` before `.sort()` limits first."** - the server applies filter, sort, skip, limit in fixed order; both chains returned the same page.
+- **"`skip/limit` paging is correct if you sort."** - only if the sort is total; with ties, 4 916 of 20 000 documents went missing.
+- **"An over-limit sort errors."** - since 6.0 it spills to disk by default; it errors only with `allowDiskUse(false)`.
+- **"`limit` makes a query cheap."** - it caps returned rows, not the scan; an unindexed sort still processes everything.
+- **"Exclusion projections are safe."** - a later schema change leaks fields.
+- **"Default string sort is alphabetical."** - it is binary: `Zed` before `alan`.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A social feed's infinite scroll** — uses cursor-based pagination on a field like a timestamp or `_id` instead of skip/limit, because users can keep scrolling deeper without letting the query get slower with page depth.
->
-> **A SaaS REST API exposing customer data** — always uses an inclusion projection for public endpoints, so internal fields like cost or an internal flag cannot leak out when the backend team adds new fields in the future.
+> The MongoDB manual's `cursor.skip()` reference itself warns that skip "requires the server to scan from the beginning of the input results set before beginning to return results. As the offset increases, `skip()` will become slower" and points to range queries for pagination ([cursor.skip](https://www.mongodb.com/docs/manual/reference/method/cursor.skip/), consulted 2026-09-30) - the pattern we measured at 900 010 keys.
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (projection, sort, skip/limit and cursor loops returned the same members) but they are not executed by the course's automated checker._
 
 export const quizPagination = [
   {
@@ -324,6 +590,7 @@ export const quizPagination = [
       'An error, because you cannot exclude _id',
     ],
     answer: 1,
+    explain: '_id is the one field you may exclude alongside an include list; the real run returned only { name, joined } per document.',
   },
   {
     q: 'What does sort({ fines: -1 }) do?',
@@ -334,26 +601,51 @@ export const quizPagination = [
       'Limits the result to one document',
     ],
     answer: 1,
+    explain: '-1 is descending; ties (Linus and Edsger both 5) have no defined order unless you add a second key.',
   },
   {
-    q: 'Why should you always sort before using skip and limit?',
+    q: 'You page 20 000 documents with sort({ grade: 1 }).skip(p*1000).limit(1000) and grade has many duplicates. What can happen?',
     options: [
-      'sort is required syntactically',
-      'Without a stable order, pages can overlap or miss documents',
-      'It makes skip free',
-      'It changes which fields are returned',
+      'Nothing - sort guarantees a stable order',
+      'Documents can be delivered twice or never (4 916 of 20 000 were missing in the run)',
+      'MongoDB raises an error for non-unique sorts',
+      'Only the first page is affected',
     ],
     answer: 1,
+    explain: 'Ties have no defined order between queries. Adding _id as the last sort key gave 20 000 distinct documents.',
   },
   {
     q: 'Why does a large skip(n) get slow?',
     options: [
       'It loads the whole collection into memory',
-      'The server must walk past the first n matches before returning any',
+      'The server must walk past the first n matches before returning any (900 010 keys for skip(900000))',
       'skip disables the sort',
       'It always scans every collection in the database',
     ],
     answer: 1,
+    explain: 'explain showed totalKeysExamined 900010 for the last page versus 10 for the same page fetched with a range filter.',
+  },
+  {
+    q: 'A sort that no index can serve exceeds the memory ceiling on MongoDB 8.x with default settings. What happens?',
+    options: [
+      'It always fails with a memory error',
+      'It spills to disk and succeeds (allowDiskUseByDefault); it errors only with allowDiskUse(false)',
+      'It silently returns a partial result',
+      'The server restarts',
+    ],
+    answer: 1,
+    explain: 'Throwaway mongod with a 1 MB ceiling: the default sort returned 5000 docs (usedDisk: true, 6 spills); allowDiskUse(false) gave "Sort exceeded memory limit of 1048576 bytes".',
+  },
+  {
+    q: 'Which projection is safer for a public API when the schema keeps growing?',
+    options: [
+      'Exclusion: { internalNotes: 0 }',
+      'Inclusion: { name: 1, joined: 1 }',
+      'Neither - projections cannot hide fields',
+      'Both are identical',
+    ],
+    answer: 1,
+    explain: 'The exclusion projection let a newly added cost field through; the inclusion projection returned only the listed fields.',
   },
 ]
 

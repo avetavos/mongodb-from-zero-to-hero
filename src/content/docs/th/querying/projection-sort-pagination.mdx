@@ -1,6 +1,6 @@
 ---
-title: Projection, sort และการแบ่งหน้า
-description: เลือกว่า field ไหนจะส่งกลับมาด้วย projection จัดลำดับผลลัพธ์ด้วย sort แบ่งหน้าด้วย limit และ skip วนซ้ำ cursor และเรียนรู้ว่าทำไม skip ขนาดใหญ่จึงช้า
+title: Projection, sort และ pagination
+description: เลือก field ที่ส่งกลับด้วย projection จัดลำดับด้วย sort (และทำไมค่าซ้ำทำให้ pagination พัง) แบ่งหน้าด้วย limit และ skip วน cursor และเห็นด้วย 1M document ว่าทำไม skip ใหญ่ ๆ ช้า แต่ range pagination ไม่ช้า
 sidebar:
   order: 5
 ---
@@ -9,31 +9,79 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-filter ตัดสินว่า document *ไหน* จะส่งกลับมา ตัวควบคุมอีกสามตัวตัดสินว่า document เหล่านั้นจะหน้าตาเป็นอย่างไรระหว่างทางมาถึงแอปของคุณ: **projection** ตัด field, **sort** กำหนดลำดับ และ **limit** กับ **skip** แบ่งผลลัพธ์ออกเป็นหน้า ใช้ร่วมกันแล้วคุณจะไม่ต้องลาก document ทั้งก้อนหรือทั้ง collection ข้ามเครือข่ายในเวลาที่คุณต้องการแค่ชื่อกับหนึ่งหน้าสิบรายการ บทเรียนนี้ครอบคลุมทั้งสี่ และจบด้วยลูกเล่นการแบ่งหน้าหนึ่งตัวที่ค่อย ๆ ช้าลงอย่างเงียบ ๆ
+filter ตัดสินว่า document *ไหน* จะกลับมา อีกสามตัวควบคุมว่า document เหล่านั้นหน้าตาอย่างไรระหว่างทางไปยังแอปของคุณ: **projection** ตัด field, **sort** กำหนดลำดับ และ **limit** กับ **skip** หั่นผลลัพธ์เป็นหน้า รวมกันแล้วช่วยไม่ให้คุณลากทั้ง document หรือทั้ง collection ข้ามเครือข่ายทั้งที่ต้องการแค่ชื่อและหนึ่งหน้าสิบรายการ บทนี้ครอบคลุมทั้งสี่ พิสูจน์สองวิธีที่ pagination เงียบ ๆ ผิดพลาด และปิดท้ายด้วยตัวเลขเบื้องหลัง range-based pagination
 
-เรากลับมาที่สมาชิกห้องสมุด `members` แบบง่าย แต่ละคนมี `name`, ปี `joined` และ `fines`
+เรากลับมาที่ `members` ง่าย ๆ ของห้องสมุด แต่ละคนมี `name`, ปี `joined` และ `fines` ทุก output ด้านล่างจับมาจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว (แท็บ Python, Go และ Rust รันหนึ่งครั้งในโปรแกรม scratch บน server เดียวกัน); เวลามาจากการรันครั้งเดียว มีความหมายเฉพาะสัดส่วน
 
-## Projection: การเลือก field
+## ข้อมูลที่เรา query
 
-projection คือ document ตัวที่สองที่ส่งให้ `find` ซึ่งระบุว่าจะเก็บ field ไหน ตั้ง field เป็น `1` เพื่อเอาติดมา ส่วนอะไรที่ไม่ได้ระบุจะถูกตัดทิ้งหมด — ยกเว้น `_id` ซึ่งจะส่งกลับมาเว้นแต่คุณจะกำหนดให้แยกออกอย่างชัดเจนด้วย `0` ตรงนี้เราต้องการเฉพาะชื่อกับปีที่เข้าร่วม โดยไม่เอา `_id`:
+ชื่อถูกเลือกให้เผยกฎการเรียง (`alan` และ `grace` ตัวพิมพ์เล็ก) และหลายสมาชิกมีค่า `fines` เท่ากัน (ค่าซ้ำ):
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find(
-      { fines: 0 },
-      { name: 1, joined: 1, _id: 0 }
-    )
+    // mongosh/psp-seed.js
+    db.members.insertMany([
+      { name: "Ada",      joined: 2024, fines: 0 },
+      { name: "grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Barbara",  joined: 2025, fines: 1 },
+      { name: "alan",     joined: 2020, fines: 1 },
+      { name: "Zed",      joined: 2026, fines: 0 },
+    ]);
+    globalThis.nm = (c) => c.toArray().map((d) => d.name).join(", ");
+    assert.strictEqual(db.members.countDocuments(), 8);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Ada",      joined: 2024, fines: 0 },
+      { name: "grace",    joined: 2021, fines: 3 },
+      { name: "Linus",    joined: 2023, fines: 5 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Barbara",  joined: 2025, fines: 1 },
+      { name: "alan",     joined: 2020, fines: 1 },
+      { name: "Zed",      joined: 2026, fines: 0 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 8) throw new Error("expected 8");
+    ```
+  </TabItem>
+</Tabs>
+
+## Projection: เลือก field
+
+projection คือ document ที่สองส่งให้ `find` ซึ่งระบุ field ที่จะเก็บ ตั้ง field เป็น `1` เพื่อรวมมัน ทุกอย่างที่ไม่ได้ระบุถูกทิ้ง — ยกเว้น `_id` ที่ถูกคืนเว้นแต่คุณยกเว้นอย่างชัดเจนด้วย `0` ที่นี่เราต้องการเฉพาะชื่อและปีที่เข้าร่วม โดยไม่มี `_id`:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/psp-projection.js
+    const docs = db.members.find(
+      { fines: 0 },
+      { name: 1, joined: 1, _id: 0 }
+    ).toArray();
+    console.log(docs);
+    assert.strictEqual(docs.length, 3);
+    assert.strictEqual("_id" in docs[0], false);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/psp-projection.mjs
     const docs = await db.collection("members")
       .find({ fines: 0 })
       .project({ name: 1, joined: 1, _id: 0 })
       .toArray();
+    console.log(docs);
+    if (docs.length !== 3 || "_id" in docs[0]) throw new Error("unexpected projection");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -67,33 +115,62 @@ projection คือ document ตัวที่สองที่ส่งใ�
   </TabItem>
 </Tabs>
 
-เฉพาะ field ที่ขอเท่านั้นที่มาถึง และ `_id` หายไป:
+มาถึงเฉพาะ field ที่ขอ และ `_id` หายไป:
 
-```json
+```text
 [
-  { "name": "Margaret", "joined": 2023 },
-  { "name": "Ada", "joined": 2024 }
+  { name: 'Ada', joined: 2024 },
+  { name: 'Margaret', joined: 2023 },
+  { name: 'Zed', joined: 2026 }
 ]
 ```
 
-คุณอาจรวม field หรือแยก field ออกได้ แต่ผสมทั้งสองใน projection เดียวไม่ได้ — ข้อยกเว้นเดียวคือการแยก `_id` ออกควบคู่ไปกับ list ที่รวม field ดังตัวอย่างข้างต้น
+คุณรวม field หรือยกเว้น field ได้ แต่ผสมสองอย่างใน projection เดียวไม่ได้ — ข้อยกเว้นเดียวคือการยกเว้น `_id` ควบคู่กับลิสต์ที่รวม ดังข้างบน `{ name: 1, joined: 0 }` ล้มเหลวด้วย `Cannot do exclusion on field joined in inclusion projection` projection ยัง *คำนวณ* ค่าได้ (`{ upper: { $toUpper: "$name" }, owes: { $gt: ["$fines", 0] } }` คืน `{ name: 'Ada', upper: 'ADA', owes: false }`)
 
-## การ sort ผลลัพธ์
+### รวมเทียบยกเว้น: อะไรรั่ว
 
-`sort` จัดลำดับผลลัพธ์ตาม field หนึ่งหรือมากกว่า: `1` คือจากน้อยไปมาก, `-1` คือจากมากไปน้อย เมื่อเสมอกันจะตัดสินด้วย key ที่คุณระบุทีหลัง ตรงนี้เราเรียงทุกคนจากค่าปรับมากที่สุดไปน้อยที่สุด:
+บทเก่าเตือนว่า exclusion projection "รั่ว" field ที่เพิ่มทีหลัง โดยไม่แสดง นี่คือมัน — การเปลี่ยน schema หลังเขียน query (`Extra` ได้ `internalNotes` และ `cost`):
+
+```js
+// mongosh/psp-leak.js
+db.members.insertOne({ name: "Extra", joined: 2026, fines: 0, internalNotes: "secret", cost: 12 });
+console.log("exclusion projection { internalNotes: 0 }:", db.members.findOne({ name: "Extra" }, { _id: 0, internalNotes: 0 }));
+console.log("inclusion projection { name, joined }    :", db.members.findOne({ name: "Extra" }, { _id: 0, name: 1, joined: 1 }));
+assert.strictEqual("cost" in db.members.findOne({ name: "Extra" }, { internalNotes: 0 }), true);
+assert.strictEqual("cost" in db.members.findOne({ name: "Extra" }, { name: 1, joined: 1 }), false);
+```
+
+```text
+exclusion projection { internalNotes: 0 }: { name: 'Extra', joined: 2026, fines: 0, cost: 12 }
+inclusion projection { name, joined }    : { name: 'Extra', joined: 2026 }
+```
+
+query แบบยกเว้นซ่อน field เดียวที่ผู้เขียนรู้และปล่อยให้ `cost` เดินออกไป; query แบบรวมคืนสอง field ที่ระบุพอดี ตลอดไป
+
+## การเรียงผลลัพธ์
+
+`sort` เรียงผลลัพธ์ตาม field หนึ่งหรือหลายตัว: `1` คือน้อยไปมาก `-1` คือมากไปน้อย ค่าเท่ากันถูกตัดสินด้วย key ตัวหลังที่คุณระบุ ที่นี่เราเรียงทุกคนจากค่าปรับมากสุดไปน้อยสุด:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find().sort({ fines: -1 })
+    // mongosh/psp-sort.js
+    console.log("fines desc          :", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ fines: -1 })));
+    console.log("fines desc, name asc:", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ fines: -1, name: 1 })));
+    console.log("name asc (binary)   :", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 })));
+    console.log("name asc, en collation:", nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 }).collation({ locale: "en" })));
+    assert.strictEqual(nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 })).split(", ")[6], "alan");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-sort.mjs
     const docs = await db.collection("members")
       .find()
       .sort({ fines: -1 })
       .toArray();
+    console.log(docs.map((d) => `${d.name}:${d.fines}`).join(" "));
+    if (docs[0].fines !== 5) throw new Error("highest fines should come first");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -124,37 +201,46 @@ projection คือ document ตัวที่สองที่ส่งใ�
   </TabItem>
 </Tabs>
 
-ยอดค้างสูงสุดมาก่อน:
+ยอดสูงสุดมาก่อน (Linus และ Edsger เสมอกันที่ 5 จึงเพิ่ม key ที่สองเพื่อให้ลำดับกำหนดได้) และ *การเรียง string เริ่มต้นเป็นแบบ binary*: ตัวพิมพ์ใหญ่มาก่อนตัวพิมพ์เล็ก `Zed` จึงมาก่อน `alan` และ `grace` ขอลำดับที่รู้จักภาษาด้วย collation:
 
-```json
-[
-  { "name": "Linus", "joined": 2023, "fines": 5 },
-  { "name": "Grace", "joined": 2021, "fines": 3 },
-  { "name": "Margaret", "joined": 2023, "fines": 0 }
-]
+```text
+fines desc          : Linus, Edsger, grace, Barbara, alan, Ada, Margaret, Zed
+fines desc, name asc: Edsger, Linus, grace, Barbara, alan, Ada, Margaret, Zed
+name asc (binary)   : Ada, Barbara, Edsger, Linus, Margaret, Zed, alan, grace
+name asc, en collation: Ada, alan, Barbara, Edsger, grace, Linus, Margaret, Zed
 ```
 
-## การแบ่งหน้า: limit และ skip
+การเสมอในบรรทัดแรก (Linus ก่อน Edsger) คือสิ่งที่ server บังเอิญคืนมา — *ไม่ได้* รับประกัน ซึ่งสำคัญทันทีที่คุณแบ่งหน้า (ดู bug ด้านล่าง)
 
-`limit` จำกัดจำนวน document ที่คุณได้รับ ส่วน `skip` ทิ้งจำนวนเท่านั้นจากด้านหน้าก่อน พอจับคู่กับ `sort` ที่เสถียร ก็ได้การแบ่งหน้าออกมา สำหรับหน้าที่สองที่มีสองรายการ เรียงตามชื่อ คุณ skip สองตัวแรกแล้วเอาสองตัว:
+## Pagination: limit และ skip
+
+`limit` จำกัดจำนวน document ที่ได้รับ; `skip` ทิ้งจำนวนนั้นจากด้านหน้าก่อน เมื่อรวมกับ `sort` ที่เสถียรก็ได้หน้า สำหรับหน้าที่สองขนาดสอง เรียงตามชื่อ คุณ skip สองแรกแล้วเอาสอง:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.find()
+    // mongosh/psp-page.js
+    const page2 = db.members.find({ name: { $ne: "Extra" } }, { name: 1 })
       .sort({ name: 1 })
       .skip(2)
-      .limit(2)
+      .limit(2);
+    console.log(nm(page2));
+    // the order you chain the methods does not matter:
+    console.log(nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).limit(2).sort({ name: 1 }).skip(2)));
+    assert.strictEqual(nm(db.members.find({ name: { $ne: "Extra" } }, { name: 1 }).sort({ name: 1 }).skip(2).limit(2)), "Edsger, Linus");
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-page.mjs
     const docs = await db.collection("members")
       .find()
       .sort({ name: 1 })
       .skip(2)
       .limit(2)
       .toArray();
+    console.log(docs.map((d) => d.name));
+    if (docs.length !== 2) throw new Error("expected a page of 2");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -192,18 +278,16 @@ projection คือ document ตัวที่สองที่ส่งใ�
   </TabItem>
 </Tabs>
 
-คุณจะได้สมาชิกคนที่สามและสี่ตามลำดับชื่อ — หน้าที่สอง:
+คุณได้สมาชิกลำดับสามและสี่ตามชื่อ — หน้าที่สอง (`Edsger, Linus` ในลำดับ binary) การต่อ `.limit(2).sort(...).skip(2)` ในลำดับใดก็ให้หน้าเดียวกัน ซึ่งเป็นประเด็นของหัวข้อถัดไป:
 
-```json
-[
-  { "name": "Grace", "joined": 2021, "fines": 3 },
-  { "name": "Linus", "joined": 2023, "fines": 5 }
-]
+```text
+Edsger, Linus
+Edsger, Linus
 ```
 
-## ชิ้นส่วนเหล่านี้ประกอบกันอย่างไร
+## ชิ้นส่วนรวมกันอย่างไร
 
-server ใช้ stage เหล่านี้ในลำดับที่ตายตัว ไม่ว่าคุณจะต่อ method เรียงยังไง คือ filter ก่อน แล้ว sort สิ่งที่ match แล้ว skip แล้วค่อย limit การรู้ลำดับนี้อธิบายว่าทำไมจึงต้องมี sort เพื่อหน้าที่เสถียร และทำไม skip ขนาดใหญ่จึงสิ้นเปลือง
+server ใช้ขั้นตอนเหล่านี้ตามลำดับตายตัว ไม่ว่าคุณจะต่อเมธอดในลำดับใด (พิสูจน์ด้านบน): กรองก่อน แล้วเรียงผลที่ตรง แล้ว skip แล้ว limit การรู้ลำดับอธิบายว่าทำไมต้องมี sort เพื่อให้หน้าเสถียร และทำไม skip ใหญ่ ๆ สิ้นเปลือง
 
 export const pipelineDiagram = `flowchart LR
   C["Collection"] --> F["find filter"]
@@ -212,27 +296,35 @@ export const pipelineDiagram = `flowchart LR
   SK --> L["limit k"]
   L --> R["Cursor of k documents"]`
 
-<Mermaid code={pipelineDiagram} title="การอ่านไหลผ่าน find แล้ว sort แล้ว skip แล้ว limit — ตามลำดับนั้น — ก่อนที่ cursor จะมาถึงคุณ" />
+<Mermaid code={pipelineDiagram} title="การอ่านไหลผ่าน find, sort, skip, limit — ตามลำดับนั้น — ก่อนที่ cursor จะถึงคุณ" />
 
-## การวนซ้ำ cursor
+## วน cursor
 
-`find` ส่งคืน **cursor** ไม่ใช่ list driver ดึง document มาทีละ batch ขณะที่คุณวนซ้ำ ดังนั้นคุณสามารถ stream ผลลัพธ์ก้อนใหญ่ได้โดยไม่ต้องโหลดทั้งหมดเข้า memory ในคราวเดียว การเรียก `toArray` (หรือสิ่งเทียบเท่า) เพียงแค่ดึง cursor ออกให้คุณจนหมด:
+`find` คืน **cursor** ไม่ใช่ list driver ดึง document เป็น batch ตามที่คุณวน (ดูจำนวน round trip ในบท find) คุณจึง stream ผลลัพธ์ใหญ่ได้โดยไม่ต้องโหลดทั้งหมดเข้าหน่วยความจำ การเรียก `toArray` (หรือเทียบเท่า) แค่ระบายทั้ง cursor ให้:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    const cursor = db.members.find().sort({ name: 1 })
+    // mongosh/psp-cursor.js
+    const cursor = db.members.find({ name: { $ne: "Extra" } }).sort({ name: 1 })
+    const out = [];
     while (cursor.hasNext()) {
-      printjson(cursor.next())
+      out.push(cursor.next().name)
     }
+    console.log(out.join(", "));
+    assert.strictEqual(out.length, 8);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/psp-cursor.mjs
     const cursor = db.collection("members").find().sort({ name: 1 });
+    let n = 0;
     for await (const doc of cursor) {
       console.log(doc.name);
+      n++;
     }
+    if (n !== 8) throw new Error("expected 8");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -268,92 +360,292 @@ export const pipelineDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-## ทำไม skip ขนาดใหญ่จึงช้า
-
-`skip(n)` ไม่ได้กระโดดไปยัง document ตัวที่ n — server ยังต้อง *เดินผ่าน* `n` ตัวที่ match ก่อน ถึงจะส่งอะไรกลับมาได้ หน้าที่สองยังไม่เท่าไร แต่ในหน้าที่ 5,000 ฐานข้อมูลต้องไถผ่าน document หลายแสนตัวเพียงเพื่อโยนทิ้ง วิธีแก้คือ **range-based pagination**: แทนที่จะ skip ให้จำค่าสุดท้ายที่เห็น แล้วขอ document *ถัดจากค่านั้น* หากต้องการไปต่อจากสมาชิกคนสุดท้ายชื่อ "Linus" คุณจะ filter ไปข้างหน้าแทนการ skip:
-
-```js
-db.members.find({ name: { $gt: "Linus" } })
-  .sort({ name: 1 })
-  .limit(2)
+```text
+Ada, Barbara, Edsger, Linus, Margaret, Zed, alan, grace
 ```
 
-วิธีนี้อ่านเฉพาะหน้าที่คุณต้องการเสมอ ไม่ว่าคุณจะลึกแค่ไหน เราจะกลับมาที่ range-based pagination และ index ที่ทำให้เร็วในโมดูลถัด ๆ ไป — สำหรับตอนนี้ แค่รู้ว่า `skip` ใช้ได้ดีกับหน้าตื้น ๆ และเป็นปัญหากับหน้าที่ลึก
+(ตัวอย่าง shell ในบทเก่าใช้ `printjson` ซึ่งพิมพ์บล็อกหลายบรรทัดต่อ document; `console.log` เก็บ output ให้กระชับ)
 
-**ใน Compass:** แท็บ Documents มีตัวควบคุมเฉพาะสำหรับทั้งหมดนี้ — กล่อง **Project** สำหรับรายชื่อ field, กล่อง **Sort** สำหรับลำดับ และช่อง **skip/limit** ข้างแถบ filter ดังนั้นคุณสร้าง query ทั้งก้อนได้โดยไม่ต้องเขียน method chain ด้วยมือ
+## ทำไม skip ใหญ่ ๆ ช้า
 
-## เคล็ดลับและจุดที่พลาดง่าย
+`skip(n)` ไม่ได้กระโดดไปยัง document ลำดับที่ n — server ยังต้อง *เดินผ่าน* n รายการแรกที่ตรงก่อนจะคืนอะไรได้ ที่หน้าที่สองไม่มีปัญหา แต่ที่หน้า 90,000 ฐานข้อมูลต้องเดิน 900,000 รายการใน index แล้วทิ้ง เราวัดแล้ว: document เล็ก ๆ 1 000 000 รายการ index บน `i` และหน้าละ 10 ที่สี่ความลึก (รันครั้งเดียว, `explain("executionStats")` สำหรับงานที่ทำ):
 
-- **sort ก่อนแบ่งหน้าเสมอ** หากไม่มี `sort` ที่ชัดเจน ลำดับของผลลัพธ์ไม่รับประกัน ดังนั้น `skip`/`limit` อาจส่ง document ที่ซ้ำหรือขาดหายระหว่างหน้า การ sort ที่เสถียรบน field ที่มีความเป็นเอกลักษณ์พอคือสิ่งที่ทำให้การแบ่งหน้าถูกต้อง
-- **`_id` ติดมาเสมอ เว้นแต่คุณจะตัดออกเอง** ใส่ `_id: 0` ลงใน projection เมื่อไม่ต้องการ นี่คือกรณีเดียวที่คุณอาจผสมการแยกออกกับ list ที่รวม field ได้
-- **อย่าผสมการรวมและการแยกออก** นอกเหนือจากนั้น projection คือ list ของ field ที่จะเก็บ หรือ list ที่จะทิ้ง ไม่ใช่ทั้งสอง
-- **ต้นทุนของ `skip` ขนาดใหญ่เพิ่มขึ้นตามหมายเลขหน้า** สำหรับหน้าที่ลึก ให้เปลี่ยนไปใช้ range-based pagination บน field ที่มี index ซึ่งอ่านเฉพาะ document ที่คุณส่งกลับจริง ๆ
+```js
+// app/psp-skip-cost.mjs
+const c = db.collection("events");
+const N = 1000000;
+for (let s = 0; s < N; s += 100000) {
+  await c.insertMany(Array.from({ length: 100000 }, (_, k) => ({ i: s + k, bucket: (s + k) % 10, pad: "x".repeat(20) })), { ordered: false });
+}
+await c.createIndex({ i: 1 });
+const keys = async (cur) => { const e = await cur.explain("executionStats"); return e.executionStats.totalKeysExamined; };
+const rows = [];
+for (const skip of [0, 1000, 100000, 900000]) {
+  const q = () => c.find().sort({ i: 1 }).skip(skip).limit(10);
+  const t = Date.now(); await q().toArray(); const ms = Date.now() - t;
+  rows.push({ page: `skip(${skip})`, ms, keysExamined: await keys(q()) });
+}
+const range = () => c.find({ i: { $gt: 900000 } }).sort({ i: 1 }).limit(10);
+const t = Date.now(); await range().toArray();
+rows.push({ page: "range i > 900000", ms: Date.now() - t, keysExamined: await keys(range()) });
+console.table(rows);
+if (rows[3].keysExamined < 900000 || rows[4].keysExamined > 20) throw new Error("unexpected skip cost");
+```
+
+```text
+┌─────────┬────────────────────┬─────┬──────────────┐
+│ (index) │ page               │ ms  │ keysExamined │
+├─────────┼────────────────────┼─────┼──────────────┤
+│ 0       │ 'skip(0)'          │ 6   │ 10           │
+│ 1       │ 'skip(1000)'       │ 1   │ 1010         │
+│ 2       │ 'skip(100000)'     │ 26  │ 100010       │
+│ 3       │ 'skip(900000)'     │ 252 │ 900010       │
+│ 4       │ 'range i > 900000' │ 3   │ 10           │
+└─────────┴────────────────────┴─────┴──────────────┘
+```
+
+หน้าคืน 10 document เสมอ แต่งานโตตาม offset: **เดิน 900 010 รายการใน index** เพื่อส่งหน้าสุดท้าย เทียบ 10 สำหรับหน้าเดียวกันที่ไปถึงด้วย range เวลาต่างกันไปในแต่ละรอบ (การรันก่อนหน้าให้ 8, 2, 33, 239 และ 1 ms) แต่คอลัมน์ keys-examined แน่นอน ทางแก้คือ **range-based pagination**: แทนที่จะ skip ให้จำค่าสุดท้ายที่เห็นแล้วขอ document *หลังจาก* นั้น:
+
+```js
+// mongosh/psp-range.js
+const lastSeen = "Linus";                            // the last name the client received
+const next = db.members.find({ name: { $gt: lastSeen } }, { name: 1 })
+  .sort({ name: 1 })
+  .limit(2);
+const names = nm(next);
+console.log(names);
+assert.strictEqual(names, "Margaret, Zed");
+```
+
+```text
+Margaret, Zed
+```
+
+วิธีนี้อ่านเฉพาะหน้าที่คุณต้องการเสมอ ไม่ว่าลึกแค่ไหน — โดยที่ sort key ไม่ซ้ำ (หรือคุณเพิ่ม tie-breaker ที่ไม่ซ้ำ หัวข้อถัดไป) และมี index ราคาคือคุณกระโดดไป "หน้า 37" ไม่ได้ คุณได้ "ถัดไป" และ "ก่อนหน้า"
+
+## ค่าซ้ำทำให้ pagination พัง
+
+การ sort บน field ที่มีค่าซ้ำไม่กำหนดลำดับระหว่างตัวซ้ำ ระหว่างสอง query ของหน้า server อาจเรียงตัวที่เสมอกันต่างกัน ทำให้ document ปรากฏสองหน้าและอีกอันไม่ปรากฏเลย เราแบ่งหน้า 20 000 document (`grade` วนจาก 0 ถึง 4 ทุกค่าจึงมี 4 000 ตัวเสมอ) เป็น 20 หน้าละ 1 000:
+
+```js
+// app/psp-ties.mjs
+const c = db.collection("ties");
+await c.insertMany(Array.from({ length: 20000 }, (_, i) => ({ i, grade: i % 5 })));
+async function pages(sort) {
+  const seen = [];
+  for (let p = 0; p < 20; p++) {
+    (await c.find({}, { projection: { i: 1 } }).sort(sort).skip(p * 1000).limit(1000).toArray()).forEach((d) => seen.push(d.i));
+  }
+  const distinct = new Set(seen).size;
+  return { rows: seen.length, distinct, missing: 20000 - distinct };
+}
+const tied = await pages({ grade: 1 });
+const broken = await pages({ grade: 1, _id: 1 });
+await c.createIndex({ grade: 1 });
+const indexed = await pages({ grade: 1 });
+console.log("sort { grade: 1 } (ties, no index)   :", tied);
+console.log("sort { grade: 1, _id: 1 } (tie-break):", broken);
+console.log("sort { grade: 1 } (with index)       :", indexed);
+if (broken.missing !== 0) throw new Error("a unique tie-breaker must give exact pages");
+```
+
+```text
+sort { grade: 1 } (ties, no index)   : { rows: 20000, distinct: 15084, missing: 4916 }
+sort { grade: 1, _id: 1 } (tie-break): { rows: 20000, distinct: 20000, missing: 0 }
+sort { grade: 1 } (with index)       : { rows: 20000, distinct: 20000, missing: 0 }
+```
+
+ถ้าไม่มี tie-breaker ที่ไม่ซ้ำ **4 916 จาก 20 000 document ไม่เคยถูกส่งเลย** (และอันอื่นถูกส่งสองครั้ง) — ด้วยจำนวนแถวที่ถูกต้องและไม่มี error การเพิ่ม `_id` เป็น key เรียงสุดท้ายแก้ได้ทั้งหมด เมื่อมี index การรันก็เกิดว่าแม่นเช่นกัน แต่เพียงเพราะลำดับการสแกน index เสถียรในกรณีเงียบนี้; อย่าพึ่งพา
+
+## การ sort ผลลัพธ์ใหญ่: หน่วยความจำและดิสก์
+
+sort ที่ไม่มี index ให้บริการทำงานในหน่วยความจำ เพดานเริ่มต้นคือ `internalQueryMaxBlockingSortMemoryUsageBytes` = 100 MB (`104857600` บน server ของคอร์ส อ่านด้วย `getParameter`) ตั้งแต่ MongoDB 6.0 `allowDiskUseByDefault: true` ให้ sort ที่เกินเพดาน **spill ลงดิสก์** แทนที่จะล้มเหลว บทเก่าบอกว่ามัน "error ทันที" เพื่อดูความจริง เราเริ่ม `mongod` **ชั่วคราว** ที่ลดเพดานเหลือ 1 MB (`--setParameter` ไม่ทำบน harness server ที่ใช้ร่วมกัน) แล้ว sort collection ขนาด 5 MB:
+
+```js
+// mongosh/psp-sort-spill.js @skip-verify needs mongod started with --setParameter internalQueryMaxBlockingSortMemoryUsageBytes=1048576
+console.log(db.adminCommand({ getParameter: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 1, allowDiskUseByDefault: 1 }));
+db.docs.insertMany(Array.from({ length: 5000 }, (_, i) => ({ i, r: Math.random(), pad: "x".repeat(1000) })));
+console.log("collection size MB:", (db.docs.stats().size / 1048576).toFixed(1));
+let t = Date.now();
+console.log("default sort ->", db.docs.find({}, { i: 1 }).sort({ r: 1 }).toArray().length, "docs in", Date.now() - t, "ms");
+try { db.docs.find({}, { i: 1 }).sort({ r: 1 }).allowDiskUse(false).toArray(); } catch (e) { console.log(e.name, e.code, e.message); }
+const es = db.docs.find({}, { i: 1 }).sort({ r: 1 }).explain("executionStats").executionStats;
+const sortStage = (s) => (s.stage === "SORT" ? s : sortStage(s.inputStage));
+const st = sortStage(es.executionStages.queryPlan ?? es.executionStages);
+console.log("explain: SORT usedDisk:", st.usedDisk, "spills:", st.spills, "spilledRecords:", st.spilledRecords);
+db.docs.createIndex({ r: 1 });
+t = Date.now();
+console.log("with index on r:", db.docs.find({}, { i: 1 }).sort({ r: 1 }).allowDiskUse(false).toArray().length, "docs in", Date.now() - t, "ms, no error");
+```
+
+```text
+{
+  allowDiskUseByDefault: true,
+  internalQueryMaxBlockingSortMemoryUsageBytes: Long('1048576'),
+  ok: 1
+}
+collection size MB: 5.0
+default sort -> 5000 docs in 22 ms
+MongoServerError 292 Executor error during find command: test.docs :: caused by :: Sort exceeded memory limit of 1048576 bytes, but did not opt in to external sorting.
+explain: SORT usedDisk: true spills: 6 spilledRecords: 5000
+with index on r: 5000 docs in 16 ms, no error
+```
+
+ดังนั้น: โดยค่าเริ่มต้น sort ที่เกินเพดาน **สำเร็จโดย spill** (`usedDisk: true`, 6 spill, 5 000 record); มันล้มเหลวเฉพาะเมื่อคุณ opt out ด้วย `.allowDiskUse(false)`; และ index บน sort key ลบขั้น sort ทิ้งเลย sort ที่ spill ยังช้ากว่า sort ที่มี index ดังนั้นให้มี index รองรับ sort key เมื่อ collection โตขึ้น
+
+**ใน Compass:** drop-down **Options** ของ query bar เพิ่มกล่อง **Project**, **Sort**, **Limit** และ **Skip** ข้าง **Filter** คุณจึงสร้าง query ทั้งหมดได้โดยไม่ต้องเขียน chain ของเมธอดเอง (เอกสาร Compass, [mongodb.com/docs/compass/current/query/filter](https://www.mongodb.com/docs/compass/current/query/filter/), เรียกอ่านเมื่อ 2026-09-30)
+
+## เคล็ดลับและข้อควรระวัง
+
+- **sort ก่อนแบ่งหน้าเสมอ และทำให้ sort เป็นลำดับสมบูรณ์** ถ้าไม่ sort ลำดับไม่ถูกกำหนด; ถ้า sort key ไม่ซ้ำไม่ได้ หน้าอาจซ้ำหรือข้าม document (ขาด 4 916 ด้านบน) เพิ่ม `_id` (หรือ field ที่ไม่ซ้ำ) เป็น key เรียงสุดท้าย
+- **`_id` ถูกรวมเว้นแต่คุณยกเว้น** เพิ่ม `_id: 0` ใน projection เมื่อไม่ต้องการ นี่เป็นกรณีเดียวที่ผสมการยกเว้นกับลิสต์ที่รวมได้
+- **อย่าผสมรวมกับยกเว้น** นอกจากนั้น (`Cannot do exclusion on field joined in inclusion projection`)
+- **ใช้ inclusion projection สำหรับทุกอย่างที่เป็น public** ตัวอย่าง exclusion รั่ว `cost`
+- **ต้นทุน `skip` ใหญ่โตตาม offset** (900 010 key สำหรับหน้าสุดท้าย); ใช้ range-based pagination บน key ที่ index และไม่ซ้ำสำหรับหน้าลึกหรือ infinite scroll
+- **การเรียง string เริ่มต้นเป็น binary**: `Zed` ก่อน `alan` ใช้ collation (`{ locale: "en" }`) เพื่อลำดับที่เป็นมิตร
+- **ลำดับการต่อเมธอดไม่สำคัญ**; server กรอง เรียง skip limit เสมอ
 
 <Callout title="Filter, sort, skip, limit — ตามลำดับนั้น">
-server ใช้การอ่านในลำดับเดิมเสมอ: เลือกสิ่งที่ตรง จัดลำดับ ทิ้งส่วนหน้าที่ถูก skip แล้วจำกัดจำนวน การซึมซับลำดับนั้นบอกคุณว่าทำไมหน้าจึงต้องมี sort และทำไม skip ที่ลึกจึงต้องจ่ายค่าทุก document ที่เดินผ่าน — นั่นคือเมล็ดพันธุ์ของ range-based pagination
+server ใช้การอ่านตามลำดับเดียวกันเสมอ: เลือกที่ตรง เรียง ทิ้งส่วนหน้าที่ข้าม แล้วจำกัดจำนวน ซึมซับลำดับนี้แล้วคุณจะรู้ว่าทำไมหน้าต้องมี sort ที่สมบูรณ์ และทำไม skip ลึก ๆ จ่ายทุก document ที่มันเดินผ่าน — เมล็ดพันธุ์ของ range-based pagination
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+ผู้ช่วย AI ที่ถูกขอ "แบ่งหน้ารายชื่อสมาชิก หน้าละ 1 000" จะเขียนเวอร์ชันตำรา:
+
+<SpotTheBug lang="js" code={`// AI comment: "stable pagination: sort by grade, then skip/limit"
+async function getPage(db, page) {
+  return db.collection("members")
+    .find({})
+    .sort({ grade: 1 })
+    .skip(page * 1000)
+    .limit(1000)
+    .toArray();
+}`}>
+
+`grade` ไม่ซ้ำ ลำดับระหว่าง grade เท่ากันจึงไม่ถูกกำหนดและอาจต่างกันระหว่าง query หน้าหนึ่งกับอีกหน้า ในการรันด้านบน รูปแบบนี้เมื่อรันบน 20 000 document ส่งจำนวนแถวถูก (20 000) แต่มีเพียง **15 084 document ที่ไม่ซ้ำ** — สมาชิก 4 916 คนไม่ปรากฏบนหน้าใดเลย และอีกหลายคนปรากฏสองหน้า ไม่มี error ไม่มีคำเตือน ทางแก้คือลำดับ *สมบูรณ์* — เพิ่ม key ที่ไม่ซ้ำไว้ท้ายสุด:
+
+```js
+// app/psp-getpage-fix.mjs
+const c = db.collection("paged");
+await c.insertMany(Array.from({ length: 5000 }, (_, i) => ({ i, grade: i % 5 })));
+
+async function getPage(page) {
+  return c.find({}, { projection: { i: 1 } })
+    .sort({ grade: 1, _id: 1 })                 // grade, then a unique tie-breaker
+    .skip(page * 1000)
+    .limit(1000)
+    .toArray();
+}
+
+const seen = new Set();
+for (let p = 0; p < 5; p++) (await getPage(p)).forEach((d) => seen.add(d.i));
+console.log({ pages: 5, distinctDocuments: seen.size });
+if (seen.size !== 5000) throw new Error("every document should appear on exactly one page");
+```
+
+```text
+{ pages: 5, distinctDocuments: 5000 }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+การอ่านคือ pipeline เล็ก ๆ: **filter -> sort -> skip -> limit -> project** โดย cursor ส่งผลลัพธ์เป็น batch projection ปั้นแต่ละ document, sort ปั้นลำดับ, และ skip/limit หั่น ทุกขั้นที่ต้องมอง document ที่จะไม่คืน (skip ลึก, sort ที่ไม่มี index) มีต้นทุนตามสัดส่วนของสิ่งที่ทิ้ง pagination ถูกต้องเมื่อ sort เป็นลำดับ *สมบูรณ์* เท่านั้น และถูกเมื่อหน้าถัดไปไปถึงได้ด้วย range บน key ที่มี index เท่านั้น
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| inclusion projection (`{ name: 1, joined: 1 }`) | ควบคุมชัดเจนว่า field ไหนออกไป ปลอดภัยสำหรับ response สาธารณะ | ต้องแก้ query ทุกครั้งที่ต้องการ field ใหม่ |
-| exclusion projection (`{ internalNotes: 0 }`) | สะดวก เขียนสั้น ไม่ต้อง list field ที่ต้องการทั้งหมด | field ใหม่ที่เพิ่มเข้า schema ทีหลังจะหลุดออกไปเองโดยไม่ตั้งใจ |
-| skip/limit pagination | เขียนง่าย เหมาะกับหน้าตื้น ๆ และ UI แบบเลขหน้า | skip ต้องเดินผ่าน document ที่ถูกข้ามทุกครั้ง ช้าลงเรื่อย ๆ เมื่อหน้าลึกขึ้น |
-| range/cursor-based pagination | อ่านเฉพาะ document ที่ต้องการเสมอ ไม่ว่าจะลึกแค่ไหน scale ได้ดีกับข้อมูลใหญ่ | กระโดดไปหน้า N ตรง ๆ ไม่ได้ ต้องมี field ที่ sort ได้และมี index รองรับ |
+| Inclusion projection (`{ name: 1, joined: 1 }`) | ควบคุม field ที่ออกไปอย่างชัดเจน — ปลอดภัยสำหรับ response สาธารณะ | ต้องอัปเดต query ทุกครั้งที่ต้องการ field ใหม่ |
+| Exclusion projection (`{ internalNotes: 0 }`) | สะดวก เขียนสั้น ไม่ต้องลิสต์ทุก field ที่ต้องการ | field ที่เพิ่มใน schema ภายหลังรั่วออกไปอัตโนมัติ (`cost` ด้านบน) |
+| pagination แบบ skip/limit | เขียนง่าย เหมาะกับหน้าตื้นและ UI แบบเลขหน้า | `skip` เดินผ่านทุก document ที่ข้าม: 900 010 key สำหรับหน้าสุดท้ายของ 1M; ต้องมี sort สมบูรณ์ |
+| pagination แบบ range/cursor | อ่านเฉพาะ document ที่ต้องการเสมอ (10 key, 1 ms) — สเกลตามข้อมูล | กระโดดไปหน้า N ตรง ๆ ไม่ได้; ต้องการ field ที่เรียงได้ มี index และไม่ซ้ำพอ |
+| sort โดยไม่มี index | ใช้ได้กับทุก field | sort ในหน่วยความจำ; เกินเพดานจะ spill ลงดิสก์ (ช้า) หรือ error ด้วย `allowDiskUse(false)` |
+| sort ด้วย collation | ลำดับที่เป็นมิตรตามภาษา | option เพิ่มในทุก query (และ index) ที่ต้องตรงกัน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ exclusion projection สำหรับ response สาธารณะแล้วลืมว่าวิธีนี้จะ "รั่ว" field ใหม่ออกไปให้อัตโนมัติ** — เมื่อทีม backend เพิ่ม field ภายใน (เช่น cost หรือ flag ภายใน) เข้า schema ทีหลัง exclusion projection ที่เขียนไว้เดิมจะส่ง field นั้นออกไปทันทีโดยไม่มีใครตั้งใจ สำหรับ API สาธารณะควรใช้ inclusion projection เพื่อควบคุมชัดเจนกว่า
-- **sort บน field ที่ไม่มี index กับ collection ขนาดใหญ่** — server ต้องทำ in-memory sort ซึ่งมีเพดานหน่วยความจำ 100 MB ต่อการ sort ตั้งแต่ MongoDB 6.0 ถ้าเกินจะ spill ลง disk แทนที่จะ fail (`allowDiskUseByDefault`) แต่ช้าลงมาก ต้องมี index รองรับ sort key เมื่อ collection โตขึ้น
-- **คิดว่า `limit()` เพียงอย่างเดียวทำให้ query เร็วเสมอ** — ถ้าไม่มี filter หรือ index ที่ดี server ยังต้องสแกนและ sort document จำนวนมากก่อนจะตัดเหลือแค่จำนวนที่ `limit` ขอ `limit` ไม่ได้ลดงานสแกน แค่ตัดจำนวนที่ส่งกลับมาเท่านั้น
+- **"ต่อ `.limit()` ก่อน `.sort()` แปลว่า limit ก่อน"** — server ใช้ filter, sort, skip, limit ตามลำดับตายตัว; ทั้งสอง chain คืนหน้าเดียวกัน
+- **"แบ่งหน้าด้วย skip/limit ถูกต้องถ้า sort"** — ก็ต่อเมื่อ sort สมบูรณ์; เมื่อมีค่าซ้ำ 4 916 จาก 20 000 document หายไป
+- **"sort ที่เกินเพดาน error"** — ตั้งแต่ 6.0 spill ลงดิสก์เป็นค่าเริ่มต้น; error เฉพาะกับ `allowDiskUse(false)`
+- **"`limit` ทำให้ query ถูก"** — มันจำกัดแถวที่คืน ไม่ใช่การสแกน; sort ที่ไม่มี index ยังประมวลผลทั้งหมด
+- **"Exclusion projection ปลอดภัย"** — การเปลี่ยน schema ภายหลังทำให้ field รั่ว
+- **"การเรียง string เริ่มต้นเป็นตามตัวอักษร"** — เป็น binary: `Zed` ก่อน `alan`
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **Infinite scroll ของ social feed** — ใช้ cursor-based pagination ด้วย field เช่น timestamp หรือ `_id` แทน skip/limit เพราะผู้ใช้เลื่อนลึกได้เรื่อย ๆ โดยไม่ยอมให้ query ช้าลงตามความลึกของหน้า
->
-> **REST API ของ SaaS ที่ expose ข้อมูลลูกค้า** — ใช้ inclusion projection เสมอสำหรับ endpoint สาธารณะ เพื่อไม่ให้ field ภายใน เช่น cost หรือ internal flag รั่วไหลออกไปเมื่อทีม backend เพิ่ม field ใหม่ในอนาคต
+> reference ของ `cursor.skip()` ในคู่มือ MongoDB เตือนเองว่า skip "requires the server to scan from the beginning of the input results set before beginning to return results. As the offset increases, `skip()` will become slower" และชี้ไปยัง range query สำหรับ pagination ([cursor.skip](https://www.mongodb.com/docs/manual/reference/method/cursor.skip/), เรียกอ่านเมื่อ 2026-09-30) — รูปแบบที่เราวัดได้ 900 010 key
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (projection, sort, skip/limit และ loop ของ cursor คืนสมาชิกชุดเดียวกัน) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizPagination = [
   {
-    q: 'ใน projection { name: 1, _id: 0 } ส่งกลับอะไร?',
+    q: 'ใน projection, { name: 1, _id: 0 } คืนอะไร?',
     options: [
       'ทุก field ยกเว้น name',
-      'เฉพาะ field name โดยตัด _id ออก',
+      'เฉพาะ field name โดย _id ถูกกดไว้',
       'name บวก _id',
-      'error เพราะคุณแยก _id ออกไม่ได้',
+      'error เพราะยกเว้น _id ไม่ได้',
     ],
     answer: 1,
+    explain: '_id เป็น field เดียวที่ยกเว้นควบคู่กับลิสต์ที่รวมได้; การรันจริงคืนเฉพาะ { name, joined } ต่อ document',
   },
   {
     q: 'sort({ fines: -1 }) ทำอะไร?',
     options: [
-      'ส่งกลับเฉพาะ document ที่ fines ติดลบ',
-      'จัดลำดับผลลัพธ์ตาม fines สูงสุดก่อน (จากมากไปน้อย)',
-      'จัดลำดับผลลัพธ์ตาม fines ต่ำสุดก่อน (จากน้อยไปมาก)',
-      'จำกัดผลลัพธ์ให้เหลือหนึ่ง document',
+      'คืนเฉพาะ document ที่ fines ติดลบ',
+      'เรียงผลลัพธ์ตาม fines จากมากไปน้อย',
+      'เรียงผลลัพธ์ตาม fines จากน้อยไปมาก',
+      'จำกัดผลลัพธ์เหลือ document เดียว',
     ],
     answer: 1,
+    explain: '-1 คือมากไปน้อย; ตัวที่เสมอกัน (Linus และ Edsger ทั้งคู่ 5) ไม่มีลำดับกำหนดถ้าไม่เพิ่ม key ที่สอง',
   },
   {
-    q: 'ทำไมคุณจึงควร sort ก่อนใช้ skip และ limit เสมอ?',
+    q: 'คุณแบ่งหน้า 20 000 document ด้วย sort({ grade: 1 }).skip(p*1000).limit(1000) และ grade มีค่าซ้ำมาก อะไรเกิดขึ้นได้?',
     options: [
-      'sort จำเป็นทาง syntax',
-      'หากไม่มีลำดับที่เสถียร หน้าอาจซ้อนกันหรือ document หายไป',
-      'ทำให้ skip ไม่มีต้นทุน',
-      'เปลี่ยนว่าจะส่ง field ไหนกลับมา',
+      'ไม่มีอะไร — sort รับประกันลำดับเสถียร',
+      'document ถูกส่งสองครั้งหรือไม่ถูกส่งเลย (ขาด 4 916 จาก 20 000 ในการรัน)',
+      'MongoDB โยน error สำหรับ sort ที่ไม่ซ้ำ',
+      'กระทบเฉพาะหน้าแรก',
     ],
     answer: 1,
+    explain: 'ตัวที่เสมอกันไม่มีลำดับกำหนดระหว่าง query การเพิ่ม _id เป็น key เรียงสุดท้ายให้ 20 000 document ที่ไม่ซ้ำ',
   },
   {
-    q: 'ทำไม skip(n) ขนาดใหญ่จึงช้า?',
+    q: 'ทำไม skip(n) ใหญ่ ๆ จึงช้า?',
     options: [
-      'โหลด collection ทั้งก้อนเข้า memory',
-      ' server ต้องเดินผ่าน n ตัวแรกที่ตรงก่อนจึงจะส่งอะไรกลับได้',
+      'มันโหลดทั้ง collection เข้าหน่วยความจำ',
+      'server ต้องเดินผ่าน n รายการแรกที่ตรงก่อนคืนอะไร (900 010 key สำหรับ skip(900000))',
       'skip ปิดการ sort',
-      'สแกนทุก collection ในฐานข้อมูลเสมอ',
+      'มันสแกนทุก collection ใน database เสมอ',
     ],
     answer: 1,
+    explain: 'explain แสดง totalKeysExamined 900010 สำหรับหน้าสุดท้าย เทียบ 10 สำหรับหน้าเดียวกันที่ดึงด้วย range filter',
+  },
+  {
+    q: 'sort ที่ไม่มี index รองรับเกินเพดานหน่วยความจำบน MongoDB 8.x ด้วยค่าเริ่มต้น เกิดอะไรขึ้น?',
+    options: [
+      'ล้มเหลวด้วย memory error เสมอ',
+      'spill ลงดิสก์และสำเร็จ (allowDiskUseByDefault); error เฉพาะกับ allowDiskUse(false)',
+      'คืนผลลัพธ์บางส่วนอย่างเงียบ ๆ',
+      'server restart',
+    ],
+    answer: 1,
+    explain: 'mongod ชั่วคราวที่เพดาน 1 MB: sort เริ่มต้นคืน 5000 doc (usedDisk: true, 6 spill); allowDiskUse(false) ให้ "Sort exceeded memory limit of 1048576 bytes"',
+  },
+  {
+    q: 'projection แบบใดปลอดภัยกว่าสำหรับ API สาธารณะเมื่อ schema โตต่อเนื่อง?',
+    options: [
+      'Exclusion: { internalNotes: 0 }',
+      'Inclusion: { name: 1, joined: 1 }',
+      'ไม่มี — projection ซ่อน field ไม่ได้',
+      'เหมือนกันทั้งคู่',
+    ],
+    answer: 1,
+    explain: 'exclusion projection ปล่อย field cost ที่เพิ่งเพิ่มผ่านไป; inclusion projection คืนเฉพาะ field ที่ระบุ',
   },
 ]
 
