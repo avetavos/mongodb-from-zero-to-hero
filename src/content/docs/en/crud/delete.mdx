@@ -1,6 +1,6 @@
 ---
 title: Deleting documents
-description: Remove documents with deleteOne and deleteMany, read deletedCount, and weigh the soft-delete alternative.
+description: Remove documents with deleteOne and deleteMany, read deletedCount, understand what an empty filter really does in the shell and in drivers, and weigh soft delete and TTL against a hard delete.
 sidebar:
   order: 5
 ---
@@ -8,26 +8,69 @@ sidebar:
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-Deleting is the operation with the least syntax and the highest stakes. There are no operators to learn — you hand MongoDB a filter, and it removes the documents that match. The whole skill is in the filter: a delete is only as precise as the conditions you give it, and an over-broad filter erases data you meant to keep. The good news is that the methods mirror everything you already know: `deleteOne` removes the first match, `deleteMany` removes every match.
+Deleting is the operation with the least syntax and the highest stakes. There are no operators to learn - you hand MongoDB a filter, and it removes the documents that match. The whole skill is in the filter: a delete is only as precise as the conditions you give it, and an over-broad filter erases data you meant to keep. The good news is that the methods mirror everything you already know: `deleteOne` removes one match, `deleteMany` removes every match.
 
-We continue with the `members` collection. Each example shows what the filter selects and what the acknowledgement reports.
+We continue with the `members` collection. Each example shows what the filter selects and what the acknowledgement reports. Every output was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 (the Python, Go and Rust tabs were each run once in a scratch program on the same server).
 
-## Deleting a single document
+## The data we delete
 
-`deleteOne` removes the **first** document that matches the filter and stops, even if others would have matched too. That singular-method safety rail is exactly why you reach for it when you intend to remove one specific record. Here we remove the member named Edsger:
+Each lesson seeds its own data:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.deleteOne({ name: "Edsger" })
+    // mongosh/delete-seed.js
+    db.members.insertMany([
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Linus",    joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Grace",    joined: 2024, fines: 0 },
+      { name: "Barbara",  joined: 2023, fines: 1 },
+    ]);
+    assert.strictEqual(db.members.countDocuments(), 5);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/delete-seed.mjs
+    await db.collection("members").insertMany([
+      { name: "Edsger",   joined: 2022, fines: 5 },
+      { name: "Linus",    joined: 2023, fines: 2 },
+      { name: "Margaret", joined: 2023, fines: 0 },
+      { name: "Grace",    joined: 2024, fines: 0 },
+      { name: "Barbara",  joined: 2023, fines: 1 },
+    ]);
+    if ((await db.collection("members").countDocuments()) !== 5) throw new Error("expected 5");
+    ```
+  </TabItem>
+</Tabs>
+
+## Deleting a single document
+
+`deleteOne` removes **one** document that matches the filter and stops, even if others would have matched too. That singular-method safety rail is exactly why you reach for it when you intend to remove one specific record. Here we remove the member named Edsger:
+
+<Tabs syncKey="lang">
+  <TabItem label="mongosh">
+    ```js
+    // mongosh/delete-one.js
+    const res = db.members.deleteOne({ name: "Edsger" });
+    console.log(res);
+    console.log(db.members.deleteOne({ name: "Nobody" }));          // no match
+    const many = db.members.deleteOne({ joined: 2023 });            // 3 members match...
+    console.log(many.deletedCount, db.members.countDocuments({ joined: 2023 }));   // ...only one goes
+    assert.strictEqual(res.deletedCount, 1);
+    assert.strictEqual(db.members.countDocuments({ joined: 2023 }), 2);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    // app/delete-one.mjs
     const res = await db.collection("members").deleteOne({ name: "Edsger" });
     console.log(res.deletedCount);
+    if (res.deletedCount !== 1) throw new Error("expected 1 deleted");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -53,36 +96,39 @@ We continue with the `members` collection. Each example shows what the filter se
   </TabItem>
 </Tabs>
 
-The acknowledgement reports how many documents were removed:
+The acknowledgement reports how many documents were removed. If the filter matches nothing, that is not an error - `deletedCount` is simply `0`. And with three 2023 members matching, `deleteOne` removed exactly one:
 
-```json
-{ "acknowledged": true, "deletedCount": 1 }
+```text
+{ acknowledged: true, deletedCount: 1 }
+{ acknowledged: true, deletedCount: 0 }
+1 2
 ```
 
-If the filter matches nothing, that is not an error — `deletedCount` is simply `0`:
-
-```json
-{ "acknowledged": true, "deletedCount": 0 }
-```
+(The last line is `many.deletedCount` = 1 and the 2023 members left = 2. Which of the matching documents goes is not specified - do not rely on it; filter by `_id` when it must be one particular record.)
 
 **In Compass:** hover over a document in the Documents tab and click the trash-can icon, then confirm; Compass deletes that single document.
 
 ## Deleting many at once
 
-`deleteMany` removes **every** document matching the filter in one operation. Here we purge everyone who joined before 2024 — note how the filter does the precision work:
+`deleteMany` removes **every** document matching the filter in one operation. Here we purge everyone who joined before 2024 - note how the filter does the precision work:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.deleteMany({ joined: { $lt: 2024 } })
+    // mongosh/delete-many.js
+    const res = db.members.deleteMany({ joined: { $lt: 2024 } });
+    console.log(res);
+    assert.strictEqual(db.members.countDocuments(), 1);   // only Grace (joined 2024) is left
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/delete-many.mjs
     const res = await db
       .collection("members")
       .deleteMany({ joined: { $lt: 2024 } });
     console.log(res.deletedCount);
+    if (res.deletedCount !== 3) throw new Error("expected 3 deleted");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -108,31 +154,96 @@ If the filter matches nothing, that is not an error — `deletedCount` is simply
   </TabItem>
 </Tabs>
 
-The count reflects every document that the filter swept up:
+The count reflects every document that the filter swept up (the shell printed `{ acknowledged: true, deletedCount: 2 }` here because one 2023 member had already gone in the `deleteOne` example above; a fresh run in Node, Python, Go and Rust reported `3` for the five-member seed minus Edsger).
 
-```json
-{ "acknowledged": true, "deletedCount": 2 }
+## The empty filter
+
+`deleteMany({})` matches every document. It is the single most dangerous CRUD call, and the surprises are in how each client treats a *missing* filter. We ran all of these on scratch data:
+
+```js
+// mongosh/delete-empty-filter.js
+db.scratch.insertMany([{ name: "Ada" }, { name: "Grace" }]);
+db.scratch.createIndex({ name: 1 });
+
+let missing;
+try { db.scratch.deleteMany(); } catch (e) { missing = e; }            // no argument at all
+console.log(missing.name + ": " + missing.message);
+console.log(db.scratch.countDocuments());                               // still 2
+
+const res = db.scratch.deleteMany({});                                  // explicit empty filter
+console.log(res, db.scratch.countDocuments());
+console.log("collection still exists:", db.getCollectionNames().includes("scratch"));
+console.log("indexes still there:", db.scratch.getIndexes().map((i) => i.name));
+
+db.scratch.drop();
+console.log("after drop, collection exists:", db.getCollectionNames().includes("scratch"));
+assert.strictEqual(db.scratch.countDocuments(), 0);
 ```
+
+```text
+MongoshInvalidInputError: [COMMON-10001] Missing required argument at position 0 (Collection.deleteMany)
+2
+{ acknowledged: true, deletedCount: 2 } 0
+collection still exists: true
+indexes still there: [ '_id_', 'name_1' ]
+after drop, collection exists: false
+```
+
+So in **mongosh** `deleteMany()` with no argument is refused, and `deleteMany({})` empties the collection but keeps it and its indexes; `drop()` removes the collection and indexes too. The **Node driver is less forgiving**:
+
+```js
+// app/delete-empty-filter.mjs
+const c = db.collection("scratch");
+await c.insertMany([{ a: 1 }, { a: 2 }]);
+const noFilter = await c.deleteMany();                     // no argument
+console.log("deleteMany():", noFilter, "left:", await c.countDocuments());
+
+await c.insertMany([{ a: 1 }, { a: 2 }, { b: 3 }]);
+const undef = await c.deleteMany({ a: undefined });        // an undefined value inside the filter
+console.log("deleteMany({ a: undefined }):", undef.deletedCount, "left:", await c.countDocuments());
+if (noFilter.deletedCount !== 2) throw new Error("expected deleteMany() to delete everything");
+```
+
+```text
+deleteMany(): { acknowledged: true, deletedCount: 2 } left: 0
+deleteMany({ a: undefined }): 1 left: 2
+```
+
+In Node, **`deleteMany()` with no argument deleted both documents** - the driver defaults the filter to `{}` - while mongosh raises an error. And `{ a: undefined }` is serialised as `{ a: null }`, which matches documents where `a` is null **or missing**: it deleted `{ b: 3 }` and left the two documents that do have an `a`. Both are how unset variables turn into data loss.
+
+Emptying is also slower than dropping. On 200 000 documents (with one index) on this Mac: `deleteMany({})` took **1001 ms**, `drop()` took **3 ms**. If you truly want the collection gone and can recreate its indexes, drop it.
 
 ## The soft-delete alternative
 
-Sometimes a hard delete is the wrong choice: you may need an audit trail, the ability to undo, or to keep historical reports accurate. The common pattern is a **soft delete** — instead of removing the document, you mark it with a flag (and often a timestamp) using an update, then exclude flagged documents from your normal reads.
+Sometimes a hard delete is the wrong choice: you may need an audit trail, the ability to undo, or to keep historical reports accurate. The common pattern is a **soft delete** - instead of removing the document, you mark it with a flag (and often a timestamp) using an update, then exclude flagged documents from your normal reads.
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.updateOne(
+    // mongosh/delete-soft.js
+    db.softies.insertMany([{ name: "Ada" }, { name: "Linus" }, { name: "Grace" }]);
+    db.softies.updateOne(
       { name: "Linus" },
       { $set: { deleted: true, deletedAt: new Date() } }
-    )
+    );
+    console.log("no filter      :", db.softies.find({}, { _id: 0, name: 1 }).toArray());
+    console.log("deleted $ne true:", db.softies.find({ deleted: { $ne: true } }, { _id: 0, name: 1 }).toArray());
+    console.log("deleted: false  :", db.softies.find({ deleted: false }, { _id: 0, name: 1 }).toArray());
+    assert.strictEqual(db.softies.countDocuments({ deleted: { $ne: true } }), 2);
+    assert.strictEqual(db.softies.countDocuments({ deleted: false }), 0);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/delete-soft.mjs
+    await db.collection("members").insertOne({ name: "Linus", joined: 2023, fines: 2 });
     await db.collection("members").updateOne(
       { name: "Linus" },
       { $set: { deleted: true, deletedAt: new Date() } }
     );
+    const linus = await db.collection("members").findOne({ name: "Linus" }, { projection: { _id: 0 } });
+    console.log(linus);
+    if (linus?.deleted !== true) throw new Error("expected the flag");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -159,7 +270,7 @@ Sometimes a hard delete is the wrong choice: you may need an audit trail, the ab
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    use bson::DateTime;
+    use mongodb::bson::DateTime;
 
     coll.update_one(
         doc! { "name": "Linus" },
@@ -170,58 +281,129 @@ Sometimes a hard delete is the wrong choice: you may need an audit trail, the ab
   </TabItem>
 </Tabs>
 
-The document is still there, just flagged — your reads filter it out, and you can restore it later by unsetting the flag:
+The document is still there, just flagged; you can restore it later by unsetting the flag. The catch is in the **read** filter - the three reads above returned:
 
-```json
-{
-  "_id": "65f0b3d4e4b0a1c2e4b0a1d1",
-  "name": "Linus",
-  "joined": 2023,
-  "deleted": true,
-  "deletedAt": "2026-06-25T10:15:00.000Z"
-}
+```text
+no filter       : [ { name: 'Ada' }, { name: 'Linus' }, { name: 'Grace' } ]
+deleted $ne true: [ { name: 'Ada' }, { name: 'Grace' } ]
+deleted: false  : []
 ```
+
+`{ deleted: { $ne: true } }` is the right exclusion: documents that **never had** the field also match it. `{ deleted: false }` returned **nothing** because nobody has `deleted: false` - it only matches documents that carry the field with that value. (In Node, the flagged document reads `{ name: 'Linus', joined: 2023, fines: 2, deleted: true, deletedAt: 2026-09-30T06:19:12.301Z }`.)
+
+### Soft delete now, hard delete later: a TTL index
+
+Soft deletes grow the collection forever unless something purges them. A **TTL index** on the timestamp turns "recoverable for a while" into a policy: MongoDB removes the document after the window. Here it is with a 1-second window so we can watch it (a real policy would use days):
+
+```js
+// app/delete-soft-ttl.mjs @skip-verify waits for the TTL monitor, which wakes only every 60 s
+const c = db.collection("members");
+await c.createIndex({ deletedAt: 1 }, { expireAfterSeconds: 1 });
+await c.insertMany([{ name: "Ada" }, { name: "Linus" }]);
+await c.updateOne({ name: "Linus" }, { $set: { deleted: true, deletedAt: new Date() } });
+console.log("before sweep:", (await c.find({}, { projection: { _id: 0, name: 1 } }).toArray()).map((d) => d.name));
+// ...poll until the background TTL thread runs...
+console.log("remaining:", (await c.find().toArray()).map((d) => d.name));
+```
+
+```text
+before sweep: [ 'Ada', 'Linus' ]
+Linus gone after 18 s; remaining: [ 'Ada' ]
+```
+
+The document vanished 18 s after the flag in this run - the TTL monitor sweeps on a fixed 60 s cycle, so the delay is anywhere from about zero to a minute beyond the window. Documents *without* `deletedAt` (Ada) are never touched. The TTL index only works on a real `Date` value (the indexes module proves that a string date is ignored).
 
 ## Tips and gotchas
 
-- `deleteMany` with an empty filter — matching every document — **empties the entire collection**. It is the single most dangerous CRUD call; type the filter first and the method second so you never run it bare by accident.
-- A delete is permanent. Unlike an update, there is no "before" copy left behind unless you arranged one. When in doubt, run the same filter through `find` first to see exactly what you are about to remove.
-- `deleteOne` is your safety rail for "remove one specific record." Even if your filter is sloppier than you thought, it can only take one document.
-- Soft delete trades simplicity for safety: every normal query must remember to exclude the flagged documents, but you gain undo and an audit trail.
+- `deleteMany({})` **empties the entire collection**. mongosh refuses `deleteMany()` with no argument, but the **Node driver deletes everything** when you call it that way (proven above). Never build a delete filter from a variable that might be empty or `undefined`.
+- A delete is permanent. Unlike an update, there is no "before" copy left behind unless you arranged one. When in doubt, run the same filter through `find`/`countDocuments` first to see exactly what you are about to remove.
+- `deleteOne` is your safety rail for "remove one specific record". Even if your filter is sloppier than you thought, it can only take one document - but *which* one is unspecified, so filter by `_id` when it matters.
+- Emptying with `deleteMany({})` keeps the collection and its indexes and is much slower than `drop()` (1001 ms vs 3 ms for 200 000 documents).
+- Soft delete trades simplicity for safety: every normal query must remember `deleted: { $ne: true }` (not `deleted: false`), but you gain undo and an audit trail.
 
 <Callout title="Look before you delete">
-Run your delete filter through find first. If the documents it returns are exactly the ones you mean to lose, swap find for deleteMany. If not, fix the filter — there is no undo on a hard delete.
+Run your delete filter through countDocuments or find first. If the documents it returns are exactly the ones you mean to lose, swap find for deleteMany. If not, fix the filter - there is no undo on a hard delete.
 </Callout>
+
+## Reading AI-generated code
+
+An assistant writing an admin endpoint often passes user input straight through as the filter:
+
+<SpotTheBug lang="js" code={`// AI comment: "delete the members matching the query string, e.g. DELETE /members?joined=2022"
+app.delete("/members", async (req, res) => {
+  const result = await db.collection("members").deleteMany(req.query);
+  res.json({ deleted: result.deletedCount });
+});`}>
+
+`req.query` is `{ joined: "2022" }` for `?joined=2022` - but for a plain `DELETE /members` it is `{}`, and `deleteMany({})` matches **everything**. We ran the Node driver with an empty filter (and with no argument): both deleted every document in the collection with no error, no confirmation. (Even the intended case is wrong: query-string values are strings, so `joined: "2022"` would never match the numeric field.) The fix is to build the filter explicitly, validate it, and refuse an empty one:
+
+```js
+// app/delete-guard.mjs
+const c = db.collection("guard");
+await c.insertMany([{ name: "Ada", joined: 2022 }, { name: "Grace", joined: 2024 }]);
+
+async function deleteMembers(query) {
+  const joined = Number(query.joined);
+  if (!Number.isInteger(joined)) throw new Error("joined is required and must be an integer");
+  return (await c.deleteMany({ joined })).deletedCount;
+}
+
+let refused = null;
+try { await deleteMembers({}); } catch (e) { refused = e.message; }
+console.log({ refused, deleted: await deleteMembers({ joined: "2022" }), left: await c.countDocuments() });
+if (refused === null || (await c.countDocuments()) !== 1) throw new Error("guard failed");
+```
+
+```text
+{
+  refused: 'joined is required and must be an integer',
+  deleted: 1,
+  left: 1
+}
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A delete is a **filter with no undo**: the server evaluates the same predicate `find` would, then removes what matched. Therefore the safest workflow is the same predicate, three times: `countDocuments(filter)` to see how many, `find(filter)` to see which, then `deleteMany(filter)`. `deleteOne` is `find(filter).limit(1)` followed by removal; the choice between hard delete, soft delete and TTL is really the choice of **how long you want the data to remain recoverable**.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Hard delete (`deleteOne`/`deleteMany`) | Reclaims storage immediately, leaves nothing behind, simplest to reason about | Permanent — no audit trail, no undo |
-| Soft delete (update a flag such as `deleted: true`) | Recoverable, keeps a full audit trail and historical data | Every read query must filter out the flag, or "deleted" documents reappear, and the collection keeps growing |
+| Hard delete (`deleteOne`/`deleteMany`) | Reclaims storage, leaves nothing behind, simplest to reason about | Permanent - no audit trail, no undo |
+| Soft delete (update a flag such as `deleted: true`) | Recoverable, keeps a full audit trail and historical data | Every read must filter with `$ne: true`, or "deleted" documents reappear; the collection keeps growing |
+| Soft delete + TTL index on `deletedAt` | Recoverable for a window, then removed automatically | The purge is delayed up to a minute past the window (60 s TTL cycle); works only on real Date values |
+| `deleteMany({})` to empty | Keeps the collection and its indexes | 1001 ms vs 3 ms for `drop()` on 200 000 documents |
+| `drop()` | Instant, removes the collection and its indexes | Indexes and options must be recreated |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using `deleteOne` when you actually need to remove every matching document** — assuming everything is gone when `deleteOne` only ever stopped at the first match, leaving other matching documents behind in the collection.
-- **Not checking `deletedCount` after a delete** — assuming success just because no error was thrown, when `deletedCount` could be 0 from a misspelled filter or field name.
-- **Doing a soft delete and forgetting to update normal queries to exclude flagged documents** — writing a plain find without adding a `deleted: { $ne: true }` condition, so "deleted" data reappears in search results users see.
+- **"`deleteOne` removes every match."** - it removes one (`1 2` above: three matched, one went).
+- **"An empty delete filter is refused."** - in mongosh yes; in the Node driver `deleteMany()` and `deleteMany({})` delete everything.
+- **"No error means it worked."** - a misspelled field gives `deletedCount: 0` with no error; always check it.
+- **"`{ deleted: false }` finds the non-deleted documents."** - it found none in the run above; use `{ deleted: { $ne: true } }`.
+- **"`undefined` in a filter is ignored."** - the Node driver serialises it as `null`, which also matches missing fields.
+- **"`deleteMany({})` is the same as dropping."** - it keeps the collection and indexes, and took 1001 ms against 3 ms.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **Abandoned carts** — a daily job calls `deleteMany({ status: "cart", updatedAt: { $lt: thirtyDaysAgo } })` to sweep out carts with no activity for over 30 days, so the collection does not bloat with data nobody will ever check out.
->
-> **User accounts** — when a user clicks "delete account," the system does not call `deleteOne` immediately. It soft-deletes with `updateOne` setting `deleted: true` and `deletedAt`, giving a recovery window (say, 30 days) before a background job calls the real `deleteOne` once that window passes.
+> The MongoDB manual documents the mechanism we observed: "The background task that removes expired documents runs _every 60 seconds_", so removal can lag expiry, and under load expired data may exist "for some time _beyond_ the 60 second period" ([TTL indexes](https://www.mongodb.com/docs/manual/core/index-ttl/), consulted 2026-09-30); the indexed field must be a date or an array of dates ([Expire data](https://www.mongodb.com/docs/manual/tutorial/expire-data/)).
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (counts 1 and 3, then the soft-delete update) and are not executed by the course's automated checker. The Rust tab's import was corrected from `use bson::DateTime` (which does not compile unless you add `bson` as a direct dependency) to `use mongodb::bson::DateTime`._
 
 export const quizDelete = [
   {
-    q: 'What does deleteMany with an empty filter do?',
+    q: 'What does deleteMany({}) do in mongosh and in the Node driver?',
     options: [
       'Nothing, because an empty filter matches nothing',
       'Removes a single arbitrary document',
-      'Removes every document in the collection',
+      'Removes every document in the collection (the collection and its indexes remain)',
       'Raises an error to protect you',
     ],
     answer: 2,
+    explain: 'Real run: deletedCount 2 of 2, count 0 afterwards, and the collection and its name_1 index still existed.',
   },
   {
     q: 'A deleteOne filter matches no documents. What is reported?',
@@ -232,6 +414,7 @@ export const quizDelete = [
       'deletedCount is null',
     ],
     answer: 1,
+    explain: '{ acknowledged: true, deletedCount: 0 } - a normal answer, easy to miss with a misspelled field.',
   },
   {
     q: 'What is the core idea of a soft delete?',
@@ -242,6 +425,29 @@ export const quizDelete = [
       'Moving documents to a different database',
     ],
     answer: 1,
+    explain: 'The document stays, marked with deleted: true / deletedAt; every normal read must exclude it.',
+  },
+  {
+    q: 'You soft-delete Linus with { deleted: true }. Which read returns the members who are NOT deleted (Ada and Grace never had the field)?',
+    options: [
+      'find({ deleted: false })',
+      'find({ deleted: { $ne: true } })',
+      'find({ deleted: null })',
+      'find({ deleted: { $exists: true } })',
+    ],
+    answer: 1,
+    explain: '$ne: true also matches documents without the field: the real run returned Ada and Grace, while { deleted: false } returned an empty array.',
+  },
+  {
+    q: 'In the Node driver, what does await collection.deleteMany() (no argument) do?',
+    options: [
+      'Throws because the filter is missing',
+      'Does nothing',
+      'Deletes every document - the filter defaults to {}',
+      'Deletes one document',
+    ],
+    answer: 2,
+    explain: 'It returned { acknowledged: true, deletedCount: 2 } and left 0. mongosh, by contrast, throws MongoshInvalidInputError for the missing argument.',
   },
 ]
 
