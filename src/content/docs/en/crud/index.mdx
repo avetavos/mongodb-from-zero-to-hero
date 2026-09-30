@@ -9,6 +9,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 Every database boils down to four things you can do with your data: put new records in, read them back, change them, and throw them away. People shorten those four verbs to **CRUD** — Create, Read, Update, Delete. In MongoDB the "records" are JSON-like documents living inside a collection, and the verbs map onto a small, predictable set of methods that look almost identical whether you type them into the shell or call them from a driver in Node.js, Python, Go, or Rust.
@@ -38,12 +39,16 @@ The same shape shows up across all five tabs you will see throughout this module
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertOne({ name: "Ada", fines: 0 })
+    // mongosh/crud-insert-tab.js
+    db.tabs.insertOne({ name: "Ada", fines: 0 })
+    assert.strictEqual(db.tabs.countDocuments(), 1)
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/crud-insert-tab.mjs
     await db.collection("members").insertOne({ name: "Ada", fines: 0 });
+    if ((await db.collection("members").countDocuments()) !== 1) throw new Error("expected 1");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -63,13 +68,34 @@ The same shape shows up across all five tabs you will see throughout this module
   </TabItem>
 </Tabs>
 
-After that insert the stored document looks like this — note the `_id` that MongoDB added for you:
+Every CRUD call answers with an **acknowledgement**, and reading it is how you confirm what happened. This fence runs one call of each family in `mongosh` and prints the *fields* each acknowledgement carries (mongo 8.3.11, mongosh 2.11.1, this Mac):
 
-```json
-{ "_id": "65f0a1c2e4b0a1c2e4b0a1c2", "name": "Ada", "fines": 0 }
+```js
+// mongosh/crud-acks.js
+const keys = (o) => Object.keys(o).join(", ");
+console.log("insertOne :", keys(db.members.insertOne({ name: "Ada", fines: 0 })));
+console.log("insertMany:", keys(db.members.insertMany([{ name: "Grace", fines: 2 }, { name: "Linus", fines: 5 }])));
+console.log("updateOne :", keys(db.members.updateOne({ name: "Ada" }, { $set: { fines: 1 } })));
+console.log("upsert    :", keys(db.members.updateOne({ name: "Nina" }, { $set: { fines: 0 } }, { upsert: true })));
+console.log("deleteOne :", keys(db.members.deleteOne({ name: "Nina" })));
+console.log("bulkWrite :", keys(db.members.bulkWrite([{ deleteOne: { filter: { name: "Nobody" } } }])));
+console.log("find      :", db.members.find({ fines: { $gt: 0 } }).toArray().length, "documents");
+assert.strictEqual(db.members.countDocuments(), 3);
 ```
 
-**In Compass:** the same four families map to the GUI — Compass shows documents in the **Documents** tab, where you can insert with the green **ADD DATA** button, edit a field inline, and delete a document with the trash icon that appears on hover.
+```text
+insertOne : acknowledged, insertedId
+insertMany: acknowledged, insertedIds
+updateOne : acknowledged, insertedId, matchedCount, modifiedCount, upsertedCount
+upsert    : acknowledged, insertedId, matchedCount, modifiedCount, upsertedCount
+deleteOne : acknowledged, deletedCount
+bulkWrite : acknowledged, insertedCount, insertedIds, matchedCount, modifiedCount, deletedCount, upsertedCount, upsertedIds
+find      : 3 documents
+```
+
+Remember the `_id` that MongoDB added for you: `insertOne({ name: "Ada", fines: 0 })` stores `{ _id: ObjectId('...'), name: 'Ada', fines: 0 }`. (The Node driver shapes these results a little differently - `insertedCount` on `insertMany`, `upsertedId` on updates - the individual lessons show both.)
+
+**In Compass:** the same four families map to the GUI - the **Documents** tab inserts (**Add Data** > **Insert Document**), edits (pencil icon on hover, then **Update**) and deletes (trash icon on hover); the individual lessons cite the Compass documentation for each.
 
 ## What this module covers
 
@@ -91,32 +117,74 @@ The lessons that follow take each family in turn, then finish with the two power
 CRUD is just four verbs over a bag of documents. Master the singular form of each verb first; the plural form is the same call with a filter that happens to match more than one document.
 </Callout>
 
+## Reading AI-generated code
+
+CRUD code from an assistant almost always ends without looking at the result:
+
+<SpotTheBug lang="js" code={`// AI comment: "mark Ada's fines as paid"
+async function markPaid(db, name) {
+  await db.collection("members").updateOne({ nmae: name }, { $set: { fines: 0 } });
+  return "ok";
+}`}>
+
+There is a typo in the filter (`nmae`). MongoDB does not know that `nmae` is not a field, so it looks for documents with a field called `nmae`, finds none, changes nothing - and reports success: `{ acknowledged: true, matchedCount: 0, modifiedCount: 0 }`. The function returns `"ok"` and Ada still owes her fines. The fix is to read the acknowledgement:
+
+```js
+// app/crud-check-result.mjs
+const members = db.collection("members");
+await members.insertOne({ name: "Ada", fines: 3 });
+
+async function markPaid(name, field) {
+  const res = await members.updateOne({ [field]: name }, { $set: { fines: 0 } });
+  if (res.matchedCount === 0) throw new Error(`no member matched { ${field}: "${name}" }`);
+  return res.modifiedCount === 1 ? "paid" : "already zero";
+}
+
+let typo = null;
+try { await markPaid("Ada", "nmae"); } catch (e) { typo = e.message; }
+console.log({ typo, ok: await markPaid("Ada", "name"), again: await markPaid("Ada", "name") });
+if (!typo) throw new Error("the typo should have been caught");
+```
+
+```text
+{ typo: 'no member matched { nmae: "Ada" }', ok: 'paid', again: 'already zero' }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A collection is a bag of documents; every CRUD call is **filter + action**. The filter selects (nothing selected is not an error), the action inserts, reads, changes or removes, and the acknowledgement tells you *how many* documents each step touched. When the count is not what you expected, the filter is almost always the culprit.
+
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
 | Singular methods (insertOne/updateOne/deleteOne) | Precise control, affects one document, easy to predict | Must be called repeatedly to handle many documents, causing frequent round trips |
-| Plural methods (insertMany/updateMany/deleteMany) | Handles many documents in one call, much faster | A mistaken filter or array affects a much wider scope than intended |
+| Plural methods (insertMany/updateMany/deleteMany) | Handles many documents in one call, much faster | A mistaken filter or array affects a much wider scope than intended; not atomic across documents |
 | Hard delete | Reclaims storage immediately, simplest | Permanent, no audit trail |
 | Soft delete (update a flag) | Recoverable, has an audit trail | Must filter the flag out of every subsequent query |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Writing insert code that loops one document at a time** — use `insertMany` to send them as a single batch, reducing the number of round trips to the server.
-- **Calling `updateMany`/`deleteMany` without carefully checking the filter first** — forgetting the filter or making it too broad unintentionally affects the whole collection.
-- **Not checking the result (acknowledgement) after a write** — seeing no error thrown and assuming success, when `matchedCount`/`modifiedCount`/`deletedCount` could be 0.
+- **"A write that reports no error succeeded."** - the typo'd filter above returned `matchedCount: 0` and no error. Check the counts.
+- **"insertMany / updateMany are transactions."** - each document write is atomic, the batch is not (the CRUD manual: "All write operations in MongoDB are atomic on the level of a single document").
+- **"Looping one insert per document is fine."** - batch with `insertMany` (or `bulkWrite`); the lessons measure it.
+- **"`updateOne(filter, { plain: 'doc' })` replaces the document."** - modern drivers throw; `replaceOne` replaces (update lesson).
+- **"The shell and drivers return identical acknowledgements."** - the fields differ (`insertedId` vs `upsertedId`, `insertedCount` on `insertMany`).
 
-> 💡 Real-world example
+> Real-world example
 >
-> **An e-commerce ordering system** — when a customer clicks checkout, the system `insertOne`s a new order, then `updateMany`s to reduce stock for every item in the cart, then finally `deleteMany`s carts abandoned for over 30 days. All four CRUD families work together in one pipeline.
->
-> **A web app's session system** — uses `findOne` to check the session on every request, `updateOne` to renew its TTL, and `deleteOne` on logout.
+> The MongoDB manual's CRUD page organises the same families - `insertOne`/`insertMany`, `find`, `updateOne`/`updateMany`/`replaceOne`, `deleteOne`/`deleteMany`, bulk write - and states that "All write operations in MongoDB are atomic on the level of a single document" ([CRUD operations](https://www.mongodb.com/docs/manual/crud/), consulted 2026-09-30).
+
+_Python/Go/Rust tabs in this module mirror the verified shell/Node behaviour and were each run once in scratch programs (see each lesson); they are not executed by the course's automated checker._
 
 export const quizIndex = [
   {
     q: 'Which method reads back the first document that matches a filter?',
     options: ['getOne', 'findOne', 'readOne', 'selectOne'],
     answer: 1,
+    explain: 'findOne returns the document, or null when nothing matches.',
   },
   {
     q: 'What does the singular form of a write method (like updateOne) guarantee?',
@@ -127,6 +195,7 @@ export const quizIndex = [
       'It cannot be given a filter',
     ],
     answer: 1,
+    explain: 'The singular methods stop after one document - a safety rail (deleteOne removed 1 of 3 matches in the delete lesson).',
   },
   {
     q: 'CRUD stands for which four operations?',
@@ -137,6 +206,29 @@ export const quizIndex = [
       'Cache, Read, Upsert, Drop',
     ],
     answer: 2,
+    explain: 'Create (insert), Read (find), Update (update/replace), Delete (delete).',
+  },
+  {
+    q: 'updateOne({ nmae: "Ada" }, { $set: { fines: 0 } }) has a typo in the field name. What is the result?',
+    options: [
+      'A schema error',
+      'An exception: unknown field nmae',
+      'No error: matchedCount 0 and modifiedCount 0',
+      'A new field nmae is created on every document',
+    ],
+    answer: 2,
+    explain: 'The filter simply matches nothing. Only the acknowledgement counts reveal it - always check matchedCount.',
+  },
+  {
+    q: 'Which acknowledgement fields does deleteOne return in mongosh?',
+    options: [
+      'acknowledged and deletedCount',
+      'matchedCount and modifiedCount',
+      'insertedId only',
+      'The deleted document',
+    ],
+    answer: 0,
+    explain: 'The printed field list was: acknowledged, deletedCount.',
   },
 ]
 

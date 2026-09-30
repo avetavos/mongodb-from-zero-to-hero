@@ -9,6 +9,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ทุกฐานข้อมูลสรุปลงมาเหลือสี่สิ่งที่คุณทำกับข้อมูลได้ คือ ใส่ระเบียนใหม่เข้าไป อ่านกลับออกมา แก้ไข และลบทิ้ง สี่กริยานี้ย่อรวมกันเป็น **CRUD** — Create, Read, Update, Delete
@@ -40,12 +41,16 @@ export const crudFlowDiagram = `flowchart LR
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
     ```js
-    db.members.insertOne({ name: "Ada", fines: 0 })
+    // mongosh/crud-insert-tab.js
+    db.tabs.insertOne({ name: "Ada", fines: 0 })
+    assert.strictEqual(db.tabs.countDocuments(), 1)
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    // app/crud-insert-tab.mjs
     await db.collection("members").insertOne({ name: "Ada", fines: 0 });
+    if ((await db.collection("members").countDocuments()) !== 1) throw new Error("expected 1");
     ```
   </TabItem>
   <TabItem label="Python">
@@ -65,13 +70,34 @@ export const crudFlowDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-หลัง insert เสร็จ document ที่เก็บอยู่จะหน้าตาแบบนี้ — สังเกต `_id` ที่ MongoDB เติมให้:
+ทุกการเรียก CRUD ตอบด้วย **acknowledgement** และการอ่านมันคือวิธียืนยันว่าเกิดอะไรขึ้น fence นี้รันหนึ่งการเรียกจากแต่ละกลุ่มใน `mongosh` และพิมพ์ *field* ที่ acknowledgement แต่ละอันมี (mongo 8.3.11, mongosh 2.11.1, Mac เครื่องนี้):
 
-```json
-{ "_id": "65f0a1c2e4b0a1c2e4b0a1c2", "name": "Ada", "fines": 0 }
+```js
+// mongosh/crud-acks.js
+const keys = (o) => Object.keys(o).join(", ");
+console.log("insertOne :", keys(db.members.insertOne({ name: "Ada", fines: 0 })));
+console.log("insertMany:", keys(db.members.insertMany([{ name: "Grace", fines: 2 }, { name: "Linus", fines: 5 }])));
+console.log("updateOne :", keys(db.members.updateOne({ name: "Ada" }, { $set: { fines: 1 } })));
+console.log("upsert    :", keys(db.members.updateOne({ name: "Nina" }, { $set: { fines: 0 } }, { upsert: true })));
+console.log("deleteOne :", keys(db.members.deleteOne({ name: "Nina" })));
+console.log("bulkWrite :", keys(db.members.bulkWrite([{ deleteOne: { filter: { name: "Nobody" } } }])));
+console.log("find      :", db.members.find({ fines: { $gt: 0 } }).toArray().length, "documents");
+assert.strictEqual(db.members.countDocuments(), 3);
 ```
 
-**ใน Compass:** ทั้งสี่กลุ่มนี้จับคู่กับ GUI ตรง ๆ — Compass แสดง document ในแท็บ **Documents** คุณ insert ได้ด้วยปุ่มสีเขียว **ADD DATA** แก้ field แบบ inline ได้ และลบ document ด้วยไอคอนถังขยะที่โผล่มาตอนเอาเมาส์ไปวาง
+```text
+insertOne : acknowledged, insertedId
+insertMany: acknowledged, insertedIds
+updateOne : acknowledged, insertedId, matchedCount, modifiedCount, upsertedCount
+upsert    : acknowledged, insertedId, matchedCount, modifiedCount, upsertedCount
+deleteOne : acknowledged, deletedCount
+bulkWrite : acknowledged, insertedCount, insertedIds, matchedCount, modifiedCount, deletedCount, upsertedCount, upsertedIds
+find      : 3 documents
+```
+
+จำ `_id` ที่ MongoDB เติมให้: `insertOne({ name: "Ada", fines: 0 })` เก็บ `{ _id: ObjectId('...'), name: 'Ada', fines: 0 }` (Node driver จัดรูปผลเหล่านี้ต่างออกไปเล็กน้อย — `insertedCount` บน `insertMany`, `upsertedId` บนการอัปเดต — แต่ละบทแสดงทั้งสองแบบ)
+
+**ใน Compass:** ทั้งสี่กลุ่มจับคู่กับ GUI — tab **Documents** insert (**Add Data** > **Insert Document**), แก้ (ไอคอนดินสอเมื่อชี้ แล้ว **Update**) และลบ (ไอคอนถังขยะเมื่อชี้); แต่ละบทอ้างเอกสาร Compass ของตัวเอง
 
 ## โมดูลนี้ครอบคลุมอะไรบ้าง
 
@@ -81,7 +107,7 @@ export const crudFlowDiagram = `flowchart LR
 2. **Read** — `find` เทียบกับ `findOne`, filter แบบ equality และแบบหลาย field พร้อมแตะ projection เป็นครั้งแรก
 3. **Update** — `$set`, `$inc`, `$unset`, `$push`, `$pull` และการอ่านจำนวนที่ตรงกัน (match count) ที่การเขียนคืนกลับมา
 4. **Delete** — การลบ document อย่างแม่นยำ บวกกับรูปแบบ soft-delete
-5. **Upsert และ bulk write** — "insert ถ้ายังไม่มี ไม่อย่างนั้นก็ update" และการยัดหลาย operation ให้เหลือ round trip เดียวไป server 
+5. **Upsert และ bulk write** — "insert ถ้ายังไม่มี ไม่อย่างนั้นก็ update" และการยัดหลาย operation ให้เหลือ round trip เดียวไป server
 
 ## เคล็ดลับและจุดที่ต้องระวัง
 
@@ -93,45 +119,88 @@ export const crudFlowDiagram = `flowchart LR
 CRUD ก็แค่สี่กริยาที่ทำกับกองของ document ฝึกรูปแบบเอกพจน์ของแต่ละกริยาให้ชำนาญก่อน ส่วนรูปแบบพหูพจน์ก็คือการเรียกแบบเดียวกัน เพียงแต่ filter ดันตรงกับ document มากกว่าหนึ่งรายการ
 </Callout>
 
+## อ่านโค้ดที่ AI สร้าง
+
+โค้ด CRUD จาก AI แทบทุกครั้งจบโดยไม่ดูผลลัพธ์:
+
+<SpotTheBug lang="js" code={`// AI comment: "mark Ada's fines as paid"
+async function markPaid(db, name) {
+  await db.collection("members").updateOne({ nmae: name }, { $set: { fines: 0 } });
+  return "ok";
+}`}>
+
+มี typo ใน filter (`nmae`) MongoDB ไม่รู้ว่า `nmae` ไม่ใช่ field มันเลยหา document ที่มี field ชื่อ `nmae` ไม่พบ ไม่เปลี่ยนอะไร — แล้วรายงานว่าสำเร็จ: `{ acknowledged: true, matchedCount: 0, modifiedCount: 0 }` ฟังก์ชันคืน `"ok"` และ Ada ยังค้างค่าปรับ วิธีแก้คืออ่าน acknowledgement:
+
+```js
+// app/crud-check-result.mjs
+const members = db.collection("members");
+await members.insertOne({ name: "Ada", fines: 3 });
+
+async function markPaid(name, field) {
+  const res = await members.updateOne({ [field]: name }, { $set: { fines: 0 } });
+  if (res.matchedCount === 0) throw new Error(`no member matched { ${field}: "${name}" }`);
+  return res.modifiedCount === 1 ? "paid" : "already zero";
+}
+
+let typo = null;
+try { await markPaid("Ada", "nmae"); } catch (e) { typo = e.message; }
+console.log({ typo, ok: await markPaid("Ada", "name"), again: await markPaid("Ada", "name") });
+if (!typo) throw new Error("the typo should have been caught");
+```
+
+```text
+{ typo: 'no member matched { nmae: "Ada" }', ok: 'paid', again: 'already zero' }
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+collection คือกองของ document; ทุกการเรียก CRUD คือ **filter + action** filter เลือก (ไม่เลือกอะไรไม่ใช่ error), action insert อ่าน เปลี่ยน หรือลบ และ acknowledgement บอกว่าแต่ละขั้นแตะ document *กี่รายการ* เมื่อจำนวนไม่ตรงที่คาด filter เกือบจะเป็นตัวการเสมอ
+
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| method แบบเอกพจน์ (insertOne/updateOne/deleteOne) | ควบคุมแม่นยำ กระทบ document เดียว คาดเดาผลได้ง่าย | ต้องเรียกซ้ำหลายครั้งถ้าต้องจัดการหลาย document ทำให้ round trip บ่อย |
-| method แบบพหูพจน์ (insertMany/updateMany/deleteMany) | จัดการหลาย document ในการเรียกเดียว เร็วกว่ามาก | filter หรือ array ที่ผิดพลาดกระทบวงกว้างกว่าที่ตั้งใจ |
-| hard delete | คืนพื้นที่จัดเก็บทันที เรียบง่าย | ลบถาวร ไม่มี audit trail |
-| soft delete (update flag) | กู้คืนได้ มี audit trail | ต้องกรอง flag ในทุก query ต่อจากนี้ |
+| method เอกพจน์ (insertOne/updateOne/deleteOne) | ควบคุมแม่นยำ กระทบ document เดียว ทำนายง่าย | ต้องเรียกซ้ำหลายครั้งเพื่อจัดการหลาย document ทำให้เกิด round trip บ่อย |
+| method พหูพจน์ (insertMany/updateMany/deleteMany) | จัดการหลาย document ในการเรียกเดียว เร็วกว่ามาก | filter หรือ array ที่ผิดพลาดกระทบขอบเขตกว้างกว่าที่ตั้งใจมาก; ไม่ atomic ข้าม document |
+| Hard delete | คืนพื้นที่ทันที เรียบง่ายที่สุด | ถาวร ไม่มี audit trail |
+| Soft delete (อัปเดต flag) | กู้คืนได้ มี audit trail | ต้องกรอง flag ออกจากทุก query ที่ตามมา |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เขียนโค้ด insert วนลูปทีละ document** — ควรใช้ `insertMany` ส่งเป็น batch เดียว ลดจำนวน round trip ไป server 
-- **เรียก `updateMany`/`deleteMany` โดยไม่ตรวจ filter ให้ดีก่อน** — ลืมใส่ filter หรือใส่ filter กว้างเกินไป ทำให้กระทบ document ทั้ง collection โดยไม่ตั้งใจ
-- **ไม่ตรวจผลลัพธ์ (acknowledgement) หลังเขียน** — เห็นแค่ว่าไม่มี error โยนขึ้นมาแล้วสรุปว่าสำเร็จ ทั้งที่ `matchedCount`/`modifiedCount`/`deletedCount` อาจเป็น 0
+- **"การเขียนที่ไม่รายงาน error แปลว่าสำเร็จ"** — filter ที่ typo ด้านบนคืน `matchedCount: 0` โดยไม่มี error ตรวจจำนวน
+- **"insertMany / updateMany เป็น transaction"** — การเขียนแต่ละ document เป็น atomic แต่ batch ไม่ใช่ (คู่มือ CRUD: "All write operations in MongoDB are atomic on the level of a single document")
+- **"วน insert ทีละ document ก็ไม่เป็นไร"** — รวมด้วย `insertMany` (หรือ `bulkWrite`); แต่ละบทวัดให้ดู
+- **"`updateOne(filter, { plain: 'doc' })` แทนที่ document"** — driver สมัยใหม่โยน error; `replaceOne` ต่างหากที่แทนที่ (บท update)
+- **"shell กับ driver คืน acknowledgement เหมือนกันทุกประการ"** — field ต่างกัน (`insertedId` เทียบ `upsertedId`, `insertedCount` บน `insertMany`)
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ระบบสั่งซื้อ e-commerce** — เมื่อลูกค้ากด checkout ระบบ `insertOne` order ใหม่ ตามด้วย `updateMany` ลด stock ของสินค้าในตะกร้าทุกชิ้น แล้วสุดท้าย `deleteMany` ล้างตะกร้าที่ค้างอยู่เกิน 30 วัน ทั้งหมดคือ CRUD สี่กลุ่มทำงานร่วมกันใน pipeline เดียว
->
-> **ระบบ session ของเว็บแอป** — ใช้ `findOne` ตรวจ session ทุก request, `updateOne` ต่ออายุ TTL, และ `deleteOne` เมื่อ logout
+> หน้า CRUD ของคู่มือ MongoDB จัดกลุ่มเดียวกัน — `insertOne`/`insertMany`, `find`, `updateOne`/`updateMany`/`replaceOne`, `deleteOne`/`deleteMany`, bulk write — และระบุว่า "All write operations in MongoDB are atomic on the level of a single document" ([CRUD operations](https://www.mongodb.com/docs/manual/crud/), เรียกอ่านเมื่อ 2026-09-30)
+
+_แท็บ Python/Go/Rust ในโมดูลนี้สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node และแต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch (ดูแต่ละบท); ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizIndex = [
   {
-    q: 'method ใดอ่าน document แรกที่ตรงกับ filter กลับคืนมา?',
+    q: 'method ใดอ่าน document แรกที่ตรงกับ filter กลับมา?',
     options: ['getOne', 'findOne', 'readOne', 'selectOne'],
     answer: 1,
+    explain: 'findOne คืน document หรือ null เมื่อไม่ตรงอะไรเลย',
   },
   {
-    q: 'รูปแบบเอกพจน์ของ method แบบเขียน (เช่น updateOne) รับประกันอะไร?',
+    q: 'รูปแบบเอกพจน์ของ method เขียน (เช่น updateOne) รับประกันอะไร?',
     options: [
       'เร็วกว่ารูปแบบพหูพจน์ในทุกกรณี',
-      'กระทบ document ได้มากที่สุดหนึ่งรายการ แม้จะมีหลายรายการตรงกัน',
+      'กระทบ document ไม่เกินหนึ่งรายการ แม้มีหลายรายการตรงกัน',
       'ข้ามขั้นตอน acknowledgement',
-      'รับ filter ไม่ได้',
+      'ไม่สามารถใส่ filter ได้',
     ],
     answer: 1,
+    explain: 'method เอกพจน์หยุดหลังหนึ่ง document — ราวกันตก (deleteOne ลบ 1 จาก 3 ที่ตรงในบท delete)',
   },
   {
-    q: 'CRUD ย่อมาจากการทำงานสี่อย่างใด?',
+    q: 'CRUD ย่อมาจากสี่ operation ใด?',
     options: [
       'Connect, Read, Update, Disconnect',
       'Create, Replace, Undo, Delete',
@@ -139,6 +208,29 @@ export const quizIndex = [
       'Cache, Read, Upsert, Drop',
     ],
     answer: 2,
+    explain: 'ตรงกับ Create (insert), Read (find), Update (update/replace), Delete (delete)',
+  },
+  {
+    q: 'updateOne({ nmae: "Ada" }, { $set: { fines: 0 } }) มี typo ในชื่อ field ผลลัพธ์คืออะไร?',
+    options: [
+      'schema error',
+      'exception: unknown field nmae',
+      'ไม่มี error: matchedCount 0 และ modifiedCount 0',
+      'สร้าง field nmae ใหม่บนทุก document',
+    ],
+    answer: 2,
+    explain: 'filter แค่ไม่ตรงอะไรเลย มีเพียงจำนวนใน acknowledgement ที่เปิดโปง — ตรวจ matchedCount เสมอ',
+  },
+  {
+    q: 'deleteOne ใน mongosh คืน field ใดใน acknowledgement?',
+    options: [
+      'acknowledged และ deletedCount',
+      'matchedCount และ modifiedCount',
+      'insertedId อย่างเดียว',
+      'document ที่ถูกลบ',
+    ],
+    answer: 0,
+    explain: 'รายชื่อ field ที่พิมพ์คือ: acknowledged, deletedCount',
   },
 ]
 
