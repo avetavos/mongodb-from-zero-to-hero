@@ -1,6 +1,6 @@
 ---
-title: explain และ query plan
-description: อ่านผลลัพธ์ของ explain เพื่อยืนยันว่ามีการใช้ index เปรียบเทียบ COLLSCAN กับ IXSCAN ชั่งน้ำหนักจำนวน document ที่ตรวจกับจำนวน document ที่คืน และจับ covered query
+title: Explain และ query plan
+description: อ่าน output ของ explain บน 200 000 document - COLLSCAN เทียบ IXSCAN ทั้งสาม verbosity, rejected plan และ plan cache, covered query, รูปแบบ slot-based engine และ explain บน update
 sidebar:
   order: 4
 ---
@@ -9,15 +9,37 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-คุณสร้าง index ที่ดูสมบูรณ์แบบได้ แต่ก็ยังไม่รู้ว่าได้ผลจริงไหม ทางเดียวที่จะมั่นใจคือถาม MongoDB ตรง ๆ ว่ารัน query นี้ยังไง เครื่องมือนั้นคือ `explain`
+คุณสร้าง index สมบูรณ์แบบได้แต่ก็ยังไม่รู้ว่ามันได้ผล วิธีเดียวที่แน่ใจคือถาม MongoDB ว่ามันรัน query จริงอย่างไร และเครื่องมือคือ `explain` เมื่อได้ query แล้ว `explain` รายงาน **plan** ที่ server เลือก - ใช้ index ไหน หรือถอยกลับไปสแกนทั้งหมด - และในโหมดที่ละเอียดกว่ามีตัวเลขจริงจากการรัน การอ่าน output นี้คือทักษะที่ใช้ได้จริงที่สุดของโมดูล: เปลี่ยน "ฉันคิดว่าเร็ว" เป็น "ฉันเห็นว่าเร็ว"
 
-พอส่ง query เข้าไป `explain` จะรายงาน **plan** ที่ server เลือก ว่าหยิบ index ตัวไหนไปใช้ หรือถอยไปสแกนทั้ง collection และในโหมดที่ละเอียดที่สุดก็รายงานตัวเลขจริงจากการรันด้วย การอ่านผลลัพธ์ตรงนี้คือทักษะที่ใช้งานได้จริงที่สุดของทั้งโมดูล เพราะเปลี่ยน "น่าจะเร็ว" ให้เป็น "เห็นกับตาแล้วว่าเร็ว"
+output ด้านล่างจับจาก mongo 8.3.11, mongosh 2.11.1 และ Node driver 7.7.0 บน Mac เครื่องเดียว บทนี้เตรียม `members` 200 000 รายการ (10 เมือง 26 ปี) และนิยาม `plan()` ตัวสรุปบรรทัดเดียวของ `explain("executionStats")`: ลำดับ stage แล้วผลลัพธ์ (`returned`) entry ของ index ที่อ่าน (`keys`) document ที่อ่าน (`docs`) และมิลลิวินาทีฝั่ง server แท็บ Python, Go และ Rust ถูกรันอย่างละหนึ่งครั้งในโปรแกรม scratch
+
+```js
+// mongosh/exp-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {                       // stage chain, then results, keys, documents, server-side ms
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + " " + s.executionTimeMillis + "ms";
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    return { name: "m" + i, joined: NumberInt(2000 + (Math.floor(i / 10) % 26)), fines: i % 7, city: cities[i % 10] };
+  }), { ordered: false });
+}
+console.log("members:", db.members.countDocuments());
+```
+
+```text
+members: 200000
+```
 
 ## ขอ execution stats
 
-`explain("executionStats")` รัน query แล้วคืนทั้ง plan ที่เลือกและจำนวนที่วัดได้ เอาไปแนบกับ query ไหนก็ได้ที่ยิงใส่ `members` ในห้องสมุดของเรา:
+`explain("executionStats")` รัน query และคืนทั้ง plan ที่เลือกและตัวเลขที่วัดได้:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -41,22 +63,19 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
   <TabItem label="Go">
     ```go
-    var result bson.M
-    cmd := bson.D{
-        {Key: "explain", Value: bson.D{
-            {Key: "find", Value: "members"},
-            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
-        }},
+    var res bson.M
+    err := db.RunCommand(ctx, bson.D{
+        {Key: "explain", Value: bson.D{{Key: "find", Value: "members"}, {Key: "filter", Value: bson.M{"city": "Berlin"}}}},
         {Key: "verbosity", Value: "executionStats"},
-    }
-    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
+    }).Decode(&res)
+    if err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let explain = db
+    let res = db
         .run_command(doc! {
             "explain": { "find": "members", "filter": { "city": "Berlin" } },
             "verbosity": "executionStats",
@@ -66,211 +85,365 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-## การอ่าน COLLSCAN
+## อ่าน COLLSCAN และ IXSCAN
 
-ถ้าไม่มี index ครอบตัวกรอง ขั้นตอนของ plan ที่ชนะคือ `COLLSCAN` ตัวเลขที่บอกอะไรได้คือ `totalDocsExamined` — จำนวน document ที่ server ต้องอ่าน — เทียบกับ `nReturned` — จำนวนที่คืนกลับมาจริง การสแกนอ่านทุกอย่างเพื่อหาเพียงไม่กี่ตัว:
+เมื่อ `name` ไม่มี index stage ที่ชนะคือ `COLLSCAN` คู่ที่บอกความจริงคือ `docs` (document ที่ตรวจ) เทียบกับ `returned`; การสแกนอ่านทุกอย่างเพื่อหาไม่กี่รายการ หลัง `createIndex({ name: 1 })` stage บนสุดคือ `FETCH` ที่รับจาก `IXSCAN` ซึ่งอ่านหนึ่ง key:
 
-```json
-{
-  "queryPlanner": {
-    "winningPlan": { "stage": "COLLSCAN", "direction": "forward" }
-  },
-  "executionStats": {
-    "nReturned": 3,
-    "totalDocsExamined": 10000,
-    "executionTimeMillis": 12
-  }
-}
+```js
+// mongosh/exp-scan.js
+console.log("no index    :", plan(db.members.find({ name: "m123456" })));
+db.members.createIndex({ name: 1 });
+console.log("name_1      :", plan(db.members.find({ name: "m123456" })));
 ```
 
-การตรวจหนึ่งหมื่น document เพื่อคืนสามตัวคืออาการตามตำราของการขาด index อัตราส่วนของ `totalDocsExamined` ต่อ `nReturned` คือมาตรวัดประสิทธิภาพของคุณ: ยิ่งใกล้หนึ่งต่อหนึ่งยิ่งดี
-
-## การอ่าน IXSCAN
-
-สร้าง index บน `city` รัน `explain` เดิม แล้ว plan ที่ชนะจะเปลี่ยน ขั้นตอนบนสุดตอนนี้คือ `FETCH` — การดึง document ฉบับเต็ม — ซึ่งป้อนมาจาก `IXSCAN` ที่เดินเฉพาะชิ้นที่เกี่ยวข้องของ index ที่สำคัญคือ `totalKeysExamined` และ `totalDocsExamined` ลดลงมาตรงกับ `nReturned`:
-
-```json
-{
-  "queryPlanner": {
-    "winningPlan": {
-      "stage": "FETCH",
-      "inputStage": {
-        "stage": "IXSCAN",
-        "indexName": "city_1",
-        "direction": "forward"
-      }
-    }
-  },
-  "executionStats": {
-    "nReturned": 3,
-    "totalKeysExamined": 3,
-    "totalDocsExamined": 3,
-    "executionTimeMillis": 0
-  }
-}
+```text
+no index    : COLLSCAN  returned=1 keys=0 docs=200000 64ms
+name_1      : FETCH > IXSCAN(name_1)  returned=1 keys=1 docs=1 1ms
 ```
 
-server ตรวจคีย์ index สามคีย์พอดีและดึง document สามฉบับพอดีเพื่อคืนผลลัพธ์สามตัว นั่นคือชัยชนะที่ index ซื้อให้คุณ ทำให้มองเห็นได้
+ตรวจ 200 000 document เพื่อคืนหนึ่งคือ อาการตำราของ index ที่หายไป 1 key และ 1 document คือชัยชนะ อัตราส่วน `docs` ต่อ `returned` คือเกจประสิทธิภาพ - ยิ่งใกล้ 1:1 ยิ่งดี แท็บ Node.js พิสูจน์เรื่องเดียวกันบน 10 000 document:
+
+```js
+// app/exp-node.mjs
+const c = db.collection("members");
+await c.insertMany(Array.from({ length: 10000 }, (_, i) => ({ name: "m" + i, city: ["Berlin", "Oslo"][i % 2] })));
+const before = (await c.find({ city: "Berlin" }).explain("executionStats")).executionStats;
+await c.createIndex({ city: 1 });
+const after = (await c.find({ city: "Berlin" }).explain("executionStats")).executionStats;
+console.log({ noIndexDocs: before.totalDocsExamined, indexedDocs: after.totalDocsExamined, returned: after.nReturned });
+if (before.totalDocsExamined !== 10000 || after.totalDocsExamined !== after.nReturned) throw new Error("unexpected plan");
+```
+
+```text
+{ noIndexDocs: 10000, indexedDocs: 5000, returned: 5000 }
+```
+
+## สาม verbosity
+
+`explain()` รับ verbosity สิ่งที่เพิ่มเห็นได้จาก key ระดับบนและ `executionStats`:
+
+```js
+// mongosh/exp-modes.js
+const q = { name: "m123456" };
+for (const mode of ["queryPlanner", "executionStats", "allPlansExecution"]) {
+  const e = db.members.find(q).explain(mode);
+  console.log(mode.padEnd(18), "top-level:", Object.keys(e).filter((k) => !["serverInfo", "serverParameters", "ok", "$clusterTime", "operationTime", "command"].includes(k)).join(", "));
+  if (e.executionStats) console.log(" ".repeat(18), "executionStats:", Object.keys(e.executionStats).join(", "));
+}
+const e = db.members.find(q).explain("queryPlanner");
+console.log("explainVersion:", e.explainVersion, "| winningPlan.isCached:", e.queryPlanner.winningPlan.isCached, "| winningPlan.nss:", e.queryPlanner.winningPlan.nss);
+console.log("queryPlanner.planCacheShapeHash / planCacheKey:", e.queryPlanner.planCacheShapeHash, e.queryPlanner.planCacheKey);
+```
+
+```text
+queryPlanner       top-level: explainVersion, queryPlanner, queryShapeHash
+executionStats     top-level: explainVersion, queryPlanner, executionStats, queryShapeHash
+                   executionStats: executionSuccess, nReturned, executionTimeMillis, totalKeysExamined, totalDocsExamined, executionStages
+allPlansExecution  top-level: explainVersion, queryPlanner, executionStats, queryShapeHash
+                   executionStats: executionSuccess, nReturned, executionTimeMillis, totalKeysExamined, totalDocsExamined, executionStages, allPlansExecution
+explainVersion: 1 | winningPlan.isCached: false | winningPlan.nss: b2_b52af1.members
+queryPlanner.planCacheShapeHash / planCacheKey: F4DDDCDC 34C29116
+```
+
+- **queryPlanner** (ค่าเริ่มต้น) วาง plan แต่ไม่รัน query: ปลอดภัยและทันที แต่ไม่มีตัวเลข
+- **executionStats** รัน plan ที่ชนะจนจบและเพิ่ม counter
+- **allPlansExecution** ยังรายงานการทดลองของทุก plan ผู้เข้าชิง
+
+บน 8.3 `find` รายงาน `explainVersion: 1` (classic engine) และแต่ละ stage มี `nss` คือ namespace; `isCached` บอกว่า plan มาจาก plan cache หรือไม่
 
 ## planner เลือกอย่างไร
 
-เมื่อ index หลายอันให้บริการ query ได้ MongoDB ไม่เดา แต่จะสร้าง plan ผู้ท้าชิงให้ทุก index ที่ใช้ได้ รันสั้นๆ พร้อมกัน เลือกอันที่ทำงานน้อยที่สุด แล้วแคชตัวเลือกนั้นไว้เพื่อให้ query ที่เหมือนกันในอนาคตข้ามการแข่งขัน:
+เมื่อหลาย index รับ query ได้ MongoDB ไม่เดา มันสร้าง plan ผู้เข้าชิงสำหรับแต่ละอัน รันใน **การทดลอง** สั้น ๆ ที่หยุดหลังจำนวนหน่วยงานคงที่ ให้คะแนน แล้วเลือกผู้ชนะ query ด้านล่างใช้ได้ทั้ง `city_1` หรือ `joined_1_fines_1`:
 
 export const plannerDiagram = `flowchart LR
   Q["Incoming query"] --> P["Query planner"]
   P --> C1["Candidate plan: index A"]
   P --> C2["Candidate plan: index B"]
   P --> C3["Candidate plan: collection scan"]
-  C1 --> T["Trial run — measure work"]
+  C1 --> T["Trial run - measure work"]
   C2 --> T
   C3 --> T
   T --> W["Winning plan"]
   W --> Cache["Plan cached for matching queries"]`
 
-<Mermaid code={plannerDiagram} title="planner ทดสอบแต่ละผู้ท้าชิง เลือกอันที่ถูกที่สุด และแคชผู้ชนะไว้สำหรับ query ที่ตรงกัน" />
+<Mermaid code={plannerDiagram} title="planner ทดลองผู้เข้าชิงแต่ละราย เลือกตัวที่ถูกที่สุด และ cache ผู้ชนะสำหรับ query ที่ตรงกัน" />
 
-นี่คือเหตุผลที่ `explain` รายงาน `winningPlan` และบางครั้งรายการ `rejectedPlans`: คุณกำลังเห็นผลลัพธ์ของการแข่งขันนั้น
+```js
+// mongosh/exp-planner.js
+db.members.createIndex({ city: 1 });
+db.members.createIndex({ joined: 1, fines: 1 });
+const q = { city: "Berlin", joined: 2023 };                       // both indexes can help
+const all = db.members.find(q).explain("allPlansExecution");
+const wp = all.queryPlanner.winningPlan;
+console.log("winner  :", wp.inputStage.indexName, "| rejected:", all.queryPlanner.rejectedPlans.map((p) => p.inputStage.indexName));
+console.log("trial run (each candidate gets a capped number of works):");
+console.log(all.executionStats.allPlansExecution.map((p) => {
+  let s = p.executionStages; while (s.inputStage) s = s.inputStage;
+  return { index: s.indexName, nReturned: p.nReturned, keys: p.totalKeysExamined, score: +p.score.toFixed(4) };
+}));
+console.log("full run:", plan(db.members.find(q)));
+console.log("forced city_1:", plan(db.members.find(q).hint("city_1")));
+```
+
+```text
+winner  : joined_1_fines_1 | rejected: [ 'city_1' ]
+trial run (each candidate gets a capped number of works):
+[
+  {
+    index: 'joined_1_fines_1',
+    nReturned: 101,
+    keys: 1003,
+    score: 1.1009
+  },
+  { index: 'city_1', nReturned: 38, keys: 1003, score: 1.0381 }
+]
+full run: FETCH > IXSCAN(joined_1_fines_1)  returned=769 keys=7690 docs=7690 8ms
+forced city_1: FETCH > IXSCAN(city_1)  returned=769 keys=20000 docs=20000 15ms
+```
+
+`rejectedPlans` แสดงผู้แพ้ ในการทดลองแต่ละผู้เข้าชิงได้ราว 1 003 works: ผู้ชนะให้ 101 ผลลัพธ์ในงบนั้น ผู้แพ้ 38 จึงได้คะแนนต่างกัน การทดลองเป็น heuristic - การรันเต็มยืนยันตรงนี้ (7 690 key เทียบ 20 000) แต่ planner ผิดได้เมื่อข้อมูลเบ้ เหตุผลที่มี `hint()` และการตรวจซ้ำเมื่อข้อมูลเปลี่ยน
+
+### plan cache
+
+ผู้ชนะถูก cache ตาม query shape การรันครั้งถัดไปจึงข้ามการแข่ง `$planCacheStats` แสดง cache; `explain` อย่างเดียวไม่สร้าง entry การรันจริงเท่านั้นที่สร้าง:
+
+```js
+// mongosh/exp-cache.js
+const q = { city: "Berlin", joined: 2023 };
+console.log("before any real execution:", db.members.aggregate([{ $planCacheStats: {} }]).toArray().length, "entries");
+for (let i = 0; i < 3; i++) db.members.find(q).toArray();          // explain() does not populate the cache; real runs do
+const entry = db.members.aggregate([{ $planCacheStats: {} }]).toArray()[0];
+console.log({ isActive: entry.isActive, works: Number(entry.works), cachedPlanStage: entry.cachedPlan.stage, createdFromQuery: entry.createdFromQuery });
+console.log("explain now says isCached:", db.members.find(q).explain().queryPlanner.winningPlan.isCached);
+db.members.getPlanCache().clear();
+console.log("after getPlanCache().clear():", db.members.aggregate([{ $planCacheStats: {} }]).toArray().length, "entries");
+```
+
+```text
+before any real execution: 0 entries
+{
+  isActive: true,
+  works: 1003,
+  cachedPlanStage: 'FETCH',
+  createdFromQuery: { query: { city: 'Berlin', joined: 2023 }, sort: {}, projection: {} }
+}
+explain now says isCached: true
+after getPlanCache().clear(): 0 entries
+```
 
 ## covered query
 
-มีอีกหนึ่งระดับที่ดีกว่า `IXSCAN` ที่เร็วบวก `FETCH`: query ที่ index ตอบได้**โดยไม่ต้องดึง document เลย** สิ่งนี้เกิดขึ้นเมื่อทุกฟิลด์ที่ query ต้องการ — ทั้งฟิลด์ตัวกรองและฟิลด์ที่คุณขอกลับมาใน projection — อยู่ใน index server อ่านคำตอบตรงจากคีย์ index และข้าม document ไปทั้งหมด query แบบนั้นเรียกว่า **covered** และ plan จะไม่มีขั้น `FETCH` เลย
+มีระดับที่ดีกว่า `IXSCAN` บวก `FETCH`: query ที่ index ตอบได้ **โดยไม่ fetch document เลย** MongoDB นิยามว่าเป็น "a query that can be satisfied entirely using an index and doesn't have to examine any documents": ทุก field ที่ filter และที่คืนอยู่ใน index เดียว ([query optimization](https://www.mongodb.com/docs/manual/core/query-optimization/), ตรวจ 2026-09-30) plan ไม่มี `FETCH` และ `docs=0` `_id` ถูกคืนเป็นค่าเริ่มต้น จึงมักต้องปิด
 
-สร้าง index บน `{ city: 1, joined: 1 }` แล้วขอเฉพาะ `joined` ขณะกด `_id` ไว้ (เพราะ `_id` ไม่อยู่ใน index นี้):
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members
-      .find({ city: "Berlin" }, { joined: 1, _id: 0 })
-      .explain("executionStats")
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members")
-      .find({ city: "Berlin" }, { projection: { joined: 1, _id: 0 } })
-      .explain("executionStats");
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.find(
-        {"city": "Berlin"},
-        {"joined": 1, "_id": 0},
-    ).explain()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    cmd := bson.D{
-        {Key: "explain", Value: bson.D{
-            {Key: "find", Value: "members"},
-            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
-            {Key: "projection", Value: bson.D{{Key: "joined", Value: 1}, {Key: "_id", Value: 0}}},
-        }},
-        {Key: "verbosity", Value: "executionStats"},
-    }
-    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let explain = db
-        .run_command(doc! {
-            "explain": {
-                "find": "members",
-                "filter": { "city": "Berlin" },
-                "projection": { "joined": 1, "_id": 0 },
-            },
-            "verbosity": "executionStats",
-        })
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-plan ไปจาก `IXSCAN` ตรงสู่ผลลัพธ์โดยไม่มี `FETCH` คั่นกลาง และ `totalDocsExamined` เป็น `0` — เป็นเครื่องบ่งชี้ว่าไม่เคยมีการอ่าน document เลย:
-
-```json
-{
-  "queryPlanner": {
-    "winningPlan": {
-      "stage": "PROJECTION_COVERED",
-      "inputStage": { "stage": "IXSCAN", "indexName": "city_1_joined_1" }
-    }
-  },
-  "executionStats": {
-    "nReturned": 3,
-    "totalKeysExamined": 3,
-    "totalDocsExamined": 0
-  }
-}
+```js
+// mongosh/exp-covered.js
+db.members.createIndex({ city: 1, joined: 1 });
+console.log("needs name  :", plan(db.members.find({ city: "Berlin" }, { name: 1, _id: 0 })));
+console.log("covered     :", plan(db.members.find({ city: "Berlin" }, { joined: 1, _id: 0 })));
+console.log("forgot _id  :", plan(db.members.find({ city: "Berlin" }, { joined: 1 })));
+assert.match(plan(db.members.find({ city: "Berlin" }, { joined: 1, _id: 0 })), /PROJECTION_COVERED/);
 ```
 
-**ใน Compass:** แท็บ **Explain Plan** เรนเดอร์สิ่งนี้เป็นต้นไม้ของขั้นตอนแบบภาพพร้อมจำนวนเดียวกัน คุณจึงยืนยัน `IXSCAN` จับ `COLLSCAN` ที่หลงมา และเห็น `Documents Examined` เทียบกับ `Documents Returned` ได้โดยไม่ต้องอ่านผลลัพธ์ดิบ
+```text
+needs name  : PROJECTION_SIMPLE > FETCH > IXSCAN(city_1)  returned=20000 keys=20000 docs=20000 18ms
+covered     : PROJECTION_COVERED > IXSCAN(city_1_joined_1)  returned=20000 keys=20000 docs=0 10ms
+forgot _id  : PROJECTION_SIMPLE > FETCH > IXSCAN(city_1)  returned=20000 keys=20000 docs=20000 17ms
+```
 
-## เคล็ดลับและจุดพลาด
+บรรทัดที่หนึ่งและสามแสดงสองรอยรั่วที่พบบ่อย: ขอ field ที่ index ไม่มี (`name`) และลืม `_id: 0` - ทั้งคู่เพิ่ม `FETCH` และอ่าน 20 000 document สังเกตด้วยว่าเมื่อไม่ปิด `_id` planner ไม่ได้เลือก compound index ด้วยซ้ำ
 
-- อัตราส่วนหัวเรื่องคือ `totalDocsExamined` เทียบกับ `nReturned` ถ้าใกล้หนึ่งต่อหนึ่ง แปลว่า index ทำงานได้ดี ถ้าตัวเลขพองขึ้น แปลว่ามีอะไรบางอย่างกำลังสแกนอยู่
-- `executionStats` รัน query จริงเพื่อเก็บตัวเลข ดังนั้นกับงานเขียนหรืองานอ่านที่แพง ให้ระวังจังหวะที่เรียกใช้
-- covered query ต้องจัดการ `_id` เนื่องจาก `_id` ถูกคืนมาโดยปริยายและแทบไม่อยู่ใน index ที่คุณทำเอง คุณจึงมักต้องปิด `_id` ใน projection เพื่อให้ query ยังเป็น covered อยู่
-- ขั้น `FETCH` ไม่ใช่ความล้มเหลว แค่แปลว่า index หา document เจอแล้ว แต่ projection ยังขอฟิลด์ที่ index ไม่ได้เก็บไว้ covered query เป็นการเพิ่มประสิทธิภาพ ไม่ใช่ข้อบังคับ
+**In Compass:** แท็บ **Explain Plan** แสดงเป็นต้นไม้ของ stage พร้อมตัวเลขเดียวกัน คุณจึงยืนยัน `IXSCAN` เห็น `COLLSCAN` ที่หลุดมา และเทียบ **Documents Examined** กับ **Documents Returned**
 
-<Callout title="เชื่อ plan ไม่ใช่ลางสังหรณ์ของคุณ">
-รัน explain("executionStats") แล้วเปรียบเทียบ totalDocsExamined กับ nReturned COLLSCAN หรือช่องว่างที่ใหญ่ระหว่างทั้งสองคือหลักฐานว่าคุณต้องการ index ที่ดีกว่า — และ totalDocsExamined ที่เป็นศูนย์คือหลักฐานว่า query ของคุณเป็น covered
+## plan ของ aggregation และ slot-based engine
+
+ไม่ใช่ทุก explain ที่หน้าตาเป็นสาย `FETCH > IXSCAN` ข้างบน บาง pipeline (ที่นี่คือ `$group`) รันบน slot-based execution engine และรายงาน `explainVersion: 2` พร้อม `queryPlan` (stage เชิงตรรกะ) และ `slotBasedPlan` (โปรแกรมที่รันจริง) การตั้งค่าเบื้องหลังบน server นี้คือ `internalQueryFrameworkControl: "trySbeRestricted"` ที่เห็นได้ใน `serverParameters`:
+
+```js
+// mongosh/exp-sbe.js
+const f = db.members.find({ city: "Berlin" }).explain();
+const a = db.members.explain().aggregate([{ $group: { _id: "$city", n: { $sum: 1 } } }]);
+console.log("find      explainVersion", f.explainVersion, "| winningPlan keys:", Object.keys(f.queryPlanner.winningPlan).join(", "));
+console.log("aggregate explainVersion", a.explainVersion, "| winningPlan keys:", Object.keys(a.queryPlanner.winningPlan).join(", "));
+console.log("queryPlan  :", a.queryPlanner.winningPlan.queryPlan.stage, ">", a.queryPlanner.winningPlan.queryPlan.inputStage.stage);
+console.log("slotBasedPlan.stages:\n" + a.queryPlanner.winningPlan.slotBasedPlan.stages.replace(/@"[0-9a-f-]+"/, '@"<collection uuid>"'));
+```
+
+```text
+find      explainVersion 1 | winningPlan keys: isCached, stage, nss, inputStage
+aggregate explainVersion 2 | winningPlan keys: isCached, queryPlan, slotBasedPlan
+queryPlan  : GROUP > COLLSCAN
+slotBasedPlan.stages:
+[3] project [s7 = newBsonObj("_id", s6, "n", s4)] 
+[3] group [s6] [s4 = _internalCount::accumulate(s4, 1)] spillSlots[s5] mergingExprs[_internalCount::merge(s5)] 
+[3] project [s6 = (s3 ?: null)] 
+[1] scan generic [s1 = record, s2 = recordId] [s3 = city] @"<collection uuid>" 
+```
+
+อ่าน `queryPlan` (`GROUP > COLLSCAN`) แบบเดียวกับ plan classic; `slotBasedPlan` สำหรับวิศวกรที่ debug engine engine ที่ query ได้อาจต่างกันระหว่างเวอร์ชัน จงอ่านรูปทรงแทนการสมมติ
+
+## explain บน write คือ dry run
+
+```js
+// mongosh/exp-update.js
+const total = () => db.members.aggregate([{ $group: { _id: null, f: { $sum: "$fines" } } }]).toArray()[0].f;
+const before = total();
+const e = db.runCommand({
+  explain: { update: "members", updates: [{ q: { city: "Berlin" }, u: { $inc: { fines: 1 } }, multi: true }] },
+  verbosity: "executionStats",
+});
+const st = e.executionStats.executionStages;
+console.log({ topStage: st.stage, nWouldModify: st.nWouldModify, nMatched: st.nMatched, inputStage: st.inputStage.stage });
+console.log("sum of fines before:", before, "after explain:", total());
+assert.strictEqual(before, total());
+```
+
+```text
+{
+  topStage: 'UPDATE',
+  nWouldModify: 20000,
+  nMatched: 20000,
+  inputStage: 'FETCH'
+}
+sum of fines before: 599994 after explain: 599994
+```
+
+`explain` บน `update` วาง plan และ (ใน `executionStats`) รายงาน `nWouldModify` โดยไม่ใช้ update จริง คุณจึงตรวจขอบเขตของการเปลี่ยนจำนวนมากก่อนได้
+
+## เคล็ดลับและข้อควรระวัง
+
+- อัตราส่วนหลักคือ `docs` ต่อ `returned` ใกล้ 1:1 index ทำงานดี ถ้าพอง แปลว่ามีอะไรสแกนหรือกรองช้า
+- `executionStats` รัน query (อ่านอย่างเดียวสำหรับ `find`) ดังนั้นกับการอ่านที่แพงควรระวัง; `queryPlanner` ไม่เคยรัน
+- covered query ต้องมี `_id: 0` (เว้นแต่ `_id` อยู่ใน index) และมีแต่ field ที่ทำ index
+- `FETCH` ไม่ใช่ความล้มเหลว - แค่ projection ต้องการ field ที่ index ไม่มี
+
+<Callout title="เชื่อ plan ไม่ใช่สัญชาตญาณ">
+รัน `explain("executionStats")` แล้วเทียบ `totalDocsExamined` กับ `nReturned` COLLSCAN หรือช่องว่างกว้างระหว่างสองค่าคือหลักฐานว่าต้องมี index ที่ดีกว่า - และ `totalDocsExamined: 0` คือหลักฐานว่า query ถูก cover
 </Callout>
+
+## อ่านโค้ดที่ AI สร้าง
+
+เมื่อถูกขอ "เพิ่ม guard ที่ทำให้ CI ล้มเมื่อ query ไม่มี index" AI เขียน check แบบที่คนส่วนใหญ่คิด:
+
+<SpotTheBug lang="js" code={`// AI comment: "fail the build if the winning plan has no index scan"
+const plan = await members.find({ city: "Berlin", name: "m1000" }).explain();
+if (!JSON.stringify(plan.queryPlanner.winningPlan).includes("IXSCAN")) throw new Error("query is not indexed");`}>
+
+"ใช้ index" กับ "มีประสิทธิภาพ" เป็นคนละข้ออ้าง เมื่อมีแค่ `{ city: 1 }` query นี้ผ่าน check แต่ตรวจ 20 000 document เพื่อคืนหนึ่งรายการ เพราะ index จำกัดแค่ city check ต้องดู `executionStats` และเทียบงานกับผลลัพธ์ (ที่นี่เป็น guard แบบอัตราส่วน) และทางแก้จริงคือ index ที่ตรงทั้ง filter:
+
+```js
+// mongosh/exp-bug.js
+db.members.dropIndexes();                                            // only _id_ ...
+db.members.createIndex({ city: 1 });                                 // ... and the "indexed" city field
+const looksIndexed = (cur) => JSON.stringify(cur.explain("queryPlanner").queryPlanner.winningPlan).includes("IXSCAN");   // the AI check
+const efficient = (cur) => { const s = cur.explain("executionStats").executionStats; return s.totalDocsExamined <= 10 * Math.max(1, s.nReturned); };
+const q = { city: "Berlin", name: "m1000" };                          // one match in 20 000 Berlin members
+console.log("AI check says indexed:", looksIndexed(db.members.find(q)), "|", plan(db.members.find(q)));
+console.log("ratio check says efficient:", efficient(db.members.find(q)));
+db.members.createIndex({ city: 1, name: 1 });
+console.log("after { city, name }  :", efficient(db.members.find(q)), "|", plan(db.members.find(q)));
+```
+
+```text
+AI check says indexed: true | FETCH > IXSCAN(city_1)  returned=1 keys=20000 docs=20000 16ms
+ratio check says efficient: false
+after { city, name }  : true | FETCH > IXSCAN(city_1_name_1)  returned=1 keys=1 docs=1 0ms
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`explain` คือใบเสร็จของ query planner `queryPlanner` คือใบเสนอราคา (สิ่งที่ตั้งใจทำ) `executionStats` คือใบแจ้งหนี้ (สิ่งที่ทำจริง) และ `allPlansExecution` ยังแสดงใบเสนอราคาที่ถูกปฏิเสธ plan ที่ถูกที่สุดคือที่ `keys` และ `docs` ใกล้ `returned`
 
 ## ข้อแลกเปลี่ยน
 
-| ตัวเลือก | Benefit | Cost |
+| ทางเลือก | ข้อดี | ต้นทุน |
 |---------|---------|------|
-| อ่าน `explain()` ก่อนตัดสินใจเพิ่ม/ลบ index | เห็นหลักฐานจริงว่า query สแกนเท่าไรและใช้ index ตัวไหน ตัดสินใจได้แม่นยำ | ต้องรัน query จริงและอ่านผลลัพธ์ กินเวลาเพิ่มก่อนลงมือ |
-| เดาว่า index ไหนช่วยแล้วสร้างเลย | ทำได้เร็ว ไม่ต้องรอวิเคราะห์ | มักผิด ได้ index ที่ query ไม่เคยใช้ แถมยังแบกรับ write cost ของ index ที่ไม่มีประโยชน์ |
+| `explain("queryPlanner")` | ทันที ไม่รัน query | ไม่มีตัวเลข - เห็นความเปลืองระดับ 20 000 document ไม่ได้ |
+| `explain("executionStats")` | keys และ documents ที่ตรวจจริง | รัน query; เพิ่มโหลดกับการอ่านใหญ่ |
+| `allPlansExecution` | แสดงว่าทำไม plan ชนะหรือแพ้ | รันการทดลองของทุกผู้เข้าชิง; output ยาว |
+| covered query | `docs=0`: ไม่อ่าน document | index ต้องมีทุก field ที่ filter และคืน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **สร้าง index แล้วไม่ตรวจว่า query ใช้จริงหรือเปล่า** — มี index อยู่ไม่ได้แปลว่า planner จะหยิบไปใช้ ต้องรัน `explain()` ยืนยันว่า `winningPlan` เป็น `IXSCAN` ที่ใช้ index นั้นจริง
-- **มองแค่ `nReturned` โดยไม่ดู `totalDocsExamined`** — query ที่คืนผลลัพธ์น้อยแต่ `totalDocsExamined` สูงมากยังเป็น query ที่ไม่มีประสิทธิภาพ แม้ผลลัพธ์จะดูถูกต้องและเร็วพอในสายตา
-- **รัน `explain("executionStats")` บนระบบ production แบบไม่ระวัง** — โหมดนี้รัน query จริง ไม่ใช่แค่ประเมิน plan ถ้า query เขียนหรืออ่านหนัก การรันซ้ำๆ บน production เพิ่มโหลดจริงให้ server 
+- **"IXSCAN ใน plan แปลว่า query เร็ว"** - มันตรวจ 20 000 document เพื่อ 1 ผลลัพธ์ผ่าน `city_1`
+- **"`explain()` รัน query"** - มีแต่ `executionStats`/`allPlansExecution`; ค่าเริ่มต้นแค่วาง plan
+- **"plan ที่ cache ปรากฏหลัง explain"** - `$planCacheStats` ว่างหลัง explain และมีของหลังรันจริง
+- **"explain บน update เปลี่ยนข้อมูล"** - `nWouldModify: 20000` ผลรวม fines ไม่เปลี่ยน
+- **"ทุก explain มีสาย `winningPlan.inputStage`"** - aggregation อาจรายงาน `queryPlan` และ `slotBasedPlan`
 
-> 💡 ตัวอย่างจากของจริง
+> ตัวอย่างจากของจริง
 >
-> **ทีม platform ที่ตั้ง slow query threshold ใน MongoDB Atlas** — ทุก query ที่ช้ากว่า threshold จะเข้า log พร้อม plan summary แล้ววิศวกรรัน `explain("executionStats")` ซ้ำเพื่อยืนยันก่อนตัดสินใจเพิ่ม index แทนที่จะเดาจาก dashboard เฉยๆ
->
-> **ทีม backend ที่ debug API endpoint ที่ช้าลงเรื่อยๆ เมื่อข้อมูลโต** — ใช้ `explain()` เจอว่า query ที่เคยเป็น covered query กลายเป็น query ที่มี `FETCH` เพิ่มเข้ามาหลังเปลี่ยน projection เล็กน้อย จึงแก้ index ให้ครอบฟิลด์ที่ query ใหม่ต้องการ
+> เอกสารของ MongoDB เองบอกวิธีตรวจคุณสมบัติที่บทนี้วัด: "To determine whether a query is a covered query, use the `db.collection.explain()` or the `explain()` method" ([query optimization](https://www.mongodb.com/docs/manual/core/query-optimization/), ตรวจ 2026-09-30) Atlas แสดง query ช้าแบบเดียวกันใน Performance Advisor และคุณยืนยันแต่ละคำแนะนำด้วย `explain` ก่อนเพิ่ม index
+
+_แท็บ Python/Go/Rust สะท้อนพฤติกรรมที่พิสูจน์แล้วของ shell/Node; แต่ละแท็บถูกรันหนึ่งครั้งในโปรแกรม scratch กับ server เดียวกัน (การเรียก explain คืนเอกสาร plan) แต่ไม่ถูกรันโดยตัวตรวจอัตโนมัติของคอร์ส_
 
 export const quizExplain = [
   {
-    q: 'ในผลลัพธ์ของ explain ขั้นตอน COLLSCAN บ่งบอกอะไร?',
+    q: 'ใน output ของ explain stage COLLSCAN บอกอะไร',
     options: [
-      'query ใช้ index ที่มีประสิทธิภาพที่สุดที่มีอยู่',
-      'query อ่านทั้ง collection เพราะไม่มี index ตัวไหนรับใช้ได้',
-      'query ถูกครอบโดย index (covered)',
-      'query รันล้มเหลว',
+      'query ใช้ index ที่มีประสิทธิภาพที่สุด',
+      'query อ่านทั้ง collection เพราะไม่มี index ที่ใช้ได้',
+      'query ถูก cover โดย index',
+      'query รันไม่สำเร็จ',
     ],
     answer: 1,
+    explain: 'find({ name: "m123456" }) ที่ไม่มี index: COLLSCAN, docs=200000 เพื่อคืน 1 รายการ',
   },
   {
-    q: 'การเปรียบเทียบใดบ่งชี้ query ที่ไม่มีประสิทธิภาพได้ดีที่สุด?',
+    q: 'การเปรียบเทียบใดบ่งบอก query ไม่มีประสิทธิภาพที่สุด',
     options: [
-      'nReturned น้อยกว่า totalDocsExamined มาก',
+      'totalDocsExamined มากกว่า nReturned มาก',
       'totalKeysExamined เท่ากับ nReturned',
       'executionTimeMillis เท่ากับศูนย์',
       'winningPlan ที่ระบุชื่อ index',
     ],
     answer: 0,
+    explain: 'plan city_1 สำหรับ { city, name } ใช้ index (IXSCAN) แต่ตรวจ 20 000 document เพื่อคืน 1 รายการ มีเพียงอัตราส่วนที่เปิดโปง',
   },
   {
-    q: 'อะไรทำให้ query เป็น "covered"?',
+    q: 'อะไรทำให้ query เป็น "covered"',
     options: [
-      'ใช้ index ตัวไหนก็ได้',
-      'ทุกฟิลด์ที่ query ต้องใช้ รวมถึงฟิลด์ที่ project อยู่ใน index จึงไม่ต้องดึง document',
-      'คืน document น้อยกว่าสิบอัน',
-      'รันอยู่ภายใน transaction',
+      'ใช้ index ใดก็ได้',
+      'ทุก field ที่ filter และคืนอยู่ใน index เดียว จึงไม่ fetch document',
+      'คืนน้อยกว่าสิบ document',
+      'รันใน transaction',
     ],
     answer: 1,
+    explain: 'PROJECTION_COVERED > IXSCAN และ docs=0 สำหรับ { joined: 1, _id: 0 }; เมื่อไม่ใส่ _id: 0 plan มี FETCH เพิ่ม',
+  },
+  {
+    q: 'explain verbosity ใดแสดงตัวเลขการทดลองของ candidate ที่แพ้',
+    options: [
+      'queryPlanner',
+      'executionStats',
+      'allPlansExecution',
+      'ไม่มีเลย',
+    ],
+    answer: 2,
+    explain: 'มีเพียง allPlansExecution ที่เพิ่ม executionStats.allPlansExecution: joined_1_fines_1 (คืน 101, score 1.1009) ชนะ city_1 (38, 1.0381)',
+  },
+  {
+    q: 'การรัน explain("executionStats") กับ updateMany เปลี่ยนข้อมูลหรือไม่',
+    options: [
+      'ใช่ มันใช้ update จริง',
+      'ไม่ มันเป็น dry run; nWouldModify รายงานสิ่งที่จะเปลี่ยน',
+      'เฉพาะ replica set',
+      'เฉพาะเมื่อ update ไม่มี filter',
+    ],
+    answer: 1,
+    explain: 'nWouldModify เป็น 20000 และผลรวม fines ยังเป็น 599994',
+  },
+  {
+    q: 'เมื่อไรที่ explain แสดง winningPlan.isCached: true',
+    options: [
+      'เสมอ',
+      'หลังการรันจริงสร้าง entry ใน plan cache สำหรับ query shape นั้น (explain อย่างเดียวไม่สร้าง)',
+      'เฉพาะ COLLSCAN',
+      'เฉพาะกับ allPlansExecution',
+    ],
+    answer: 1,
+    explain: '$planCacheStats มี 0 entry หลัง explain หลายครั้ง มี 1 entry ที่ active หลัง find จริงสามครั้ง และ isCached เปลี่ยนเป็น true',
   },
 ]
 

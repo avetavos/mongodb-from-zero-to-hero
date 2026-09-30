@@ -1,6 +1,6 @@
 ---
 title: Explain and query plans
-description: Read explain output to confirm an index was used, compare COLLSCAN with IXSCAN, weigh documents examined against documents returned, and spot a covered query.
+description: Read explain output on 200 000 documents - COLLSCAN versus IXSCAN, the three verbosity modes, rejected plans and the plan cache, covered queries, the slot-based engine shape, and explain on an update.
 sidebar:
   order: 4
 ---
@@ -9,13 +9,37 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-You can build the perfect index and still not know it worked. The only way to be sure is to ask MongoDB how it actually ran the query, and the tool for that is `explain`. Given a query, `explain` reports the **plan** the server chose — which index it used, or whether it fell back to a full scan — and, in its richest mode, the real numbers from running it. Reading that output is the single most practical skill in this whole module, because it turns "I think this is fast" into "I can see it is fast."
+You can build the perfect index and still not know it worked. The only way to be sure is to ask MongoDB how it actually ran the query, and the tool for that is `explain`. Given a query, `explain` reports the **plan** the server chose - which index it used, or whether it fell back to a full scan - and, in its richer modes, the real numbers from running it. Reading that output is the most practical skill in this module: it turns "I think this is fast" into "I can see it is fast."
+
+Output below was captured on mongo 8.3.11, mongosh 2.11.1 and Node driver 7.7.0 on one Mac. The lesson seeds its own 200 000 `members` (10 cities, 26 join years) and defines `plan()`, a one-line summary of `explain("executionStats")`: the stage chain, then results (`returned`), index entries read (`keys`), documents read (`docs`) and server-side milliseconds. Python, Go and Rust tabs were each run once in a scratch program.
+
+```js
+// mongosh/exp-seed.js
+const cities = ["Berlin", "Paris", "Lima", "Oslo", "Cairo", "Tokyo", "Rome", "Lagos", "Dhaka", "Quito"];
+globalThis.plan = (cur) => {                       // stage chain, then results, keys, documents, server-side ms
+  const e = cur.explain("executionStats"), s = e.executionStats, stages = [];
+  for (let p = e.queryPlanner.winningPlan; p; p = p.inputStage) stages.push(p.stage + (p.indexName ? "(" + p.indexName + ")" : ""));
+  return stages.join(" > ") + "  returned=" + s.nReturned + " keys=" + s.totalKeysExamined + " docs=" + s.totalDocsExamined + " " + s.executionTimeMillis + "ms";
+};
+for (let s = 0; s < 200000; s += 50000) {
+  db.members.insertMany(Array.from({ length: 50000 }, (_, k) => {
+    const i = s + k;
+    return { name: "m" + i, joined: NumberInt(2000 + (Math.floor(i / 10) % 26)), fines: i % 7, city: cities[i % 10] };
+  }), { ordered: false });
+}
+console.log("members:", db.members.countDocuments());
+```
+
+```text
+members: 200000
+```
 
 ## Asking for execution stats
 
-`explain("executionStats")` runs the query and returns both the chosen plan and measured counts. Attach it to any query against our library `members`:
+`explain("executionStats")` runs the query and returns both the chosen plan and measured counts:
 
 <Tabs syncKey="lang">
   <TabItem label="mongosh">
@@ -39,22 +63,19 @@ You can build the perfect index and still not know it worked. The only way to be
   </TabItem>
   <TabItem label="Go">
     ```go
-    var result bson.M
-    cmd := bson.D{
-        {Key: "explain", Value: bson.D{
-            {Key: "find", Value: "members"},
-            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
-        }},
+    var res bson.M
+    err := db.RunCommand(ctx, bson.D{
+        {Key: "explain", Value: bson.D{{Key: "find", Value: "members"}, {Key: "filter", Value: bson.M{"city": "Berlin"}}}},
         {Key: "verbosity", Value: "executionStats"},
-    }
-    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
+    }).Decode(&res)
+    if err != nil {
         return err
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let explain = db
+    let res = db
         .run_command(doc! {
             "explain": { "find": "members", "filter": { "city": "Berlin" } },
             "verbosity": "executionStats",
@@ -64,62 +85,82 @@ You can build the perfect index and still not know it worked. The only way to be
   </TabItem>
 </Tabs>
 
-## Reading a COLLSCAN
+## Reading a COLLSCAN and an IXSCAN
 
-If no index covers the filter, the winning plan's stage is `COLLSCAN`. The telling numbers are `totalDocsExamined` — how many documents the server had to read — against `nReturned` — how many it actually handed back. A scan reads everything to find a few:
+With no index on `name` the winning stage is `COLLSCAN`. The telling pair is `docs` (documents examined) against `returned`; a scan reads everything to find a few. After `createIndex({ name: 1 })` the top stage is `FETCH` fed by an `IXSCAN` that read one key:
 
-```json
-{
-  "queryPlanner": {
-    "winningPlan": { "stage": "COLLSCAN", "direction": "forward" }
-  },
-  "executionStats": {
-    "nReturned": 3,
-    "totalDocsExamined": 10000,
-    "executionTimeMillis": 12
-  }
-}
+```js
+// mongosh/exp-scan.js
+console.log("no index    :", plan(db.members.find({ name: "m123456" })));
+db.members.createIndex({ name: 1 });
+console.log("name_1      :", plan(db.members.find({ name: "m123456" })));
 ```
 
-Examining ten thousand documents to return three is the textbook symptom of a missing index. The ratio of `totalDocsExamined` to `nReturned` is your efficiency gauge: the closer to one to one, the better.
-
-## Reading an IXSCAN
-
-Create an index on `city`, run the same `explain`, and the winning plan changes. The top stage is now `FETCH` — fetching full documents — feeding from an `IXSCAN` that walked only the relevant slice of the index. Crucially, `totalKeysExamined` and `totalDocsExamined` drop to match `nReturned`:
-
-```json
-{
-  "queryPlanner": {
-    "winningPlan": {
-      "stage": "FETCH",
-      "inputStage": {
-        "stage": "IXSCAN",
-        "indexName": "city_1",
-        "direction": "forward"
-      }
-    }
-  },
-  "executionStats": {
-    "nReturned": 3,
-    "totalKeysExamined": 3,
-    "totalDocsExamined": 3,
-    "executionTimeMillis": 0
-  }
-}
+```text
+no index    : COLLSCAN  returned=1 keys=0 docs=200000 64ms
+name_1      : FETCH > IXSCAN(name_1)  returned=1 keys=1 docs=1 1ms
 ```
 
-The server examined exactly three index keys and fetched exactly three documents to return three results. That is the win the index bought you, made visible.
+200 000 documents examined to return one is the textbook symptom of a missing index; 1 key and 1 document is the win. The ratio of `docs` to `returned` is your efficiency gauge - closer to 1:1 is better. The Node.js tab proves the same on 10 000 documents:
+
+```js
+// app/exp-node.mjs
+const c = db.collection("members");
+await c.insertMany(Array.from({ length: 10000 }, (_, i) => ({ name: "m" + i, city: ["Berlin", "Oslo"][i % 2] })));
+const before = (await c.find({ city: "Berlin" }).explain("executionStats")).executionStats;
+await c.createIndex({ city: 1 });
+const after = (await c.find({ city: "Berlin" }).explain("executionStats")).executionStats;
+console.log({ noIndexDocs: before.totalDocsExamined, indexedDocs: after.totalDocsExamined, returned: after.nReturned });
+if (before.totalDocsExamined !== 10000 || after.totalDocsExamined !== after.nReturned) throw new Error("unexpected plan");
+```
+
+```text
+{ noIndexDocs: 10000, indexedDocs: 5000, returned: 5000 }
+```
+
+## The three verbosity modes
+
+`explain()` takes a verbosity. What it adds is visible in the top-level and `executionStats` keys:
+
+```js
+// mongosh/exp-modes.js
+const q = { name: "m123456" };
+for (const mode of ["queryPlanner", "executionStats", "allPlansExecution"]) {
+  const e = db.members.find(q).explain(mode);
+  console.log(mode.padEnd(18), "top-level:", Object.keys(e).filter((k) => !["serverInfo", "serverParameters", "ok", "$clusterTime", "operationTime", "command"].includes(k)).join(", "));
+  if (e.executionStats) console.log(" ".repeat(18), "executionStats:", Object.keys(e.executionStats).join(", "));
+}
+const e = db.members.find(q).explain("queryPlanner");
+console.log("explainVersion:", e.explainVersion, "| winningPlan.isCached:", e.queryPlanner.winningPlan.isCached, "| winningPlan.nss:", e.queryPlanner.winningPlan.nss);
+console.log("queryPlanner.planCacheShapeHash / planCacheKey:", e.queryPlanner.planCacheShapeHash, e.queryPlanner.planCacheKey);
+```
+
+```text
+queryPlanner       top-level: explainVersion, queryPlanner, queryShapeHash
+executionStats     top-level: explainVersion, queryPlanner, executionStats, queryShapeHash
+                   executionStats: executionSuccess, nReturned, executionTimeMillis, totalKeysExamined, totalDocsExamined, executionStages
+allPlansExecution  top-level: explainVersion, queryPlanner, executionStats, queryShapeHash
+                   executionStats: executionSuccess, nReturned, executionTimeMillis, totalKeysExamined, totalDocsExamined, executionStages, allPlansExecution
+explainVersion: 1 | winningPlan.isCached: false | winningPlan.nss: b2_b52af1.members
+queryPlanner.planCacheShapeHash / planCacheKey: F4DDDCDC 34C29116
+```
+
+- **queryPlanner** (the default) plans but does not run the query: safe and instant, but no counts.
+- **executionStats** runs the winning plan to completion and adds the counters.
+- **allPlansExecution** also reports the trial run of every candidate plan.
+
+On 8.3 a `find` reports `explainVersion: 1` (the classic engine) and each stage carries `nss`, the namespace; `isCached` says whether the plan came from the plan cache.
 
 ## How the planner chooses
 
-When several indexes could serve a query, MongoDB does not guess. It generates a candidate plan for each viable index, runs them briefly in parallel, picks the one that does the least work, and caches that choice so future identical queries skip the contest:
+When several indexes could serve a query, MongoDB does not guess. It builds a candidate plan for each, runs them in a short **trial** that stops after a fixed number of work units, scores them, and picks the winner. The query below can use either `city_1` or `joined_1_fines_1`:
 
 export const plannerDiagram = `flowchart LR
   Q["Incoming query"] --> P["Query planner"]
   P --> C1["Candidate plan: index A"]
   P --> C2["Candidate plan: index B"]
   P --> C3["Candidate plan: collection scan"]
-  C1 --> T["Trial run — measure work"]
+  C1 --> T["Trial run - measure work"]
   C2 --> T
   C3 --> T
   T --> W["Winning plan"]
@@ -127,117 +168,215 @@ export const plannerDiagram = `flowchart LR
 
 <Mermaid code={plannerDiagram} title="The planner trials each candidate, picks the cheapest, and caches the winner for matching queries" />
 
-This is why `explain` reports a `winningPlan` and sometimes a list of `rejectedPlans`: you are seeing the outcome of that contest.
+```js
+// mongosh/exp-planner.js
+db.members.createIndex({ city: 1 });
+db.members.createIndex({ joined: 1, fines: 1 });
+const q = { city: "Berlin", joined: 2023 };                       // both indexes can help
+const all = db.members.find(q).explain("allPlansExecution");
+const wp = all.queryPlanner.winningPlan;
+console.log("winner  :", wp.inputStage.indexName, "| rejected:", all.queryPlanner.rejectedPlans.map((p) => p.inputStage.indexName));
+console.log("trial run (each candidate gets a capped number of works):");
+console.log(all.executionStats.allPlansExecution.map((p) => {
+  let s = p.executionStages; while (s.inputStage) s = s.inputStage;
+  return { index: s.indexName, nReturned: p.nReturned, keys: p.totalKeysExamined, score: +p.score.toFixed(4) };
+}));
+console.log("full run:", plan(db.members.find(q)));
+console.log("forced city_1:", plan(db.members.find(q).hint("city_1")));
+```
+
+```text
+winner  : joined_1_fines_1 | rejected: [ 'city_1' ]
+trial run (each candidate gets a capped number of works):
+[
+  {
+    index: 'joined_1_fines_1',
+    nReturned: 101,
+    keys: 1003,
+    score: 1.1009
+  },
+  { index: 'city_1', nReturned: 38, keys: 1003, score: 1.0381 }
+]
+full run: FETCH > IXSCAN(joined_1_fines_1)  returned=769 keys=7690 docs=7690 8ms
+forced city_1: FETCH > IXSCAN(city_1)  returned=769 keys=20000 docs=20000 15ms
+```
+
+`rejectedPlans` lists the losers. In the trial each candidate got about 1 003 works: the winner produced 101 results in that budget, the loser 38, hence the scores. The trial is a heuristic - the full runs confirm it here (7 690 keys versus 20 000), but the planner can be wrong when data is skewed, which is why `hint()` and re-checking after data changes exist.
+
+### The plan cache
+
+The winner is cached per query shape so later runs skip the contest. `$planCacheStats` lists the cache; `explain` alone does not create entries, real executions do:
+
+```js
+// mongosh/exp-cache.js
+const q = { city: "Berlin", joined: 2023 };
+console.log("before any real execution:", db.members.aggregate([{ $planCacheStats: {} }]).toArray().length, "entries");
+for (let i = 0; i < 3; i++) db.members.find(q).toArray();          // explain() does not populate the cache; real runs do
+const entry = db.members.aggregate([{ $planCacheStats: {} }]).toArray()[0];
+console.log({ isActive: entry.isActive, works: Number(entry.works), cachedPlanStage: entry.cachedPlan.stage, createdFromQuery: entry.createdFromQuery });
+console.log("explain now says isCached:", db.members.find(q).explain().queryPlanner.winningPlan.isCached);
+db.members.getPlanCache().clear();
+console.log("after getPlanCache().clear():", db.members.aggregate([{ $planCacheStats: {} }]).toArray().length, "entries");
+```
+
+```text
+before any real execution: 0 entries
+{
+  isActive: true,
+  works: 1003,
+  cachedPlanStage: 'FETCH',
+  createdFromQuery: { query: { city: 'Berlin', joined: 2023 }, sort: {}, projection: {} }
+}
+explain now says isCached: true
+after getPlanCache().clear(): 0 entries
+```
 
 ## Covered queries
 
-There is one tier better than a fast `IXSCAN` plus `FETCH`: a query the index can answer **without fetching any documents at all**. This happens when every field the query needs — both the filter fields and the fields you ask back in the projection — lives in the index. The server reads the answer straight from the index keys and skips the documents entirely. Such a query is **covered**, and its plan has no `FETCH` stage.
+There is a tier better than `IXSCAN` plus `FETCH`: a query the index can answer **without fetching any document**. MongoDB defines it as "a query that can be satisfied entirely using an index and doesn't have to examine any documents": every filtered field and every returned field is in one index ([query optimization](https://www.mongodb.com/docs/manual/core/query-optimization/), consulted 2026-09-30). The plan has no `FETCH` and `docs=0`. `_id` is returned by default, so it usually must be suppressed:
 
-Build an index on `{ city: 1, joined: 1 }`, then ask only for `joined` while suppressing `_id` (because `_id` is not in this index):
-
-<Tabs syncKey="lang">
-  <TabItem label="mongosh">
-    ```js
-    db.members
-      .find({ city: "Berlin" }, { joined: 1, _id: 0 })
-      .explain("executionStats")
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await db.collection("members")
-      .find({ city: "Berlin" }, { projection: { joined: 1, _id: 0 } })
-      .explain("executionStats");
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    db.members.find(
-        {"city": "Berlin"},
-        {"joined": 1, "_id": 0},
-    ).explain()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    cmd := bson.D{
-        {Key: "explain", Value: bson.D{
-            {Key: "find", Value: "members"},
-            {Key: "filter", Value: bson.D{{Key: "city", Value: "Berlin"}}},
-            {Key: "projection", Value: bson.D{{Key: "joined", Value: 1}, {Key: "_id", Value: 0}}},
-        }},
-        {Key: "verbosity", Value: "executionStats"},
-    }
-    if err := db.RunCommand(ctx, cmd).Decode(&result); err != nil {
-        return err
-    }
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let explain = db
-        .run_command(doc! {
-            "explain": {
-                "find": "members",
-                "filter": { "city": "Berlin" },
-                "projection": { "joined": 1, "_id": 0 },
-            },
-            "verbosity": "executionStats",
-        })
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-The plan goes straight from `IXSCAN` to the results with no `FETCH` in between, and `totalDocsExamined` is `0` — the giveaway that no document was ever read:
-
-```json
-{
-  "queryPlanner": {
-    "winningPlan": {
-      "stage": "PROJECTION_COVERED",
-      "inputStage": { "stage": "IXSCAN", "indexName": "city_1_joined_1" }
-    }
-  },
-  "executionStats": {
-    "nReturned": 3,
-    "totalKeysExamined": 3,
-    "totalDocsExamined": 0
-  }
-}
+```js
+// mongosh/exp-covered.js
+db.members.createIndex({ city: 1, joined: 1 });
+console.log("needs name  :", plan(db.members.find({ city: "Berlin" }, { name: 1, _id: 0 })));
+console.log("covered     :", plan(db.members.find({ city: "Berlin" }, { joined: 1, _id: 0 })));
+console.log("forgot _id  :", plan(db.members.find({ city: "Berlin" }, { joined: 1 })));
+assert.match(plan(db.members.find({ city: "Berlin" }, { joined: 1, _id: 0 })), /PROJECTION_COVERED/);
 ```
 
-**In Compass:** the **Explain Plan** tab renders this as a visual tree of stages with the same counts, so you can confirm an `IXSCAN`, spot a stray `COLLSCAN`, and see `Documents Examined` versus `Documents Returned` without reading raw output.
+```text
+needs name  : PROJECTION_SIMPLE > FETCH > IXSCAN(city_1)  returned=20000 keys=20000 docs=20000 18ms
+covered     : PROJECTION_COVERED > IXSCAN(city_1_joined_1)  returned=20000 keys=20000 docs=0 10ms
+forgot _id  : PROJECTION_SIMPLE > FETCH > IXSCAN(city_1)  returned=20000 keys=20000 docs=20000 17ms
+```
+
+The first and third lines show the two common leaks: asking for a field the index does not hold (`name`) and forgetting `_id: 0` - both add `FETCH` and read 20 000 documents. Note also that with `_id` unsuppressed the planner did not even choose the compound index.
+
+**In Compass:** the **Explain Plan** tab renders this as a visual tree of stages with the same counts, so you can confirm an `IXSCAN`, spot a stray `COLLSCAN` and compare **Documents Examined** with **Documents Returned**.
+
+## Aggregation plans and the slot-based engine
+
+Not every explain looks like the `FETCH > IXSCAN` chain above. Some pipelines (here a `$group`) run on the slot-based execution engine and report `explainVersion: 2` with a `queryPlan` (the logical stages) and a `slotBasedPlan` (the executable program). The setting behind it on this server is `internalQueryFrameworkControl: "trySbeRestricted"`, visible in `serverParameters`:
+
+```js
+// mongosh/exp-sbe.js
+const f = db.members.find({ city: "Berlin" }).explain();
+const a = db.members.explain().aggregate([{ $group: { _id: "$city", n: { $sum: 1 } } }]);
+console.log("find      explainVersion", f.explainVersion, "| winningPlan keys:", Object.keys(f.queryPlanner.winningPlan).join(", "));
+console.log("aggregate explainVersion", a.explainVersion, "| winningPlan keys:", Object.keys(a.queryPlanner.winningPlan).join(", "));
+console.log("queryPlan  :", a.queryPlanner.winningPlan.queryPlan.stage, ">", a.queryPlanner.winningPlan.queryPlan.inputStage.stage);
+console.log("slotBasedPlan.stages:\n" + a.queryPlanner.winningPlan.slotBasedPlan.stages.replace(/@"[0-9a-f-]+"/, '@"<collection uuid>"'));
+```
+
+```text
+find      explainVersion 1 | winningPlan keys: isCached, stage, nss, inputStage
+aggregate explainVersion 2 | winningPlan keys: isCached, queryPlan, slotBasedPlan
+queryPlan  : GROUP > COLLSCAN
+slotBasedPlan.stages:
+[3] project [s7 = newBsonObj("_id", s6, "n", s4)] 
+[3] group [s6] [s4 = _internalCount::accumulate(s4, 1)] spillSlots[s5] mergingExprs[_internalCount::merge(s5)] 
+[3] project [s6 = (s3 ?: null)] 
+[1] scan generic [s1 = record, s2 = recordId] [s3 = city] @"<collection uuid>" 
+```
+
+Read `queryPlan` (`GROUP > COLLSCAN`) the way you read a classic plan; `slotBasedPlan` is for engineers debugging the engine. Which engine a query gets can differ between versions, so read the shape rather than assuming it.
+
+## Explain on a write is a dry run
+
+```js
+// mongosh/exp-update.js
+const total = () => db.members.aggregate([{ $group: { _id: null, f: { $sum: "$fines" } } }]).toArray()[0].f;
+const before = total();
+const e = db.runCommand({
+  explain: { update: "members", updates: [{ q: { city: "Berlin" }, u: { $inc: { fines: 1 } }, multi: true }] },
+  verbosity: "executionStats",
+});
+const st = e.executionStats.executionStages;
+console.log({ topStage: st.stage, nWouldModify: st.nWouldModify, nMatched: st.nMatched, inputStage: st.inputStage.stage });
+console.log("sum of fines before:", before, "after explain:", total());
+assert.strictEqual(before, total());
+```
+
+```text
+{
+  topStage: 'UPDATE',
+  nWouldModify: 20000,
+  nMatched: 20000,
+  inputStage: 'FETCH'
+}
+sum of fines before: 599994 after explain: 599994
+```
+
+`explain` on an `update` plans it and (in `executionStats`) reports `nWouldModify` without applying anything, so you can check a bulk change's scope first.
 
 ## Tips and gotchas
 
-- The headline ratio is `totalDocsExamined` against `nReturned`. When it is close to one to one your index is doing its job; when it balloons, something is scanning.
-- `executionStats` actually runs the query to measure it, so on a write or an expensive read be deliberate about when you call it.
-- A covered query needs `_id` handled. Since `_id` is returned by default and is rarely in your custom index, you usually suppress it in the projection to keep the query covered.
-- A `FETCH` stage is not a failure — it just means the index found the documents but the projection needed fields the index did not hold. Covered queries are an optimization, not a requirement.
+- The headline ratio is `docs` against `returned`. Near 1:1 the index is doing its job; a balloon means something scans or filters late.
+- `executionStats` executes the query (reads only for `find`), so on an expensive read be deliberate; `queryPlanner` never runs it.
+- A covered query needs `_id: 0` (unless `_id` is in the index) and only indexed fields.
+- A `FETCH` is not a failure - it just means the projection needed fields the index lacks.
 
 <Callout title="Trust the plan, not your hunch">
-Run explain("executionStats") and compare totalDocsExamined with nReturned. A COLLSCAN or a large gap between the two is the proof you need a better index — and a totalDocsExamined of zero is the proof your query is covered.
+Run `explain("executionStats")` and compare `totalDocsExamined` with `nReturned`. A COLLSCAN or a large gap between the two is the proof you need a better index - and `totalDocsExamined: 0` is the proof your query is covered.
 </Callout>
+
+## Reading AI-generated code
+
+Asked to "add a guard that fails CI when a query is not indexed", an assistant writes the check most people would:
+
+<SpotTheBug lang="js" code={`// AI comment: "fail the build if the winning plan has no index scan"
+const plan = await members.find({ city: "Berlin", name: "m1000" }).explain();
+if (!JSON.stringify(plan.queryPlanner.winningPlan).includes("IXSCAN")) throw new Error("query is not indexed");`}>
+
+"Uses an index" and "is efficient" are different claims. With only `{ city: 1 }` indexed, this query passes the check but examines 20 000 documents to return one, because the index narrows by city only. The check must look at `executionStats` and compare work to results (a ratio guard here), and the real fix is an index that matches the whole filter:
+
+```js
+// mongosh/exp-bug.js
+db.members.dropIndexes();                                            // only _id_ ...
+db.members.createIndex({ city: 1 });                                 // ... and the "indexed" city field
+const looksIndexed = (cur) => JSON.stringify(cur.explain("queryPlanner").queryPlanner.winningPlan).includes("IXSCAN");   // the AI check
+const efficient = (cur) => { const s = cur.explain("executionStats").executionStats; return s.totalDocsExamined <= 10 * Math.max(1, s.nReturned); };
+const q = { city: "Berlin", name: "m1000" };                          // one match in 20 000 Berlin members
+console.log("AI check says indexed:", looksIndexed(db.members.find(q)), "|", plan(db.members.find(q)));
+console.log("ratio check says efficient:", efficient(db.members.find(q)));
+db.members.createIndex({ city: 1, name: 1 });
+console.log("after { city, name }  :", efficient(db.members.find(q)), "|", plan(db.members.find(q)));
+```
+
+```text
+AI check says indexed: true | FETCH > IXSCAN(city_1)  returned=1 keys=20000 docs=20000 16ms
+ratio check says efficient: false
+after { city, name }  : true | FETCH > IXSCAN(city_1_name_1)  returned=1 keys=1 docs=1 0ms
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`explain` is the query planner's receipt. `queryPlanner` is the quote (what it intends to do), `executionStats` is the invoice (what it actually did), and `allPlansExecution` also shows the quotes it rejected. The cheapest plan is the one whose `keys` and `docs` stay close to `returned`.
 
 ## Trade-offs
 
 | Choice | Benefit | Cost |
 |---------|---------|------|
-| Read `explain()` before adding/dropping an index | See real evidence of how much a query scans and which index it uses; precise decisions | Requires running the real query and reading the output — extra time before acting |
-| Guess which index helps and create it | Fast, no analysis needed | Often wrong — you end up with an index the query never uses, still paying its write cost with no benefit |
+| `explain("queryPlanner")` | Instant, never runs the query | No counts - cannot show a 20 000-document waste |
+| `explain("executionStats")` | Real keys and documents examined | Executes the query; adds load on a big read |
+| `allPlansExecution` | Shows why a plan won or lost | Runs every candidate's trial; noisy output |
+| Covered query | `docs=0`: no document reads | Index must hold every filtered and returned field |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Creating an index and never checking whether the query actually uses it** — an index existing does not mean the planner picks it. Run `explain()` to confirm the `winningPlan` is really an `IXSCAN` on that index.
-- **Looking only at `nReturned` without checking `totalDocsExamined`** — a query returning few results but with a very high `totalDocsExamined` is still an inefficient query, even if the result looks correct and fast enough by eye.
-- **Running `explain("executionStats")` carelessly against production** — this mode actually runs the query, not just estimates a plan. For a write-heavy or expensive read query, running it repeatedly against production adds real load to the server.
+- **"IXSCAN in the plan means the query is fast."** - it examined 20 000 documents for 1 result through `city_1`.
+- **"`explain()` runs the query."** - only `executionStats`/`allPlansExecution` do; the default plans only.
+- **"A cached plan appears after explain."** - `$planCacheStats` was empty after explains and filled after real runs.
+- **"explain on an update changes data."** - `nWouldModify: 20000`, sum of fines unchanged.
+- **"Every explain has a `winningPlan.inputStage` chain."** - aggregation may report `queryPlan` and `slotBasedPlan`.
 
-> 💡 Real-world example
+> Real-world example
 >
-> **A platform team that sets a slow-query threshold in MongoDB Atlas** — every query slower than the threshold gets logged with a plan summary, and engineers re-run `explain("executionStats")` to confirm before deciding to add an index, instead of guessing from a dashboard alone.
->
-> **A backend team debugging an API endpoint that keeps slowing down as data grows** — used `explain()` to discover a query that used to be covered had gained a `FETCH` stage after a small projection change, then fixed the index to cover the fields the new query needed.
+> MongoDB's own documentation tells you how to check the property this lesson measured: "To determine whether a query is a covered query, use the `db.collection.explain()` or the `explain()` method" ([query optimization](https://www.mongodb.com/docs/manual/core/query-optimization/), consulted 2026-09-30). Atlas surfaces slow queries the same way in the Performance Advisor, and you confirm each suggestion with `explain` before adding the index.
+
+_Python/Go/Rust tabs mirror the verified shell/Node behaviour; each was run once in a scratch program against the same server (the explain call returned the plan document) but they are not executed by the course's automated checker._
 
 export const quizExplain = [
   {
@@ -249,26 +388,62 @@ export const quizExplain = [
       'The query failed to run',
     ],
     answer: 1,
+    explain: 'find({ name: "m123456" }) with no index: COLLSCAN, docs=200000 to return 1.',
   },
   {
     q: 'Which comparison best signals an inefficient query?',
     options: [
-      'nReturned much smaller than totalDocsExamined',
+      'totalDocsExamined much larger than nReturned',
       'totalKeysExamined equal to nReturned',
       'executionTimeMillis equal to zero',
       'A winningPlan that names an index',
     ],
     answer: 0,
+    explain: 'The city_1 plan for { city, name } used an index (IXSCAN) yet examined 20 000 documents to return 1; only the ratio exposed it.',
   },
   {
     q: 'What makes a query "covered"?',
     options: [
       'It uses any index at all',
-      'Every field it needs, including projected fields, is present in the index, so no document is fetched',
+      'Every field it filters and returns is in one index, so no document is fetched',
       'It returns fewer than ten documents',
       'It runs inside a transaction',
     ],
     answer: 1,
+    explain: 'PROJECTION_COVERED > IXSCAN with docs=0 for { joined: 1, _id: 0 }; without _id: 0 the plan gained a FETCH.',
+  },
+  {
+    q: 'Which explain verbosity shows the losing candidates\' trial numbers?',
+    options: [
+      'queryPlanner',
+      'executionStats',
+      'allPlansExecution',
+      'None of them',
+    ],
+    answer: 2,
+    explain: 'Only allPlansExecution adds executionStats.allPlansExecution: joined_1_fines_1 (101 returned, score 1.1009) beat city_1 (38, 1.0381).',
+  },
+  {
+    q: 'Does running explain("executionStats") on an updateMany change data?',
+    options: [
+      'Yes, it applies the update',
+      'No, it is a dry run; nWouldModify reports what would change',
+      'Only on a replica set',
+      'Only when the update has no filter',
+    ],
+    answer: 1,
+    explain: 'nWouldModify was 20000 and the sum of fines stayed at 599994.',
+  },
+  {
+    q: 'When does explain show winningPlan.isCached: true?',
+    options: [
+      'Always',
+      'After real executions created a plan cache entry for that query shape (explain alone does not)',
+      'Only for COLLSCAN',
+      'Only with allPlansExecution',
+    ],
+    answer: 1,
+    explain: '$planCacheStats had 0 entries after several explains, 1 active entry after three real finds, and isCached flipped to true.',
   },
 ]
 
